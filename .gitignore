@@ -1,18 +1,6 @@
-# 凭据与本地数据（绝不入库）
 config/secrets.toml
 data/
-*.db
-*.db-wal
-*.db-shm
-
-# Python
-__pycache__/
 *.pyc
+__pycache__/
 .venv/
-venv/
-.pytest_cache/
-.ruff_cache/
-
-# 系统
-.DS_Store
-Thumbs.db
+.uv/

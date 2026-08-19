@@ -1,0 +1,17 @@
+[app]
+port = 8080
+language = "zh-CN"
+
+[data]
+dir = "data"
+
+# 运行参数首启动时种子写入 app_settings 表，之后以表（设置页）为准。
+[defaults]
+cooldown_days = 7
+grace_period_hours = 2
+reply_ttl_hours = 48
+billing_mode = "payg"
+monthly_budget_usd = 60
+monitor_interval_minutes = 50
+search_runs_per_day = 2
+match_confidence_threshold = 0.7

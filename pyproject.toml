@@ -1,0 +1,24 @@
+[project]
+name = "x-operator"
+version = "0.1.0-mvp"
+description = "通用型 X（推特）半自动化运营工具 —— WebUI MVP"
+requires-python = ">=3.11"
+dependencies = [
+    "nicegui>=2.0",
+    "apscheduler>=3.10",
+    "httpx>=0.27",
+]
+
+# 真实 X 适配器所需（MVP 用 Mock，暂不强制安装；接真实凭据时取消注释并 uv sync）
+[project.optional-dependencies]
+x = [
+    "tweepy>=4.14,<5",
+    "twifork>=2.3.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["x_operator"]
