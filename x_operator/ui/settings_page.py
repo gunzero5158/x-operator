@@ -1,6 +1,8 @@
 """设置（design-v1.1 §8.7）：运行模式、LLM、合规参数、预算、账号、黑名单。"""
 from __future__ import annotations
 
+import sqlite3
+
 from nicegui import ui
 
 from .. import config
@@ -83,15 +85,21 @@ def _llm_panel():
         ui.notify("已保存", type="positive")
 
     def test():
+        client = LLMClient()
+        if not client.configured:
+            ui.notify("未配置网关：当前走启发式兜底（关键词规则打分/匹配，离线可测）。"
+                      "填入 base_url + api_key 并保存后再测，即可切真实 LLM。", type="warning")
+            return
         try:
-            LLMClient().ping()
-            ui.notify("连接成功", type="positive")
+            client.ping()
+            ui.notify("连接成功 ✅ 打分/匹配将走真实 LLM", type="positive")
         except Exception as e:
             ui.notify(f"连接失败：{e}", type="negative")
 
     with ui.row():
         ui.button("保存", on_click=save).props("color=primary")
         ui.button("测试连接", on_click=test).props("outline")
+    ui.label("提示：先「保存」再「测试连接」，测试用的是已保存的配置。").classes("text-xs text-gray-400")
 
 
 def _numeric_panel(fields):
@@ -107,30 +115,148 @@ def _numeric_panel(fields):
 
 
 def _accounts_panel():
+    ui.label("发帖 / 回复账号管理").classes("font-semibold")
+    ui.label("Mock 演示模式下也需要至少一个账号来承载发送；接真实凭据时把「凭据引用名」指向 "
+             "secrets.toml 里的键。主号只能用官方通道（封号风险约束）。").classes("text-xs text-gray-400")
     body = ui.column().classes("w-full gap-2")
+
+    def save_account(data: dict, existing_id: int | None = None) -> bool:
+        handle = data["handle"].lstrip("@").strip()
+        if not handle:
+            ui.notify("请填写 handle", type="negative"); return False
+        if data["is_primary"] and data["access_type"] == "unofficial":
+            ui.notify("主号不能使用非官方（twifork）通道——封号风险过高", type="negative"); return False
+        if data["max_interval_sec"] < data["min_interval_sec"]:
+            ui.notify("最大间隔需 ≥ 最小间隔", type="negative"); return False
+        try:
+            with get_conn() as conn:
+                if data["is_primary"]:  # 主号唯一：先清空其他主号
+                    conn.execute("UPDATE accounts SET is_primary=0")
+                if existing_id:
+                    conn.execute(
+                        "UPDATE accounts SET handle=?, display_name=?, access_type=?, is_primary=?, "
+                        "credential_ref=?, daily_post_limit=?, daily_reply_limit=?, "
+                        "min_interval_sec=?, max_interval_sec=? WHERE id=?",
+                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0,
+                         data["credential_ref"], data["daily_post_limit"], data["daily_reply_limit"],
+                         data["min_interval_sec"], data["max_interval_sec"], existing_id))
+                else:
+                    conn.execute(
+                        "INSERT INTO accounts(handle, display_name, access_type, is_primary, credential_ref, "
+                        "daily_post_limit, daily_reply_limit, min_interval_sec, max_interval_sec, created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0,
+                         data["credential_ref"], data["daily_post_limit"], data["daily_reply_limit"],
+                         data["min_interval_sec"], data["max_interval_sec"], utcnow_iso()))
+                conn.commit()
+        except sqlite3.IntegrityError as e:
+            ui.notify(f"保存失败：handle 可能重复或违反约束（{e}）", type="negative"); return False
+        factory.invalidate()
+        ui.notify("已保存", type="positive")
+        return True
+
+    def open_dialog(existing: sqlite3.Row | None = None):
+        with ui.dialog() as dlg, ui.card().classes("w-96"):
+            ui.label("编辑账号" if existing else "添加账号").classes("text-lg font-bold")
+            handle = ui.input("handle（不含 @）", value=existing["handle"] if existing else "") \
+                .classes("w-full").props("outlined dense")
+            dname = ui.input("显示名", value=existing["display_name"] if existing else "") \
+                .classes("w-full").props("outlined dense")
+            atype = ui.select({"official": "官方 API（可作主号）", "unofficial": "非官方 twifork（仅小号）"},
+                              value=existing["access_type"] if existing else "official", label="通道类型") \
+                .classes("w-full").props("outlined dense")
+            primary = ui.switch("设为主号", value=bool(existing["is_primary"]) if existing else False)
+            cref = ui.input("凭据引用名（secrets.toml 的键；Mock 模式可留空）",
+                            value=existing["credential_ref"] if existing else "") \
+                .classes("w-full").props("outlined dense")
+            with ui.row().classes("w-full gap-2 no-wrap"):
+                post_lim = ui.number("日发帖上限", value=existing["daily_post_limit"] if existing else 10, min=0) \
+                    .props("outlined dense").classes("flex-1")
+                reply_lim = ui.number("日回复上限", value=existing["daily_reply_limit"] if existing else 15, min=0) \
+                    .props("outlined dense").classes("flex-1")
+            with ui.row().classes("w-full gap-2 no-wrap"):
+                mn = ui.number("最小间隔(秒)", value=existing["min_interval_sec"] if existing else 180, min=0) \
+                    .props("outlined dense").classes("flex-1")
+                mx = ui.number("最大间隔(秒)", value=existing["max_interval_sec"] if existing else 600, min=0) \
+                    .props("outlined dense").classes("flex-1")
+
+            def do_save():
+                ok = save_account({
+                    "handle": handle.value or "",
+                    "display_name": dname.value or "",
+                    "access_type": atype.value,
+                    "is_primary": bool(primary.value),
+                    "credential_ref": cref.value or "",
+                    "daily_post_limit": int(post_lim.value or 0),
+                    "daily_reply_limit": int(reply_lim.value or 0),
+                    "min_interval_sec": int(mn.value or 0),
+                    "max_interval_sec": int(mx.value or 0),
+                }, existing["id"] if existing else None)
+                if ok:
+                    dlg.close(); render()
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("取消", on_click=dlg.close).props("flat")
+                ui.button("保存", on_click=do_save).props("color=primary")
+        dlg.open()
+
+    def set_primary(aid: int):
+        with get_conn() as conn:
+            row = conn.execute("SELECT access_type FROM accounts WHERE id=?", (aid,)).fetchone()
+            if row is None:
+                return
+            if row["access_type"] == "unofficial":
+                ui.notify("非官方账号不能设为主号", type="negative"); return
+            conn.execute("UPDATE accounts SET is_primary=0")
+            conn.execute("UPDATE accounts SET is_primary=1 WHERE id=?", (aid,))
+            conn.commit()
+        factory.invalidate()
+        ui.notify("已设为主号", type="positive"); render()
+
+    def del_account(aid: int):
+        try:
+            with get_conn() as conn:
+                conn.execute("DELETE FROM accounts WHERE id=?", (aid,))
+                conn.commit()
+            factory.invalidate(aid)
+            ui.notify("已删除", type="positive")
+        except sqlite3.IntegrityError:
+            ui.notify("该账号已有关联记录（发送/队列/定时），无法删除；请改为「暂停」", type="negative")
+        render()
 
     def render():
         body.clear()
         with get_conn() as conn:
-            rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+            rows = conn.execute("SELECT * FROM accounts ORDER BY is_primary DESC, id").fetchall()
         with body:
+            with ui.row().classes("items-center justify-between w-full"):
+                ui.label(f"共 {len(rows)} 个账号").classes("text-sm text-gray-400")
+                ui.button("添加账号", icon="add", on_click=lambda: open_dialog()).props("color=primary")
+            if not rows:
+                ui.label("暂无账号，点右上「添加账号」新建一个。").classes("text-gray-400")
             for a in rows:
                 with ui.card().classes("w-full"):
                     with ui.row().classes("items-center gap-2"):
                         ui.label(f"@{a['handle']}").classes("font-semibold")
-                        ui.badge(a["access_type"]).classes("bg-slate-500")
+                        if a["display_name"]:
+                            ui.label(a["display_name"]).classes("text-xs text-gray-400")
+                        ui.badge("官方" if a["access_type"] == "official" else "非官方").classes("bg-slate-500")
                         if a["is_primary"]:
                             ui.badge("主号 ★").classes("bg-amber-500")
                         ui.badge(a["status"]).classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
                     ui.label(f"日发帖 {a['daily_post_limit']} / 日回复 {a['daily_reply_limit']} · "
                              f"间隔 {a['min_interval_sec']}-{a['max_interval_sec']}s · "
                              f"活跃 {a['active_hours_start']}-{a['active_hours_end']} {a['timezone']}").classes("text-xs text-gray-400")
-                    with ui.row().classes("gap-2"):
-                        ui.button("测试连接", on_click=lambda aa=a: _test_conn(aa)).props("flat")
+                    with ui.row().classes("gap-1 flex-wrap"):
+                        ui.button("测试连接", on_click=lambda aa=a: _test_conn(aa)).props("flat dense")
+                        ui.button("编辑", on_click=lambda aa=a: open_dialog(aa)).props("flat dense")
+                        if not a["is_primary"] and a["access_type"] == "official":
+                            ui.button("设为主号", on_click=lambda aid=a["id"]: set_primary(aid)).props("flat dense")
                         if a["status"] == "active":
-                            ui.button("暂停", on_click=lambda aa=a: (_set_acc_status(aa["id"], "paused"), render())).props("flat")
+                            ui.button("暂停", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "paused"), render())).props("flat dense")
                         else:
-                            ui.button("启用", on_click=lambda aa=a: (_set_acc_status(aa["id"], "active"), render())).props("flat")
+                            ui.button("启用", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "active"), render())).props("flat dense")
+                        ui.button("删除", on_click=lambda aid=a["id"]: del_account(aid)).props("flat dense color=negative")
     render()
 
 
