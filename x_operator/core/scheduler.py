@@ -47,8 +47,9 @@ class Jobs:
                 (utcnow_iso(),)).fetchall()
         for sp in due:
             with get_conn() as conn:
-                mat = conn.execute("SELECT * FROM materials WHERE id=?", (sp["material_id"],)).fetchone()
-                if mat is None:
+                mat = conn.execute("SELECT * FROM materials WHERE id=? AND deleted_at IS NULL",
+                                   (sp["material_id"],)).fetchone()
+                if mat is None:  # 素材被删/进回收站 → 计划暂停，不发空内容
                     conn.execute("UPDATE scheduled_posts SET status='paused' WHERE id=?", (sp["id"],))
                     conn.commit()
                     continue

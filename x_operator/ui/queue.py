@@ -1,10 +1,15 @@
-"""审核队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、批准/跳过/拉黑。"""
+"""审核队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、批准/跳过/拉黑/删除。
+
+自动刷新只在「条目集合变了」时才重绘，避免把用户正在编辑的文案冲掉。
+"""
 from __future__ import annotations
 
 from nicegui import ui
 
+from .. import config
 from ..db.database import get_conn, utcnow_iso
-from .layout import shell
+from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, run_job, shell,
+                     tweet_link)
 
 
 def _load(status: str):
@@ -18,12 +23,20 @@ def _load(status: str):
     return items
 
 
+def _counts() -> dict[str, int]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue GROUP BY status").fetchall()
+    return {r["status"]: r["c"] for r in rows}
+
+
 def _approve(item_id: int, text: str, refresh):
+    if not (text or "").strip():
+        ui.notify("文案不能为空", type="negative"); return
     with get_conn() as conn:
         conn.execute("UPDATE review_queue SET final_text=?, status='approved', decided_at=? WHERE id=? AND status='pending'",
-                     (text, utcnow_iso(), item_id))
+                     (text.strip(), utcnow_iso(), item_id))
         conn.commit()
-    ui.notify("已批准，等待分发发送", type="positive")
+    ui.notify("已批准，等待分发发送（可点右上「触发发送」立即尝试）", type="positive")
     refresh()
 
 
@@ -49,33 +62,102 @@ def _skip_blacklist(item_id: int, author_id: str, author_handle: str, refresh):
     refresh()
 
 
+def _revert_to_pending(item_id: int, refresh):
+    """待发送 → 撤回到待审核（还没发出去时反悔用）。"""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE review_queue SET status='pending', decided_at=NULL WHERE id=? AND status='approved'",
+                           (item_id,))
+        conn.commit()
+    ui.notify("已撤回到待审核" if cur.rowcount else "该条目已开始发送，无法撤回", type="info" if cur.rowcount else "warning")
+    refresh()
+
+
+def _delete(item_id: int) -> None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT target_tweet_id, status FROM review_queue WHERE id=?", (item_id,)).fetchone()
+        conn.execute("DELETE FROM review_queue WHERE id=?", (item_id,))
+        # 没发出去的回复被删掉后，把抓取记录放回「未匹配」，之后可在抓取记录页重新匹配
+        if row and row["target_tweet_id"] and row["status"] not in ("sent",):
+            conn.execute("UPDATE target_tweets SET process_status='no_match', "
+                         "llm_relevance_reason='审核队列条目已被手动删除' WHERE id=? AND process_status='queued'",
+                         (row["target_tweet_id"],))
+        conn.commit()
+
+
+def _delete_all(status: str) -> int:
+    with get_conn() as conn:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM review_queue WHERE status=?", (status,)).fetchall()]
+    for i in ids:
+        _delete(i)
+    return len(ids)
+
+
 def register(jobs) -> None:
     @ui.page("/queue")
     def queue_page():
         with shell("/queue"):
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("审核队列").classes("text-2xl font-bold")
-                status_sel = ui.select(
-                    {"pending": "待审核", "approved": "待发送", "sent": "已发送",
-                     "skipped": "已跳过", "failed": "失败", "expired": "已过期"},
-                    value="pending").props("dense outlined")
-                ui.button("触发发送（Mock）", on_click=lambda: (_dispatch(jobs), render())).props("outline")
+                with ui.row().classes("items-center gap-2"):
+                    status_sel = ui.select(_status_options(), value="pending").props("dense outlined")
+                    clear_btn = ui.button("清空此状态", icon="delete_sweep").props("outline color=negative dense")
+                    dry = config.get_bool("dry_run", True)
+                    ui.button("触发发送" + ("（Mock）" if dry else ""), icon="send",
+                              on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
 
+            ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）。"
+                     ).classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-3")
+            state = {"sig": None}
 
-            def render():
-                body.clear()
+            def signature(items) -> tuple:
+                return tuple((it["id"], it["status"]) for it in items)
+
+            def render(force: bool = True):
                 items = _load(status_sel.value)
+                sig = signature(items)
+                if not force and sig == state["sig"]:
+                    return  # 集合没变：不重绘，保护用户正在编辑的文案
+                state["sig"] = sig
+                status_sel.set_options(_status_options(), value=status_sel.value)
+                body.clear()
                 with body:
                     if not items:
                         ui.label("此状态下暂无条目 🎉").classes("text-gray-400")
                         return
                     for it in items:
-                        _card(it, render)
+                        _card(it, render, delete_cb)
+
+            async def delete_cb(it):
+                if it["status"] == "pending" or it["status"] == "approved":
+                    if not await confirm("删除这条待处理的条目？",
+                                         "对应的抓取记录会退回「未匹配」，之后可在抓取记录页重新匹配。"):
+                        return
+                _delete(it["id"])
+                ui.notify("已删除", type="positive")
+                render()
+
+            async def clear_all():
+                st = status_sel.value
+                n = _counts().get(st, 0)
+                if not n:
+                    ui.notify("没有可删除的条目", type="info"); return
+                if await confirm(f"删除全部 {n} 条「{QUEUE_STATUS_LABEL.get(st, st)}」条目？",
+                                 "已发送记录删除后不影响去重账本（不会重复回复同一推文）。", ok_label="全部删除"):
+                    _delete_all(st)
+                    ui.notify(f"已删除 {n} 条", type="positive")
+                    render()
+            clear_btn.on_click(clear_all)
 
             status_sel.on("update:model-value", lambda e: render())
             render()
-            ui.timer(5.0, render)
+            ui.timer(5.0, lambda: render(force=False))
+
+
+def _status_options() -> dict:
+    c = _counts()
+    return {k: f"{v}（{c.get(k, 0)}）" for k, v in QUEUE_STATUS_LABEL.items() if k != "sending"} | \
+        ({"sending": f"发送中（{c['sending']}）"} if c.get("sending") else {})
 
 
 def _weighted_len(text: str) -> int:
@@ -83,32 +165,39 @@ def _weighted_len(text: str) -> int:
     n = 0
     for ch in text:
         n += 2 if ord(ch) > 0x1100 else 1
-    return n // 1  # 近似
+    return n
 
 
-def _card(it, refresh):
+def _card(it, refresh, delete_cb):
     with ui.card().classes("w-full"):
-        with ui.row().classes("items-center gap-2"):
+        with ui.row().classes("items-center gap-2 w-full"):
             ui.badge(f"@{it['acc_handle']}").classes("bg-slate-600")
             ui.badge("回复" if it["action_type"] == "reply" else "发帖").classes("bg-blue-600")
             if it["is_auto_translated"]:
                 ui.badge("自动翻译，请重点检查").classes("bg-yellow-600")
             if "http://" in (it["final_text"] or "") or "https://" in (it["final_text"] or ""):
-                ui.badge("含链接（计费约 $0.20）").classes("bg-gray-500")
+                ui.badge("含链接（官方 API 计费约 $0.20）").classes("bg-gray-500")
+            ui.label(f"#{it['id']} · {fmt_time(it['created_at'])}").classes("text-xs text-gray-400")
+            if it["expires_at"] and it["status"] == "pending":
+                ui.label(f"时效至 {fmt_time(it['expires_at'])}").classes("text-xs text-orange-400")
+            ui.space()
+            ui.button(icon="delete", on_click=lambda: delete_cb(it)).props("flat dense round color=negative").tooltip("删除此条目")
 
         if it["action_type"] == "reply" and it["tgt_text"]:
             with ui.card().classes("bg-slate-50 w-full"):
                 ui.label(f"@{it['author_handle']} 的推文").classes("text-xs text-gray-500")
-                ui.label(it["tgt_text"]).classes("text-sm")
+                ui.label(it["tgt_text"]).classes("text-sm whitespace-pre-wrap")
                 if it["text_zh"]:
                     ui.label("中文：" + it["text_zh"]).classes("text-xs text-gray-500")
+                tweet_link(it["author_handle"], it["tgt_tweet_id"])
 
         if it["llm_reason"]:
             conf = f"（置信度 {it['llm_confidence']:.2f}）" if it["llm_confidence"] is not None else ""
             with ui.expansion(f"AI 理由 {conf}").classes("w-full"):
                 ui.label(it["llm_reason"])
 
-        ta = ui.textarea(value=it["final_text"]).classes("w-full").props("outlined autogrow")
+        editable = it["status"] == "pending"
+        ta = ui.textarea(value=it["final_text"]).classes("w-full").props("outlined autogrow" + ("" if editable else " readonly"))
         wl_label = ui.label("").classes("text-xs")
 
         def update_len():
@@ -118,24 +207,20 @@ def _card(it, refresh):
         ta.on("update:model-value", lambda e: update_len())
         update_len()
 
-        with ui.row().classes("gap-2"):
+        with ui.row().classes("gap-2 items-center"):
             if it["status"] == "pending":
-                ui.button("批准", on_click=lambda: _approve(it["id"], ta.value, refresh)).props("color=primary")
+                ui.button("批准", icon="check", on_click=lambda: _approve(it["id"], ta.value, refresh)).props("color=primary")
                 ui.button("跳过", on_click=lambda: _skip(it["id"], refresh)).props("outline")
                 if it["action_type"] == "reply":
                     ui.button("跳过并拉黑作者",
                               on_click=lambda: _skip_blacklist(it["id"], it["author_id"], it["author_handle"], refresh)
                               ).props("color=negative outline")
+            elif it["status"] == "approved":
+                ui.label("已批准，等待分发器发送").classes("text-sm text-gray-500")
+                ui.button("撤回到待审核", on_click=lambda: _revert_to_pending(it["id"], refresh)).props("flat")
             else:
-                ui.label(f"状态：{it['status']}" + (f" · {it['skip_reason']}" if it["skip_reason"] else "")
+                ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
+                         + (f" · {it['skip_reason']}" if it["skip_reason"] else "")
                          + (f" · 错误：{it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-gray-500")
                 if it["sent_tweet_id"]:
-                    ui.label(f"发送 id：{it['sent_tweet_id']}").classes("text-xs text-gray-400")
-
-
-def _dispatch(jobs):
-    try:
-        n = jobs.dispatcher.tick()
-        ui.notify(f"本轮发送 {n} 条（Mock）", type="positive")
-    except Exception as e:
-        ui.notify(f"发送出错：{e}", type="negative")
+                    ui.label(f"发送 id：{it['sent_tweet_id']} · {fmt_time(it['sent_at'])}").classes("text-xs text-gray-400")

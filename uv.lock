@@ -1976,10 +1976,6 @@ dependencies = [
     { name = "apscheduler" },
     { name = "httpx" },
     { name = "nicegui" },
-]
-
-[package.optional-dependencies]
-x = [
     { name = "tweepy" },
     { name = "twifork" },
 ]
@@ -1989,10 +1985,9 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.10" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "nicegui", specifier = ">=2.0" },
-    { name = "tweepy", marker = "extra == 'x'", specifier = ">=4.14,<5" },
-    { name = "twifork", marker = "extra == 'x'", specifier = ">=2.3.5" },
+    { name = "tweepy", specifier = ">=4.14,<5" },
+    { name = "twifork", specifier = ">=2.3.5" },
 ]
-provides-extras = ["x"]
 
 [[package]]
 name = "yarl"

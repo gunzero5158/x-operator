@@ -6,7 +6,7 @@ dry_run=True：拉取 + 打分后直接返回，不写库、不推进游标、�
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from ..adapters import factory
@@ -14,7 +14,8 @@ from ..adapters.base import TweetData, XClientError
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from .matcher import MatchEngine
-from .monitor import _log_read, get_primary_account, precheck, store_target
+from .monitor import (FILTER_REASONS, _log_read, get_primary_account, precheck,
+                      store_target)
 
 
 @dataclass
@@ -22,12 +23,21 @@ class SearchStats:
     rules_run: int = 0
     tweets_fetched: int = 0
     queued: int = 0
+    no_match: int = 0
     filtered: int = 0
     errors: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.errors == 0 and not (self.rules_run == 0 and self.notes)
 
     def as_msg(self) -> str:
-        return (f"搜索完成：运行 {self.rules_run} 条规则，拉取 {self.tweets_fetched} 条，"
-                f"入队 {self.queued}，过滤/未达标 {self.filtered}，错误 {self.errors}")
+        head = (f"搜索完成：运行 {self.rules_run} 条规则，拉取 {self.tweets_fetched} 条，"
+                f"入队 {self.queued}，未匹配 {self.no_match}，过滤/未达标 {self.filtered}，错误 {self.errors}")
+        if self.notes:
+            head += "。" + "；".join(self.notes[:3])
+        return head
 
 
 class ScoredCandidate(NamedTuple):
@@ -65,9 +75,13 @@ class SearchJob:
         stats = SearchStats()
         account = get_primary_account()
         if account is None:
+            stats.notes.append("没有状态为「启用」的账号，无法搜索。请到「设置 → 账号」添加并启用一个账号")
             return stats
         with get_conn() as conn:
             rules = conn.execute("SELECT * FROM search_rules WHERE enabled=1").fetchall()
+        if not rules:
+            stats.notes.append("没有启用的搜索规则。请到「搜索规则」页新建或启用")
+            return stats
 
         for rule in rules:
             stats.rules_run += 1
@@ -89,7 +103,7 @@ class SearchJob:
                     pre = precheck(t, account["handle"])
                     if pre:
                         store_target(t, "search", rule["id"], process_status="filtered",
-                                     score=cand.score, reason=pre)
+                                     score=cand.score, reason=FILTER_REASONS.get(pre, pre))
                         stats.filtered += 1
                         continue
                     tid = store_target(t, "search", rule["id"], process_status="new",
@@ -102,7 +116,7 @@ class SearchJob:
                     if outcome.status == "queued":
                         stats.queued += 1
                     else:
-                        stats.filtered += 1
+                        stats.no_match += 1
                 # 推进游标
                 if newest_id:
                     with get_conn() as conn:
@@ -111,8 +125,19 @@ class SearchJob:
                         conn.commit()
             except XClientError as e:
                 stats.errors += 1
-                _log_read(account["id"], "x_mock", "search_recent", 0, success=False, error=str(e))
+                stats.notes.append(f"规则「{rule['name']}」：{e}")
+                _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
             except Exception as e:
                 stats.errors += 1
-                _log_read(account["id"], "x_mock", "search_recent", 0, success=False, error=str(e))
+                stats.notes.append(f"规则「{rule['name']}」：{e}")
+                _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
+        if stats.tweets_fetched == 0 and stats.errors == 0 and stats.rules_run:
+            stats.notes.append("自上次游标之后没有新推文（可在规则卡片上「重置游标」）")
         return stats
+
+
+def _kind(account: sqlite3.Row) -> str:
+    from .. import config
+    if config.get_bool("dry_run", True):
+        return "x_mock"
+    return "x_official" if account["access_type"] == "official" else "x_unofficial"

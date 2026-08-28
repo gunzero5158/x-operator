@@ -1,10 +1,11 @@
 """数据库 DDL（SQLite 方言），与 docs/design-v1.1.md §4 一一对应。
 
-MVP 说明：本文件即 schema 版本 1 的建表 SQL。为减少依赖、便于测试期快速改表，
+MVP 说明：本文件即当前 schema 版本的建表 SQL（旧库由 database._migrate 增量补列）。
+v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at（素材回收站软删除）。为减少依赖、便于测试期快速改表，
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = r"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     access_type         TEXT    NOT NULL CHECK (access_type IN ('official','unofficial')),
     is_primary          INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0,1)),
     credential_ref      TEXT    NOT NULL DEFAULT '',
+    credentials         TEXT    NOT NULL DEFAULT '{}',
     daily_post_limit    INTEGER NOT NULL DEFAULT 10  CHECK (daily_post_limit  >= 0),
     daily_reply_limit   INTEGER NOT NULL DEFAULT 15  CHECK (daily_reply_limit >= 0),
     min_interval_sec    INTEGER NOT NULL DEFAULT 180 CHECK (min_interval_sec >= 0),
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS materials (
                          CHECK (status IN ('draft','active','archived')),
     usage_count          INTEGER NOT NULL DEFAULT 0,
     last_used_at         TEXT,
+    deleted_at           TEXT,
     created_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 CREATE INDEX IF NOT EXISTS ix_materials_pick  ON materials(kind, status, lang);

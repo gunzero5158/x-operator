@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from ..adapters import factory
@@ -17,45 +18,77 @@ from ..db.database import get_conn, utcnow_iso
 from .compliance import ComplianceGuard
 
 
+@dataclass
+class DispatchReport:
+    sent: int = 0
+    notes: list[str] = field(default_factory=list)   # 每个账号为何没发（中文）
+
+    def as_msg(self, mock: bool = False) -> str:
+        head = f"本轮发送 {self.sent} 条" + ("（Mock 模拟）" if mock else "")
+        if self.notes:
+            head += "。" + "；".join(self.notes[:4])
+        return head
+
+
 class Dispatcher:
     def __init__(self, guard: ComplianceGuard):
         self.guard = guard
 
-    def tick(self) -> int:
-        """返回本轮实际发送条数。"""
-        sent = 0
+    def tick(self) -> DispatchReport:
+        """每个活跃账号最多发 1 条；返回发送数与各账号未发原因。"""
+        report = DispatchReport()
         with get_conn() as conn:
             accounts = conn.execute("SELECT * FROM accounts WHERE status='active'").fetchall()
+            approved_total = conn.execute(
+                "SELECT COUNT(*) AS c FROM review_queue WHERE status='approved'").fetchone()["c"]
+        if not accounts:
+            report.notes.append("没有状态为「启用」的账号")
+            return report
+        if approved_total == 0:
+            report.notes.append("审核队列里没有「待发送」（已批准）的条目")
+            return report
         for account in accounts:
             try:
-                if self._dispatch_account(account):
-                    sent += 1
-            except Exception:
-                continue  # 账号间隔离
-        return sent
+                ok, why = self._dispatch_account(account)
+                if ok:
+                    report.sent += 1
+                elif why:
+                    report.notes.append(f"@{account['handle']}：{why}")
+            except Exception as e:  # 账号间隔离
+                report.notes.append(f"@{account['handle']}：{e}")
+                continue
+        return report
 
-    def _dispatch_account(self, account: sqlite3.Row) -> bool:
+    def _dispatch_account(self, account: sqlite3.Row) -> tuple[bool, str]:
         now = datetime.now(timezone.utc)
+        from ..db.database import parse_iso
+        with get_conn() as conn:
+            waiting = conn.execute(
+                "SELECT COUNT(*) AS c FROM review_queue WHERE status='approved' AND account_id=?",
+                (account["id"],)).fetchone()["c"]
+        if waiting == 0:
+            return False, ""  # 该账号没活儿，不算问题
         # 软预判：活跃时段 / next_allowed_at
         if not self.guard.is_in_active_hours(account, now):
-            return False
-        from ..db.database import parse_iso
+            return False, (f"不在活跃时段（{account['active_hours_start']}-{account['active_hours_end']} "
+                           f"{account['timezone']}），{waiting} 条待发到时段内自动发送")
         na = parse_iso(account["next_allowed_at"])
         if na and now < na:
-            return False
+            secs = int((na - now).total_seconds())
+            return False, f"距上次发送的随机间隔未到，还需约 {secs} 秒（{waiting} 条待发）"
 
         with get_conn() as conn:
             item = conn.execute(
                 "SELECT * FROM review_queue WHERE status='approved' AND account_id=? "
                 "ORDER BY created_at ASC LIMIT 1", (account["id"],)).fetchone()
             if item is None:
-                return False
+                return False, ""
             # 乐观锁
             cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved'",
                                (item["id"],))
             conn.commit()
             if cur.rowcount == 0:
-                return False
+                return False, ""
             item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item["id"],)).fetchone()
 
         # 合规最终校验
@@ -63,14 +96,25 @@ class Dispatcher:
         if not gr.ok:
             if gr.hard:
                 self._set_status(item["id"], "skipped", skip_reason=gr.code.value if gr.code else "guard")
-            else:
-                self._set_status(item["id"], "approved")  # 软违规回置，下轮再试
-            return False
+                return False, f"条目 #{item['id']} 被合规拦截并跳过：{gr.detail}"
+            self._set_status(item["id"], "approved")  # 软违规回置，下轮再试
+            return False, gr.detail
 
-        return self.send_item(account, item)
+        if self.send_item(account, item):
+            return True, ""
+        with get_conn() as conn:
+            row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (item["id"],)).fetchone()
+        if row["status"] == "approved":
+            return False, f"条目 #{item['id']} 未发出、已回置待发：{row['error_msg'] or '稍后重试'}"
+        return False, f"条目 #{item['id']} 发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
 
     def send_item(self, account: sqlite3.Row, item: sqlite3.Row) -> bool:
-        client = factory.get_client(account)
+        try:
+            client = factory.get_client(account)
+        except (XClientError, ValueError) as e:
+            # 凭据缺失/主号误配非官方：回置 approved，等用户补凭据后自动继续
+            self._set_status(item["id"], "approved", error_msg=str(e))
+            return False
         try:
             if item["action_type"] == "reply":
                 with get_conn() as conn:

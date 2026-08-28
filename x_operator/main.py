@@ -14,7 +14,7 @@ from . import config
 from .core.scheduler import Jobs, build_scheduler, run_startup_recovery
 from .db.database import init_db
 from .ui import (dashboard, materials, queue, rules, schedule, settings_page,
-                 watched)
+                 targets, watched)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("x_operator")
@@ -43,7 +43,7 @@ def main() -> None:
         log.info("启动补扫：%s", m)
 
     # 注册所有页面
-    for mod in (dashboard, queue, materials, watched, rules, schedule, settings_page):
+    for mod in (dashboard, queue, targets, materials, watched, rules, schedule, settings_page):
         mod.register(jobs)
 
     scheduler = build_scheduler(jobs)

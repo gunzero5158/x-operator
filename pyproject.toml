@@ -7,11 +7,7 @@ dependencies = [
     "nicegui>=2.0",
     "apscheduler>=3.10",
     "httpx>=0.27",
-]
-
-# 真实 X 适配器所需（MVP 用 Mock，暂不强制安装；接真实凭据时取消注释并 uv sync）
-[project.optional-dependencies]
-x = [
+    # 真实 X 适配器：official=tweepy（X API v2）/ unofficial=twifork（twikit 分支）
     "tweepy>=4.14,<5",
     "twifork>=2.3.5",
 ]

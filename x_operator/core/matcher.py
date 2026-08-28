@@ -31,7 +31,7 @@ class MatchEngine:
     def pick_candidates(self, lang: str, tags: list[str], limit: int = 10) -> list[sqlite3.Row]:
         with get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM materials WHERE kind='reply' AND status='active' AND lang=? "
+                "SELECT * FROM materials WHERE kind='reply' AND status='active' AND deleted_at IS NULL AND lang=? "
                 "ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC",
                 (lang,),
             ).fetchall()
@@ -89,6 +89,28 @@ class MatchEngine:
             conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=?", (target["id"],))
             conn.commit()
         return MatchOutcome("queued", qid, reason)
+
+    def rematch(self, target_id: int) -> MatchOutcome:
+        """「抓取记录」页的手动重新匹配：对 filtered/no_match/expired 的推文再跑一次匹配。"""
+        from .monitor import get_primary_account
+        with get_conn() as conn:
+            target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (target_id,)).fetchone()
+            if target is None:
+                return MatchOutcome("no_match", None, "记录不存在")
+            if target["process_status"] == "queued":
+                return MatchOutcome("no_match", None, "该推文已在审核队列中")
+            dup = conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?",
+                               (target["tweet_id"],)).fetchone()
+            if dup:
+                return MatchOutcome("no_match", None, "该推文已经回复过，不能再匹配")
+            conn.execute("UPDATE target_tweets SET process_status='new', llm_relevance_reason=NULL WHERE id=?",
+                         (target_id,))
+            conn.commit()
+        account = get_primary_account()
+        if account is None:
+            self._mark_no_match(target_id, "没有可用账号")
+            return MatchOutcome("no_match", None, "没有可用账号")
+        return self.run(target, account)
 
     def _mark_no_match(self, target_id: int, reason: str) -> None:
         with get_conn() as conn:

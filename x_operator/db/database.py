@@ -33,10 +33,28 @@ def init_db(db_path: str | Path) -> None:
             fresh = True
         else:
             fresh = False
+            _migrate(conn, int(row["version"]))
         seed.seed_settings(conn)
         if fresh:
             seed.seed_demo_data(conn)
         conn.commit()
+
+
+# (表, 列, 建列 SQL 片段) —— 旧库增量补列；ADD COLUMN 幂等靠 PRAGMA table_info 判断
+_ADDED_COLUMNS = [
+    ("accounts", "credentials", "TEXT NOT NULL DEFAULT '{}'"),
+    ("materials", "deleted_at", "TEXT"),
+]
+
+
+def _migrate(conn: sqlite3.Connection, current: int) -> None:
+    """把旧版本库升级到 SCHEMA_VERSION。只做加列，不改约束，数据零丢失。"""
+    for table, col, ddl in _ADDED_COLUMNS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    if current != SCHEMA_VERSION:
+        conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
 def _connect() -> sqlite3.Connection:
