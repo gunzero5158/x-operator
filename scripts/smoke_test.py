@@ -44,7 +44,8 @@ c.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final
 c.execute("INSERT INTO action_log(account_id,api_kind,endpoint,success,created_at) VALUES (?,'x_mock','e',1,?)", (demo_acc, utcnow_iso()))
 c.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES ('my_real','unofficial',?)", (json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32}),))
 c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply','我的素材','zh','active')")
-c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang) VALUES ('我的规则','foo bar','找人','ja,en')")
+c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score) VALUES ('我的规则','foo bar','找人','ja,en',7)")
+c.execute("INSERT INTO app_settings(key,value) VALUES ('tweet_max_age_hours','48')")
 c.commit(); c.close()
 init_db(old_db)
 with get_conn() as conn:
@@ -56,8 +57,11 @@ with get_conn() as conn:
     tt_n = conn.execute("SELECT COUNT(*) c FROM target_tweets").fetchone()["c"]
     rq_n = conn.execute("SELECT COUNT(*) c FROM review_queue").fetchone()["c"]
     dry = conn.execute("SELECT value FROM app_settings WHERE key='dry_run'").fetchone()
-assert ver == 3 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
-print("[1] v2→v3 升级 OK：演示账号/素材/推主/规则/抓取/队列/dry_run 全部清除，用户数据保留")
+    my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
+    age = conn.execute("SELECT value FROM app_settings WHERE key='tweet_max_age_hours'").fetchone()["value"]
+assert ver == 4 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert my_min == 5 and age == "168", (my_min, age)
+print("[1] v2→v4 升级 OK：演示数据全部清除、用户数据保留；旧默认阈值放宽（达标分 7→5，最大年龄 48→168h）")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()

@@ -54,6 +54,10 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
         removed = seed.purge_demo_data(conn)
         if removed:
             logging.getLogger("x_operator.db").info("已清除旧版演示数据：%s", removed)
+    if current < 4:
+        changed = seed.loosen_filters(conn)
+        if changed:
+            logging.getLogger("x_operator.db").info("已放宽旧默认过滤阈值：%s", changed)
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 

@@ -54,12 +54,34 @@ def register(jobs) -> None:
             ui.label("两级漏斗：关键词查询粗筛（X 搜索语法，自动带上所选语言）→ 按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的去匹配素材、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
                      ).classes("text-xs text-gray-400")
-            if not config.get("llm_base_url") or not config.get("llm_api_key"):
+            llm_on = bool(config.get("llm_base_url") and config.get("llm_api_key"))
+            if not llm_on:
                 with ui.row().classes("items-center gap-1 text-xs text-orange-600"):
                     ui.icon("info")
-                    ui.label("当前没配置 LLM：打分只是关键词粗估（2/4/8 三档），普遍偏低。建议先到")
+                    ui.label("当前没配置 LLM：打分是关键词粗估（默认 7 分保留，新闻/广告 3，无上下文 2）。想按语义条件精挑请到")
                     ui.link("设置 → LLM", "/settings").classes("text-xs")
-                    ui.label("配置网关，或把规则达标分调到 4~5。")
+                    ui.label("配置网关。")
+            with ui.expansion("当前的过滤规则是什么？（一条推文要过几关）", icon="rule").classes("w-full text-sm"):
+                age_h = config.get_int("tweet_max_age_hours", 168)
+                cd = config.get_int("cooldown_days", 7)
+                ui.markdown(
+                    "抓到的每条推文按顺序过以下几关，**任何一关没过都会写进「抓取记录」并注明原因**，不会悄悄丢掉：\n\n"
+                    "1. **语言**：推文语言必须在规则勾选的语言内（留空 = 不限）。语言不明（und）的一律放行。\n"
+                    "2. **相关性打分 ≥ 达标分**（本页每条规则可改）。打分原则是「默认保留」：\n"
+                    + ("   - 已配置 LLM：按你写的语义条件打分——本人明确符合 8~10；沾边但拿不准 6~7；"
+                       "新闻/教程/招聘/纯广告 3~5；无关或看不出意思 0~2。\n" if llm_on else
+                       "   - 未配置 LLM（当前）：关键词已命中且有完整上下文 → 7；命中「新闻/招聘/募集/教程/リリース/hiring…」→ 3；"
+                       "去掉链接、@、#、表情后不足 12 个字 → 2。\n")
+                    + "3. **预检**（设置 → 合规参数 / 黑名单 可调）：\n"
+                    "   - 转推 → 跳过\n"
+                    "   - 自己账号发的 → 跳过\n"
+                    f"   - 发推时间超过 **{age_h} 小时**（推文最大年龄）→ 跳过\n"
+                    "   - 作者在黑名单 → 跳过\n"
+                    "   - 这条推文已经回复过（去重账本）→ 跳过\n"
+                    f"   - 同一作者 **{cd} 天**内互动过（作者冷却天数）→ 跳过\n"
+                    "4. **匹配素材**：素材库里要有同语言、启用中的「回复」素材；没有则标为「达标但没配到素材」，补素材后可「重新匹配」。\n\n"
+                    "过关的才生成回复草稿进「审核队列」，最后由你决定发不发。"
+                ).classes("text-xs text-gray-600")
 
             body = ui.column().classes("w-full gap-2")
 
@@ -160,11 +182,12 @@ def register(jobs) -> None:
             lang = ui.select(_LANG_OPTIONS, value=cur_langs, multiple=True, label="推文语言（可多选，留空=不限）") \
                 .classes("w-full").props("outlined use-chips")
             with ui.row().classes("w-full gap-3 no-wrap"):
-                min_score = ui.number("达标分（0-10）", value=r["min_llm_score"] if r else 6, min=0, max=10, step=1) \
+                min_score = ui.number("达标分（0-10）", value=r["min_llm_score"] if r else 5, min=0, max=10, step=1) \
                     .classes("flex-1").props("outlined")
                 max_results = ui.number("每次抓取条数（10-100）", value=r["max_results_per_run"] if r else 15, min=10, max=100, step=1) \
                     .classes("flex-1").props("outlined")
-            ui.label("达标分：AI 给每条推文打 0-10 分的「相关性」，达到这个分才去匹配素材。没配 LLM 时只有 2/4/8 三档，建议先设 4~6。"
+            ui.label("达标分：AI 给每条推文打 0-10 分，≥ 达标分才去匹配素材。打分是「默认保留」：能看懂且沾边 ≥6，"
+                     "新闻/招聘/广告 3~5，无关或看不出意思 0~2。推荐 5（只剔除明显没用的）；想更严就 7。"
                      "每次抓取条数：每次运行最多拉几条，官方 API 按条计费。").classes("text-xs text-gray-400")
 
             def do_save():

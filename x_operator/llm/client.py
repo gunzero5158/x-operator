@@ -110,15 +110,21 @@ class LLMClient:
 
     # ---------------- 启发式兜底（离线可测） ----------------
     def score_relevance_heuristic(self, tweets: list[dict]) -> list[dict]:
+        """无 LLM 时的粗打分。思路是「宽进」：推文已经被关键词搜索命中，默认 7 分保留；
+        只有明显是新闻/招聘/广告（3 分）或没有上下文、看不出意思（2 分）才压到达标线下。"""
         results = []
         for t in tweets:
-            text = (t.get("text") or "").lower()
-            score = 4
-            reason = "没命中任何正面/负面关键词，按中等偏低给分"
-            if any(h.lower() in text for h in _NEGATIVE_HINTS):
-                score, reason = 2, "命中新闻/招聘/营销/教程类关键词，疑似非本人诉求"
+            raw = t.get("text") or ""
+            text = raw.lower()
+            core = _strip_noise(raw)
+            if len(core) < 12:
+                score, reason = 2, f"去掉链接/@/#/表情后只剩 {len(core)} 个字，看不出上下文"
+            elif any(h.lower() in text for h in _NEGATIVE_HINTS):
+                score, reason = 3, "命中新闻/招聘/营销/教程类关键词，疑似非本人诉求"
             elif any(h.lower() in text for h in _POSITIVE_HINTS):
                 score, reason = 8, "命中成本/替代方案类关键词，疑似作者本人在表达痛点"
+            else:
+                score, reason = 7, "关键词已命中且有完整上下文，默认保留，交给人工审核判断"
             results.append({"tweet_id": t["tweet_id"], "score": score,
                             "reason": "未配置 LLM，关键词粗略打分：" + reason})
         return results
@@ -155,6 +161,15 @@ class LLMClient:
         return self.chat_json("match", messages,
                               required_keys=["skip", "reply_text", "confidence", "reason"],
                               tier="strong", temperature=0.7)
+
+
+_NOISE_RE = re.compile(r"https?://\S+|www\.\S+|[@#]\S+|\s+")
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
+
+
+def _strip_noise(text: str) -> str:
+    """去掉链接、@、#话题、表情、空白后剩下的「正文」，用来判断有没有上下文。"""
+    return _EMOJI_RE.sub("", _NOISE_RE.sub("", text or ""))
 
 
 def _extract_json(text: str) -> dict | None:

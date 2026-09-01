@@ -17,7 +17,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "cooldown_days": "7",
     "grace_period_hours": "2",
     "reply_ttl_hours": "48",
-    "tweet_max_age_hours": "48",
+    "tweet_max_age_hours": "168",
     "nurture_days": "14",
     "match_confidence_threshold": "0.7",
     # 预算
@@ -92,4 +92,14 @@ def purge_demo_data(conn: sqlite3.Connection) -> dict[str, int]:
         run("materials", "DELETE FROM materials WHERE id=?", (mid,))
     # 5) 已废弃的设置项
     run("app_settings", "DELETE FROM app_settings WHERE key='dry_run'")
+    return {k: v for k, v in n.items() if v}
+
+
+def loosen_filters(conn: sqlite3.Connection) -> dict[str, int]:
+    """v4：过滤策略从「宁缺毋滥」改为「默认保留」——把还停留在旧默认值上的阈值放宽。
+    只动等于旧默认值的（说明用户没自己调过）：达标分 7/6 → 5；推文最大年龄 48h → 168h。"""
+    n: dict[str, int] = {}
+    n["search_rules"] = conn.execute("UPDATE search_rules SET min_llm_score=5 WHERE min_llm_score IN (6, 7)").rowcount
+    n["tweet_max_age_hours"] = conn.execute(
+        "UPDATE app_settings SET value='168' WHERE key='tweet_max_age_hours' AND value='48'").rowcount
     return {k: v for k, v in n.items() if v}
