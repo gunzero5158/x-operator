@@ -8,6 +8,7 @@ preview=True：拉取 + 打分后直接返回，不写库、不推进游标、�
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -33,12 +34,44 @@ def langs_label(langs: list[str]) -> str:
     return " / ".join(LANG_LABEL.get(x, x) for x in langs) if langs else "不限"
 
 
+_CJK_RE = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
+
+
+def _term(t: str) -> str:
+    """单个关键词：含中日韩文字或空格的加引号做整词匹配；已经带引号/是操作符的原样。"""
+    t = t.strip()
+    if not t or t.startswith('"') or t.startswith("-") or ":" in t:
+        return t
+    if " " in t or _CJK_RE.search(t):
+        return f'"{t}"'
+    return t
+
+
+def normalize_keywords(raw: str) -> str:
+    """把「逗号分隔 = 任一命中」翻译成 X 语法。
+
+    规则：用户写 `adult,nsfw,AI美女` 这种逗号列表（中英文逗号、顿号都行），且没有自己写 OR，
+    就转成 `adult OR nsfw OR "AI美女"`；已经用了 OR / 括号 / 操作符的高级写法原样保留。"""
+    q = (raw or "").strip()
+    if not q:
+        return q
+    parts = [p for p in re.split(r"[,，、\n]+", q) if p.strip()]
+    if len(parts) <= 1 or " OR " in q or "(" in q:
+        return q
+    return " OR ".join(_term(p) for p in parts)
+
+
 def effective_query(rule: sqlite3.Row | dict) -> str:
-    """实际发给 X 的查询：用户没写 lang: 时，自动按规则选的语言补上 (lang:ja OR lang:en)。"""
-    q = (rule["keyword_query"] or "").strip()
+    """实际发给 X 的查询：逗号列表转 OR；用户没写 lang: 时按规则选的语言补上 (lang:ja OR lang:en)；
+    默认排除转推。"""
+    q = normalize_keywords(rule["keyword_query"])
     langs = rule_langs(rule)
+    if " OR " in q and not q.startswith("("):
+        q = f"({q})"
     if langs and "lang:" not in q:
         q += " (" + " OR ".join(f"lang:{x}" for x in langs) + ")"
+    if "is:retweet" not in q:
+        q += " -is:retweet"
     return q
 
 

@@ -94,6 +94,13 @@ with get_conn() as conn:
     rule = conn.execute("SELECT * FROM search_rules").fetchone()
 eq = effective_query(rule); assert eq.endswith("(lang:ja OR lang:en)"), eq
 print("[3c] 多语言查询 OK:", eq)
+from x_operator.core.search import normalize_keywords  # noqa: E402
+assert normalize_keywords("adult,nsfw,AI美女，AI成人、AI短剧") == 'adult OR nsfw OR "AI美女" OR "AI成人" OR "AI短剧"', normalize_keywords("adult,nsfw,AI美女，AI成人、AI短剧")
+assert normalize_keywords("(API 料金 OR API コスト) (AI OR LLM)") == "(API 料金 OR API コスト) (AI OR LLM)"
+assert normalize_keywords("single") == "single"
+eq2 = effective_query({"keyword_query": "adult, AI短剧", "lang": "zh,en"})
+assert eq2 == '(adult OR "AI短剧") (lang:zh OR lang:en) -is:retweet', eq2
+print("[3c2] 逗号=任一命中 OK:", eq2)
 s = jobs.search.run_once(); print("[3d] 搜索:", s.as_msg().replace("\n", " | ")[:200])
 assert s.rules_run == 1 and s.tweets_fetched == 6, s
 with get_conn() as conn:

@@ -172,9 +172,10 @@ def register(jobs) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-[640px] max-w-[95vw]"):
             ui.label("编辑规则" if r else "新建规则").classes("text-lg font-bold")
             name = ui.input("规则名", value=r["name"] if r else "").classes("w-full").props("outlined")
-            kq = ui.textarea("关键词查询（X 搜索语法）", value=r["keyword_query"] if r else "").classes("w-full").props("outlined autogrow")
-            ui.label("例：(API 料金 OR API コスト) (AI OR LLM) -is:retweet　　空格=且，OR=或，-xxx=排除，\"短语\"=整句匹配。"
-                     "语言不用写在这里，下面勾选即可。").classes("text-xs text-gray-400")
+            kq = ui.textarea("关键词（逗号隔开 = 命中任意一个即可）", value=r["keyword_query"] if r else "").classes("w-full").props("outlined autogrow")
+            ui.label("最简单的写法：adult, nsfw, AI美女, AI短剧 → 含其中任意一个词的推文都会被抓（中文词会自动整词匹配）。"
+                     "高级写法用 X 语法：空格=同时包含，OR=或，-词=排除，\"短语\"=整句，例：(API 料金 OR API コスト) (AI OR LLM)。"
+                     "语言不用写，下面勾选；转推默认排除。保存后卡片上会显示实际发给 X 的查询。").classes("text-xs text-gray-400")
             sc = ui.textarea("语义筛选条件（用大白话写给 AI 看：要什么样的人、排除什么）",
                              value=r["semantic_criteria"] if r else "").classes("w-full").props("outlined autogrow")
             ui.label("例：作者本人正在为 AI 的 API 费用发愁或在找更便宜的替代方案；排除新闻、教程、招聘、广告。").classes("text-xs text-gray-400")
