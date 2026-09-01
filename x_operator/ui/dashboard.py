@@ -48,7 +48,6 @@ def register(jobs) -> None:
             def render():
                 body.clear()
                 s = _stats()
-                dry = config.get_bool("dry_run", True)
                 with body:
                     with ui.row().classes("gap-4 w-full"):
                         _card("今日发送", str(s["sent_today"]), "已发出的推文/回复")
@@ -65,13 +64,11 @@ def register(jobs) -> None:
                         from ..adapters.real import credentials_ready, parse_credentials
                         active_accounts = [a for a in s["accounts"] if a["status"] == "active"]
                         _check(bool(active_accounts), f"启用的账号：{len(active_accounts)} 个", "没有启用的账号 → 抓取和发送都跑不了。去「设置 → 账号」添加", "/settings")
-                        if not dry:
+                        if active_accounts:
                             missing = [a["handle"] for a in active_accounts
                                        if not credentials_ready(a["access_type"], parse_credentials(a["credentials"]))[0]]
-                            _check(not missing, "真实模式：所有启用账号都已填凭据",
-                                   f"真实模式下这些账号还没填凭据：@{'、@'.join(missing)} → 「设置 → 账号 → 编辑」", "/settings")
-                        else:
-                            _check(True, "Mock 演示模式：抓取/发送走假数据，不碰真实 X（设置 → 运行模式 可切换）", "", "/settings")
+                            _check(not missing, "所有启用账号都已填凭据",
+                                   f"这些账号还没填凭据：@{'、@'.join(missing)} → 「设置 → 账号 → 编辑 / 填凭据」", "/settings")
                         _check(s["watched"] > 0 or s["rules"] > 0, f"监控推主 {s['watched']} 个 · 搜索规则 {s['rules']} 条",
                                "没有监控推主也没有搜索规则 → 没有抓取来源", "/watched")
                         _check(s["materials"] > 0, f"启用的素材 {s['materials']} 条", "没有启用的素材 → 抓到推文也匹配不到回复", "/materials")

@@ -8,7 +8,8 @@ from nicegui import run, ui
 
 from .. import config
 from ..adapters import factory
-from ..adapters.real import OFFICIAL_REQUIRED, parse_credentials
+from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
+                             parse_credentials, validate_unofficial_credentials)
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient
 from .layout import confirm, shell
@@ -25,7 +26,7 @@ def register(jobs) -> None:
 
             with ui.tabs().classes("w-full") as tabs:
                 t_acc = ui.tab("账号")
-                t_run = ui.tab("运行模式")
+                t_run = ui.tab("自动运行")
                 t_llm = ui.tab("LLM")
                 t_comp = ui.tab("合规参数")
                 t_budget = ui.tab("预算")
@@ -63,17 +64,8 @@ def register(jobs) -> None:
 
 
 def _run_panel():
-    ui.label("运行模式").classes("font-semibold")
-    dry = ui.switch("Mock 演示模式（不碰真实 X，零凭据零风险）", value=config.get_bool("dry_run", True))
-
-    def on_dry(e):
-        config.set_value("dry_run", bool(e.args))
-        factory.invalidate()
-        ui.notify("已切换运行模式" + ("：所有抓取/发送走假数据" if e.args else "：将使用账号里填的真实凭据抓取和发送！"),
-                  type="positive" if e.args else "warning", multi_line=True, close_button=True)
-    dry.on("update:model-value", on_dry)
-    ui.label("关闭演示模式前，请先到「账号」标签填好凭据并点「测试连接」确认能连上。").classes("text-xs text-gray-400")
-
+    ui.label("自动运行").classes("font-semibold")
+    ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。").classes("text-xs text-gray-400")
     auto = ui.switch("启用后台自动轮询（监控/搜索按间隔自动跑）", value=config.get_bool("auto_jobs_enabled", False))
     auto.on("update:model-value", lambda e: (config.set_value("auto_jobs_enabled", bool(e.args)),
                                              ui.notify("已更新自动轮询开关", type="positive")))
@@ -134,22 +126,77 @@ _OFFICIAL_FIELDS = [
     ("access_token", "Access Token", False),
     ("access_token_secret", "Access Token Secret", True),
     ("bearer_token", "Bearer Token（选填）", True),
+    ("proxy", "代理（留空=自动用系统代理；填 direct 强制直连）", False),
 ]
 _UNOFFICIAL_FIELDS = [
-    ("auth_token", "Cookie: auth_token（推荐）", True),
-    ("ct0", "Cookie: ct0（推荐）", True),
-    ("username", "用户名（不用 Cookie 时填）", False),
-    ("email", "邮箱（选填，登录校验用）", False),
-    ("password", "密码（不用 Cookie 时填）", True),
-    ("totp_secret", "两步验证 TOTP 密钥（开了 2FA 才填）", True),
-    ("proxy", "代理（选填，如 http://127.0.0.1:7890）", False),
+    ("auth_token", "Cookie: auth_token（方式一）", True),
+    ("ct0", "Cookie: ct0（方式一）", True),
+    ("username", "用户名 @handle 或邮箱（方式二）", False),
+    ("password", "密码（方式二）", True),
+    ("totp_secret", "两步验证 TOTP 密钥（方式二，开了 2FA 必填）", True),
+    ("email", "邮箱（方式二选填：X 要求二次确认身份时用）", False),
+    ("proxy", "代理（留空=自动用系统代理；填 direct 强制直连）", False),
 ]
+
+_COOKIE_GUIDE = """
+**方式一：从浏览器复制 Cookie（最稳，推荐）**
+
+1. 用 **Chrome 或 Edge** 打开 <https://x.com>，登录**要绑定的这个小号**（注意别登错号）。
+2. 登录后停在 x.com 任意页面，按键盘 **F12**（或 Ctrl+Shift+I）打开「开发者工具」，一般在页面右侧或下方弹出。
+3. 在开发者工具**顶部的一排标签**里找 **「Application」**（中文界面叫 **「应用」或「应用程序」**）。
+   看不到的话点标签栏最右边的 **»** 展开，里面就有。
+4. 左侧栏找 **Storage / 存储** 下面的 **「Cookies」**，点它左边的小三角展开，点 **https://x.com**。
+5. 右侧出现一张表。在 **Name（名称）** 列里找到 **auth_token** 这一行
+   （可以在表格上方的 Filter 搜索框输入 auth_token 快速找到）。
+6. **双击这一行的 Value（值）** 那一格 → 文字全选变蓝 → **Ctrl+C** 复制 → 粘贴到下面「auth_token」框里。
+   它是 **40 位**由数字和小写字母 a-f 组成的字符串。
+7. 同样方法找到 **ct0**，复制它的 Value 粘贴到「ct0」框。它比较长（**32 位或 160 位**）。
+8. 点「保存」→ 回到账号卡片点「测试连接」，显示 ✅ 和账号名就说明绑定成功。
+
+注意：
+- **不要在浏览器里点「退出登录」**，一退出 auth_token 就作废；直接关掉标签页即可。
+- Cookie 一般能用几个月；失效时「测试连接」会提示，重新复制一次即可。如果同时填了方式二，会自动重新登录。
+- 用 Firefox 的话：F12 → **存储（Storage）** 标签 → Cookie → https://x.com，其余相同。
+
+**方式二：用户名 + 密码 + 两步验证密钥（自动登录，Cookie 失效时也能自己续）**
+
+- 「用户名」填 @handle（不带 @）或登录邮箱；「密码」填登录密码。
+- 账号开了两步验证（2FA）的，「TOTP 密钥」**必填**：就是当初在 X「设置 → 安全性 → 两步验证 → 身份验证应用」
+  绑定验证器时给你的那串 **16~32 位字母数字密钥**（扫码页面上一般有「无法扫码？手动输入密钥」）。
+  不是验证器 App 里每 30 秒变化的 6 位数字。
+- 如果 X 登录时额外弹「请输入邮箱/手机号确认身份」，把「邮箱」也填上就能自动过。
+- 本工具**不支持邮箱验证码**：如果 X 坚持要邮箱验证码，会弹出明确提示——先在浏览器登录一次该账号完成验证，
+  之后再试，或改用方式一。
+- 登录成功后会自动把 Cookie 存到方式一的两个框里，之后都走 Cookie，不会反复登录。
+
+**代理**：留空时自动使用电脑当前的系统代理（Windows「设置 → 网络和 Internet → 代理」里开着的那个，
+或环境变量 HTTP_PROXY）。想指定就填 `http://127.0.0.1:7890` 这种；填 `direct` 表示强制直连。
+"""
+
+_OFFICIAL_GUIDE = """
+1. 打开 <https://developer.x.com>，用**这个账号**登录，进入 **Developer Portal**（首次需要注册开发者并同意条款，
+   按量付费需要绑卡）。
+2. 左侧 **Projects & Apps** → 打开你的 App（没有就 **+ Add App** 新建一个）。
+3. App 页面点 **Settings（齿轮）** → 找到 **User authentication settings** → **Set up / Edit**：
+   - **App permissions** 选 **Read and write**（默认是只读，只读发不了推）
+   - **Type of App** 选 **Web App, Automated App or Bot**
+   - **Callback URI** 和 **Website URL** 随便填一个合法网址（如 `http://localhost` / `https://example.com`），保存。
+4. 回到 App 页面点 **Keys and tokens** 标签：
+   - **Consumer Keys → API Key and Secret** 点 **Regenerate**，把 API Key、API Key Secret 分别复制到下面前两个框。
+   - **Authentication Tokens → Access Token and Secret** 点 **Regenerate**，复制 Access Token、Access Token Secret 到第三、四个框。
+     生成后页面上应显示 **Created with Read and Write permissions**——如果显示 Read only，说明第 3 步权限没保存，改完要**重新生成**这一对。
+   - Bearer Token 可填可不填。
+5. 这些密钥只在生成时显示一次，关掉就看不到了（可以再 Regenerate）。填好点「保存」→「测试连接」。
+"""
 
 
 def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
-    ui.label("Mock 演示模式下也需要至少一个账号来承载发送。真实模式下：官方通道填 X 开发者平台的密钥"
-             "（需 Read and Write 权限），非官方通道填浏览器里登录后的 Cookie。主号只能用官方通道。").classes("text-xs text-gray-400")
+    ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
+             "弹窗里有手把手的获取步骤。主号只能用官方通道。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
+    sys_proxy = detect_system_proxy()
+    ui.label("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
+             "。账号里代理留空时自动使用它。").classes("text-xs text-gray-400")
     body = ui.column().classes("w-full gap-2")
 
     def save_account(data: dict, creds: dict, existing_id: int | None = None) -> bool:
@@ -194,7 +241,7 @@ def _accounts_panel():
 
     def open_dialog(existing: sqlite3.Row | None = None):
         creds = parse_credentials(existing["credentials"]) if existing else {}
-        with ui.dialog() as dlg, ui.card().classes("w-[560px] max-w-[95vw]"):
+        with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
             ui.label("编辑账号" if existing else "添加账号").classes("text-lg font-bold")
             with ui.row().classes("w-full gap-2 no-wrap"):
                 handle = ui.input("handle（不含 @）", value=existing["handle"] if existing else "") \
@@ -212,15 +259,18 @@ def _accounts_panel():
             cred_inputs: dict[str, ui.input] = {}
             official_box = ui.column().classes("w-full gap-1")
             with official_box:
-                ui.label("在 developer.x.com 的 App → Keys and tokens 里生成；App 权限须为 Read and Write，"
-                         "改权限后要重新生成 Access Token。").classes("text-xs text-gray-400")
+                with ui.expansion("怎么拿到这 4 个密钥？（点开看步骤）", icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
+                    ui.markdown(_OFFICIAL_GUIDE).classes("text-xs")
                 for k, label, secret in _OFFICIAL_FIELDS:
                     cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
             unofficial_box = ui.column().classes("w-full gap-1")
             with unofficial_box:
-                ui.label("推荐用 Cookie：浏览器登录该小号 → F12 → Application/存储 → Cookies → x.com，"
-                         "复制 auth_token 和 ct0 的值。账号密码登录更容易触发风控，成功后会自动保存 Cookie。").classes("text-xs text-gray-400")
+                with ui.expansion("怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）",
+                                  icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
+                    ui.markdown(_COOKIE_GUIDE).classes("text-xs")
+                ui.label("方式一（Cookie）和方式二（密码+2FA）填一种即可；两种都填时优先用 Cookie，Cookie 失效自动用方式二重新登录。"
+                         ).classes("text-xs text-gray-500")
                 for k, label, secret in _UNOFFICIAL_FIELDS:
                     cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
@@ -279,7 +329,15 @@ def _accounts_panel():
                 for hhmm in (a_start.value, a_end.value):
                     if not _valid_hhmm(hhmm):
                         ui.notify("活跃时段格式应为 HH:MM", type="negative"); return
-                ok = save_account(collect(), collect_creds(), existing["id"] if existing else None)
+                creds_now = collect_creds()
+                if atype.value != "official":
+                    problem = validate_unofficial_credentials(creds_now)
+                    if problem:
+                        ui.notify(problem, type="negative", multi_line=True, close_button=True, timeout=15000); return
+                    if (creds_now.get("username") and not creds_now.get("password")) or \
+                       (creds_now.get("password") and not creds_now.get("username")):
+                        ui.notify("方式二需要用户名和密码都填", type="negative"); return
+                ok = save_account(collect(), creds_now, existing["id"] if existing else None)
                 if ok:
                     dlg.close(); render()
 
@@ -317,26 +375,25 @@ def _accounts_panel():
     async def test_conn(a):
         ok, why = factory.credential_status(a)
         if not ok:
-            ui.notify(f"未填凭据（{why}）。" + ("当前 Mock 模式下抓取/发送走假数据，可正常演示。" if config.get_bool("dry_run", True) else ""),
-                      type="warning", multi_line=True, close_button=True)
+            ui.notify(f"未填凭据（{why}）。点「编辑 / 填凭据」补上。", type="warning", multi_line=True, close_button=True)
             return
-        ui.notify("正在连接 X…", type="info")
+        ui.notify("正在连接 X…（密码登录可能要 10~30 秒）", type="info")
 
         def _probe():
             client = factory.get_real_client(a)
-            return client.get_me()
+            return client.get_me(), getattr(client, "proxy_used", None)
         try:
-            user = await run.io_bound(_probe)
+            user, proxy = await run.io_bound(_probe)
         except Exception as e:
-            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=15000)
+            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=20000)
             return
         with get_conn() as conn:
             conn.execute("UPDATE accounts SET status='active' WHERE id=? AND status='auth_error'", (a["id"],))
             conn.commit()
         factory.invalidate(a["id"])
-        ui.notify(f"连接成功 ✅ 凭据对应的账号是 @{user.handle}（{user.display_name}）"
+        ui.notify(f"连接成功 ✅ 凭据对应的账号是 @{user.handle}（{user.display_name}），{describe_proxy(proxy)}"
                   + ("" if user.handle.lower() == a["handle"].lower() else f"——注意与你填的 @{a['handle']} 不一致"),
-                  type="positive", multi_line=True, close_button=True)
+                  type="positive", multi_line=True, close_button=True, timeout=12000)
         render()
 
     def render():
@@ -444,8 +501,7 @@ def _del_bl(bid):
 # ====================================================================================
 def _data_panel():
     ui.label("数据清理").classes("font-semibold")
-    ui.label("从演示切到真实使用时，可以把演示期间产生的抓取记录和审核队列一键清掉；"
-             "素材、账号、规则、黑名单、去重账本都会保留。").classes("text-xs text-gray-400")
+    ui.label("测试期可以把抓取记录和审核队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。").classes("text-xs text-gray-400")
     info = ui.label("").classes("text-sm")
 
     def refresh_info():
@@ -453,20 +509,8 @@ def _data_panel():
             t = conn.execute("SELECT COUNT(*) AS c FROM target_tweets").fetchone()["c"]
             q = conn.execute("SELECT COUNT(*) AS c FROM review_queue").fetchone()["c"]
             i = conn.execute("SELECT COUNT(*) AS c FROM interactions").fetchone()["c"]
-            m = conn.execute("SELECT COUNT(*) AS c FROM target_tweets WHERE author_id LIKE 'mock_user_%'").fetchone()["c"]
-        info.text = f"当前：抓取记录 {t} 条（其中演示数据 {m} 条）· 审核队列 {q} 条 · 去重账本 {i} 条"
+        info.text = f"当前：抓取记录 {t} 条 · 审核队列 {q} 条 · 去重账本 {i} 条"
     refresh_info()
-
-    async def clear_demo():
-        if await confirm("清除演示数据？", "删除所有 Mock 演示模式产生的抓取记录、对应队列条目和去重账本记录。真实数据不受影响。", ok_label="清除"):
-            with get_conn() as conn:
-                conn.execute("DELETE FROM review_queue WHERE target_tweet_id IN (SELECT id FROM target_tweets WHERE author_id LIKE 'mock_user_%')")
-                conn.execute("DELETE FROM review_queue WHERE sent_tweet_id LIKE 'mock_%'")
-                conn.execute("DELETE FROM target_tweets WHERE author_id LIKE 'mock_user_%'")
-                conn.execute("DELETE FROM interactions WHERE author_id LIKE 'mock_user_%' OR tweet_id LIKE 'mock_%'")
-                conn.execute("DELETE FROM action_log WHERE api_kind='x_mock'")
-                conn.commit()
-            ui.notify("演示数据已清除", type="positive"); refresh_info()
 
     async def clear_all():
         if await confirm("清空全部抓取记录与审核队列？", "包括真实数据。去重账本（防止重复回复）会保留。", ok_label="全部清空"):
@@ -479,5 +523,4 @@ def _data_panel():
             ui.notify("已清空", type="positive"); refresh_info()
 
     with ui.row().classes("gap-2"):
-        ui.button("清除演示数据", icon="cleaning_services", on_click=clear_demo).props("outline")
         ui.button("清空全部抓取记录与审核队列", icon="delete_forever", on_click=clear_all).props("outline color=negative")

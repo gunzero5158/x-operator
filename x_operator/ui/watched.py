@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
-from .. import config
 from ..adapters import factory
 from ..adapters.base import XClientError
 from ..core.monitor import get_primary_account, is_demo_id
@@ -41,10 +40,8 @@ def register(jobs) -> None:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("监控推主").classes("text-2xl font-bold")
                 ui.button("运行一次监控", icon="play_arrow", on_click=lambda: run_job(jobs.monitor.run_once, "监控", render)).props("outline")
-            dry = config.get_bool("dry_run", True)
-            ui.label(("当前为 Mock 演示模式：添加的推主是假的，运行监控会生成样本推文用于演示流程。" if dry else
-                      "真实模式：添加时会通过账号去 X 查询该用户；每次运行监控拉取其最新推文 → 打分 → 匹配素材 → 进审核队列。"
-                      ) + " 抓到的推文都在「抓取记录」页。").classes("text-xs text-gray-400")
+            ui.label("添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其最新推文 → 预检 → 匹配素材 → 进审核队列。"
+                     " 抓到的推文（含被过滤的及原因）都在「抓取记录」页。").classes("text-xs text-gray-400")
 
             with ui.card().classes("w-full"):
                 with ui.row().classes("items-end gap-2 w-full"):
@@ -86,7 +83,7 @@ def register(jobs) -> None:
                                     with ui.row().classes("items-center gap-2"):
                                         ui.label(f"@{u['handle']}").classes("font-semibold")
                                         if is_demo_id(u["x_user_id"]):
-                                            ui.badge("演示数据").classes("bg-amber-500").tooltip("Mock 模式下添加的假推主，真实模式会跳过；请删掉后重新添加")
+                                            ui.badge("旧版演示数据").classes("bg-amber-500").tooltip("旧版本留下的假推主，监控会跳过；请删掉后重新添加")
                                         if u["include_replies"]:
                                             ui.badge("含回复").classes("bg-slate-500")
                                         if not u["enabled"]:

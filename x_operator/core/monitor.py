@@ -54,7 +54,7 @@ def get_primary_account() -> sqlite3.Row | None:
 
 
 def is_demo_id(x_user_id: str | None) -> bool:
-    """演示（Mock）模式下解析出的假用户 id；真实模式下必须跳过，否则 X API 会报错。"""
+    """旧版本演示数据里的假用户 id（mock_user_ 开头）；必须跳过，否则 X API 会报错。"""
     return bool(x_user_id) and str(x_user_id).startswith("mock_user_")
 
 
@@ -127,7 +127,10 @@ class MonitorJob:
             stats.notes.append(f"账号 @{account['handle']} 无法连接：{e}")
             _log_read(account["id"], "x_official", "get_user_tweets", 0, success=False, error=str(e))
             return stats
-        dry = config.get_bool("dry_run", True)
+        except ValueError as e:  # 主号误配非官方通道
+            stats.errors += 1
+            stats.notes.append(f"账号 @{account['handle']}：{e}")
+            return stats
 
         with get_conn() as conn:
             users = conn.execute("SELECT * FROM watched_users WHERE enabled=1").fetchall()
@@ -136,8 +139,8 @@ class MonitorJob:
             return stats
 
         for user in users:
-            if not dry and is_demo_id(user["x_user_id"]):
-                stats.notes.append(f"@{user['handle']} 是演示模式添加的假推主，真实模式已跳过（删掉后重新添加即可）")
+            if is_demo_id(user["x_user_id"]):
+                stats.notes.append(f"@{user['handle']} 是旧版演示数据（假推主），已跳过，请删掉后重新添加")
                 continue
             stats.users_polled += 1
             try:

@@ -1,7 +1,6 @@
-"""首启动种子：app_settings 默认值（对齐 design-v1.1 §10.1）+ 一批演示数据。
+"""首启动种子：只写 app_settings 默认值（对齐 design-v1.1 §10.1）。
 
-演示数据让用户 clone 后不配置任何东西也能立刻在 UI 里跑通「监控→打分→匹配→
-审核→（模拟）发送」全流程。真实使用时可在设置页清空或忽略。
+不再写任何演示/Mock 数据：账号、素材、监控推主、搜索规则全部由用户在 UI 里自己添加。
 """
 from __future__ import annotations
 
@@ -9,8 +8,6 @@ import sqlite3
 
 # 键 → 默认值（全部字符串存储；读取侧按需转型）。
 DEFAULT_SETTINGS: dict[str, str] = {
-    # 运行模式：dry_run=1 时所有发送走 Mock 适配器，不碰真实 X（MVP 默认）
-    "dry_run": "1",
     # LLM（OpenAI 兼容网关；留空则用启发式兜底打分，离线可测）
     "llm_base_url": "",
     "llm_api_key": "",
@@ -31,8 +28,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "budget_reserve_reads": "20",
     "monitor_interval_minutes": "50",
     "search_runs_per_day": "2",
-    # 调度开关（MVP：默认关闭自动轮询，改用 UI 上的「立即运行」按钮手动触发，
-    # 便于测试期精确控制；设置页可打开）
+    # 调度开关（默认关闭自动轮询，用 UI 上的「运行一次」按钮手动触发；设置页可打开）
     "auto_jobs_enabled": "0",
 }
 
@@ -46,62 +42,54 @@ def seed_settings(conn: sqlite3.Connection) -> None:
         )
 
 
-def seed_demo_data(conn: sqlite3.Connection) -> None:
-    # 一个演示用官方账号（Mock 模式下无需真实凭据）
-    conn.execute(
-        "INSERT INTO accounts(handle, display_name, access_type, is_primary, credential_ref, "
-        "daily_post_limit, daily_reply_limit, min_interval_sec, max_interval_sec, note) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("apimax_jp", "ApiMax Japan", "official", 1, "apimax_jp",
-         10, 15, 60, 180, "演示账号（Mock 模式，无需真实凭据）"),
-    )
+# ---- 历史版本（≤ v2）首启动时写入过的演示数据：升级到 v3 时按这些特征精确清除 ----
+DEMO_ACCOUNT_HANDLE = "apimax_jp"
+DEMO_MATERIAL_TEXTS = (
+    "画像生成のAPIコストで悩んでいるなら、従量課金で複数モデルをまとめて使える選択肢もありますよ。よければ詳細シェアします🙌",
+    "If API pricing is the blocker, there are pay-as-you-go gateways that bundle multiple models under one bill. Happy to share what worked for us.",
+    "如果是卡在 API 成本上，其实有按量计费、多模型统一结算的方案，需要的话可以分享下我们的经验～",
+    "モデル選定は用途次第ですが、複数モデルを一つの窓口で試せると比較が早いです。参考までに。",
+    "複数のLLMを一つのAPIキーで。従量課金で無駄なく使えます。#AI #API",
+)
+DEMO_RULE_QUERY = "(API 料金 OR API コスト OR API高い) (AI OR LLM) -is:retweet lang:ja"
 
-    # 回复素材（reply）——日/英/中三语，用于匹配引擎演示
-    reply_materials = [
-        ("reply", "画像生成のAPIコストで悩んでいるなら、従量課金で複数モデルをまとめて使える選択肢もありますよ。よければ詳細シェアします🙌",
-         "ja", "ai,api,cost"),
-        ("reply", "If API pricing is the blocker, there are pay-as-you-go gateways that bundle multiple models under one bill. Happy to share what worked for us.",
-         "en", "ai,api,cost"),
-        ("reply", "如果是卡在 API 成本上，其实有按量计费、多模型统一结算的方案，需要的话可以分享下我们的经验～",
-         "zh", "ai,api,cost"),
-        ("reply", "モデル選定は用途次第ですが、複数モデルを一つの窓口で試せると比較が早いです。参考までに。",
-         "ja", "ai,model,compare"),
-    ]
-    # 让前三条组成同一翻译组
-    cur = conn.cursor()
-    group_id = None
-    for i, (kind, text, lang, tags) in enumerate(reply_materials):
-        cur.execute(
-            "INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) "
-            "VALUES (?,?,?,?,'active','human')",
-            (kind, text, lang, tags),
-        )
-        mid = cur.lastrowid
-        if i == 0:
-            group_id = mid
-        if i < 3:
-            cur.execute("UPDATE materials SET translation_group_id=? WHERE id=?", (group_id, mid))
 
-    # 发帖素材（post）——用于定时发布演示
-    conn.execute(
-        "INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) "
-        "VALUES ('post', ?, 'ja', 'promo', 'active', 'human')",
-        ("複数のLLMを一つのAPIキーで。従量課金で無駄なく使えます。#AI #API",),
-    )
+def purge_demo_data(conn: sqlite3.Connection) -> dict[str, int]:
+    """清除旧版本留下的全部演示数据。返回各类删除数量（供日志）。幂等。"""
+    n: dict[str, int] = {}
 
-    # 监控推主（演示用，x_user_id 为 Mock 生成的稳定假 id）
-    conn.execute(
-        "INSERT INTO watched_users(handle, x_user_id, include_replies, enabled, note) "
-        "VALUES (?,?,0,1,?)",
-        ("indie_ai_dev", "mock_user_indie_ai_dev", "演示：独立 AI 开发者"),
-    )
+    def run(label: str, sql: str, args: tuple = ()) -> None:
+        n[label] = n.get(label, 0) + conn.execute(sql, args).rowcount
 
-    # 搜索规则（演示：找正在为 AI API 成本发愁的人）
-    conn.execute(
-        "INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, max_results_per_run) "
-        "VALUES (?,?,?,?,?,?)",
-        ("AI API 成本痛点",
-         "(API 料金 OR API コスト OR API高い) (AI OR LLM) -is:retweet lang:ja",
-         "作者本人正在为 AI/LLM 的 API 调用成本发愁，或在寻找更便宜的替代方案。排除新闻、教程、招聘、营销推广。",
-         "ja", 7, 15),
-    )
+    # 1) Mock 适配器产生的抓取记录 / 队列 / 账本 / 日志
+    run("review_queue", "DELETE FROM review_queue WHERE target_tweet_id IN "
+                        "(SELECT id FROM target_tweets WHERE author_id LIKE 'mock_user_%')")
+    run("review_queue", "DELETE FROM review_queue WHERE sent_tweet_id LIKE 'mock_%'")
+    run("target_tweets", "DELETE FROM target_tweets WHERE author_id LIKE 'mock_user_%'")
+    run("interactions", "DELETE FROM interactions WHERE author_id LIKE 'mock_user_%' OR tweet_id LIKE 'mock_%'")
+    run("action_log", "DELETE FROM action_log WHERE api_kind='x_mock'")
+    # 2) 演示监控推主 / 演示搜索规则
+    run("watched_users", "DELETE FROM watched_users WHERE x_user_id LIKE 'mock_user_%'")
+    run("search_rules", "DELETE FROM search_rules WHERE keyword_query=?", (DEMO_RULE_QUERY,))
+    # 3) 演示账号（没填凭据的 apimax_jp）及其全部关联记录
+    row = conn.execute("SELECT id FROM accounts WHERE handle=? AND (credentials IS NULL OR credentials='{}')",
+                       (DEMO_ACCOUNT_HANDLE,)).fetchone()
+    if row:
+        aid = row["id"]
+        run("review_queue", "DELETE FROM review_queue WHERE account_id=?", (aid,))
+        run("scheduled_posts", "DELETE FROM scheduled_posts WHERE account_id=?", (aid,))
+        run("interactions", "DELETE FROM interactions WHERE account_id=?", (aid,))
+        run("action_log", "DELETE FROM action_log WHERE account_id=?", (aid,))
+        run("accounts", "DELETE FROM accounts WHERE id=?", (aid,))
+    # 4) 演示素材（正文完全一致且从未被用过的才删；被定时计划引用的跳过）
+    marks = ",".join("?" * len(DEMO_MATERIAL_TEXTS))
+    ids = [r["id"] for r in conn.execute(
+        f"SELECT id FROM materials WHERE text IN ({marks}) AND usage_count=0 "
+        "AND id NOT IN (SELECT material_id FROM scheduled_posts)", DEMO_MATERIAL_TEXTS).fetchall()]
+    for mid in ids:
+        conn.execute("UPDATE review_queue SET material_id=NULL WHERE material_id=?", (mid,))
+        conn.execute("UPDATE materials SET translation_group_id=NULL WHERE translation_group_id=?", (mid,))
+        run("materials", "DELETE FROM materials WHERE id=?", (mid,))
+    # 5) 已废弃的设置项
+    run("app_settings", "DELETE FROM app_settings WHERE key='dry_run'")
+    return {k: v for k, v in n.items() if v}

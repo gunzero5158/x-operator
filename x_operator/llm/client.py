@@ -114,12 +114,13 @@ class LLMClient:
         for t in tweets:
             text = (t.get("text") or "").lower()
             score = 4
-            reason = "话题相关但意图不明确"
+            reason = "没命中任何正面/负面关键词，按中等偏低给分"
             if any(h.lower() in text for h in _NEGATIVE_HINTS):
-                score, reason = 2, "疑似新闻/招聘/营销/教程，非本人诉求"
+                score, reason = 2, "命中新闻/招聘/营销/教程类关键词，疑似非本人诉求"
             elif any(h.lower() in text for h in _POSITIVE_HINTS):
-                score, reason = 8, "作者本人在表达成本痛点或寻找替代方案"
-            results.append({"tweet_id": t["tweet_id"], "score": score, "reason": reason})
+                score, reason = 8, "命中成本/替代方案类关键词，疑似作者本人在表达痛点"
+            results.append({"tweet_id": t["tweet_id"], "score": score,
+                            "reason": "未配置 LLM，关键词粗略打分：" + reason})
         return results
 
     def match_heuristic(self, tweet_text: str, tweet_lang: str, candidates: list[dict]) -> dict:

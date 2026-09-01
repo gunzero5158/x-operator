@@ -1,21 +1,22 @@
 """适配器工厂（design-v1.1 §3.5）。
 
-- dry_run（Mock 演示模式）为真：所有账号一律返回 MockXClient，零凭据零风险跑通全流程。
-- 关掉 dry_run：按 account.access_type 返回真实适配器，凭据来自 accounts.credentials（JSON）。
-- get_real_client()：无视 dry_run，强制拿真实适配器——给「测试连接」用，用户不必先关演示模式
-  就能验证凭据对不对。
+按 account.access_type 返回真实适配器，凭据来自 accounts.credentials（JSON）：
+- official   → OfficialXClient（tweepy，X API v2）
+- unofficial → UnofficialXClient（twifork/twikit，Cookie 或 密码+TOTP 登录）
 
+get_client() 带缓存（同一账号复用连接/登录态）；get_real_client() 不走缓存，给「测试连接」用。
 主号禁 unofficial 的三重保险之一在此：is_primary 且 unofficial 直接 ValueError。
+
+仅供自动化测试：环境变量 X_OPERATOR_MOCK=1 时返回 MockXClient（UI 里没有任何开关）。
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
-from .. import config
 from ..db.database import get_conn
 from .base import XClient
-from .mock import MockXClient
 from .real import (OfficialXClient, UnofficialXClient, credentials_ready,
                    parse_credentials)
 
@@ -50,10 +51,17 @@ def _persist_cookies(account_id: int):
     return _cb
 
 
+def _testing_mock() -> bool:
+    return os.environ.get("X_OPERATOR_MOCK") == "1"
+
+
 def get_real_client(account: sqlite3.Row) -> XClient:
-    """强制真实适配器（不看 dry_run，不走缓存）。凭据不全时抛 CredentialMissing。"""
+    """真实适配器（不走缓存）。凭据不全时抛 CredentialMissing。"""
     if account["is_primary"] and account["access_type"] == "unofficial":
         raise ValueError("主号不允许使用非官方（twifork）通道——封号风险过高（FR-1.3）")
+    if _testing_mock():
+        from .mock import MockXClient
+        return MockXClient(handle=account["handle"])
     creds = account_credentials(account)
     if account["access_type"] == "official":
         return OfficialXClient(credentials=creds)
@@ -64,21 +72,13 @@ def get_client(account: sqlite3.Row) -> XClient:
     aid = account["id"]
     if aid in _cache:
         return _cache[aid]
-
-    if account["is_primary"] and account["access_type"] == "unofficial":
-        raise ValueError("主号不允许使用非官方（twifork）通道——封号风险过高（FR-1.3）")
-
-    if config.get_bool("dry_run", True):
-        client: XClient = MockXClient(handle=account["handle"])
-    else:
-        client = get_real_client(account)
-
+    client = get_real_client(account)
     _cache[aid] = client
     return client
 
 
 def invalidate(account_id: int | None = None) -> None:
-    """凭据更新/停用/切换 dry_run 时清缓存。account_id=None 清全部。"""
+    """凭据更新/停用时清缓存。account_id=None 清全部。"""
     if account_id is None:
         _cache.clear()
     else:

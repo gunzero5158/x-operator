@@ -187,12 +187,12 @@ def register(jobs) -> None:
     def _edit_dialog(m, refresh):
         with ui.dialog() as dialog, ui.card().classes("min-w-96"):
             ui.label("编辑素材" if m else "新建素材").classes("text-lg font-bold")
-            kind = ui.select({"reply": "回复", "post": "发帖"}, value=m["kind"] if m else "reply", label="类型").props("outlined")
-            lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").props("outlined")
+            kind = ui.select({"reply": "回复", "post": "发帖"}, value=m["kind"] if m else "reply", label="类型").classes("w-full").props("outlined")
+            lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").classes("w-full").props("outlined")
             text = ui.textarea("正文", value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
-                               value=m["status"] if m else "active", label="状态").props("outlined")
+                               value=m["status"] if m else "active", label="状态").classes("w-full").props("outlined")
 
             def do_save():
                 if not text.value.strip():

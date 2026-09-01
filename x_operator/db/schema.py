@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = r"""
 CREATE TABLE IF NOT EXISTS schema_version (

@@ -1,6 +1,7 @@
-"""抓取记录：监控/搜索抓回来的每一条推文都在这里——打分、理由、处理状态一目了然。
+"""抓取记录：监控/搜索抓回来的每一条推文都在这里——打分、被过滤的原因、处理状态一目了然。
 
 这一页回答「跑了监控/搜索之后到底抓到了什么、为什么没进审核队列」。
+支持 URL 参数直达：/targets?source=search&rule=3&status=filtered
 可对未匹配/已过滤的推文手动「重新匹配」，也可删除、拉黑作者、批量清理。
 """
 from __future__ import annotations
@@ -14,8 +15,8 @@ from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, run_job, shell,
 _LIMIT = 150
 
 
-def _load(status: str, source: str):
-    q = ("SELECT tt.*, sr.name AS rule_name, wu.handle AS watched_handle, "
+def _load(status: str, source: str, rule_id: int = 0):
+    q = ("SELECT tt.*, sr.name AS rule_name, sr.min_llm_score AS rule_min, wu.handle AS watched_handle, "
          "(SELECT rq.id FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_id, "
          "(SELECT rq.status FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_status "
          "FROM target_tweets tt "
@@ -26,15 +27,33 @@ def _load(status: str, source: str):
         q += " AND tt.process_status=?"; args.append(status)
     if source != "all":
         q += " AND tt.source=?"; args.append(source)
+    if rule_id:
+        q += " AND tt.source='search' AND tt.source_rule_id=?"; args.append(rule_id)
     q += f" ORDER BY tt.fetched_at DESC, tt.id DESC LIMIT {_LIMIT}"
     with get_conn() as conn:
         return conn.execute(q, args).fetchall()
 
 
-def _counts() -> dict[str, int]:
+def _counts(source: str = "all", rule_id: int = 0) -> dict[str, int]:
+    q = "SELECT process_status, COUNT(*) AS c FROM target_tweets WHERE 1=1"
+    args: list = []
+    if source != "all":
+        q += " AND source=?"; args.append(source)
+    if rule_id:
+        q += " AND source='search' AND source_rule_id=?"; args.append(rule_id)
+    q += " GROUP BY process_status"
     with get_conn() as conn:
-        rows = conn.execute("SELECT process_status, COUNT(*) AS c FROM target_tweets GROUP BY process_status").fetchall()
+        rows = conn.execute(q, args).fetchall()
     return {r["process_status"]: r["c"] for r in rows}
+
+
+def _rule_options() -> dict:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, name FROM search_rules ORDER BY id").fetchall()
+    opts = {0: "全部规则"}
+    for r in rows:
+        opts[r["id"]] = f"规则「{r['name']}」"
+    return opts
 
 
 def _delete(tid: int) -> str:
@@ -71,13 +90,20 @@ def _blacklist(author_id: str, handle: str) -> None:
 
 def register(jobs) -> None:
     @ui.page("/targets")
-    def targets_page():
+    def targets_page(status: str = "all", source: str = "all", rule: int = 0):
+        if status not in TARGET_STATUS_LABEL:
+            status = "all"
+        if source not in ("monitor", "search"):
+            source = "all"
+        if rule:
+            source = "search"
         with shell("/targets"):
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("抓取记录").classes("text-2xl font-bold")
                 with ui.row().classes("items-center gap-2"):
-                    status_f = ui.select(_status_options(), value="all").props("dense outlined")
-                    source_f = ui.select({"all": "全部来源", "monitor": "监控推主", "search": "语义搜索"}, value="all").props("dense outlined")
+                    status_f = ui.select(_status_options(source, rule), value=status).props("dense outlined")
+                    source_f = ui.select({"all": "全部来源", "monitor": "监控推主", "search": "语义搜索"}, value=source).props("dense outlined")
+                    rule_f = ui.select(_rule_options(), value=rule if rule in _rule_options() else 0).props("dense outlined")
                     ui.button("运行监控", icon="visibility", on_click=lambda: run_job(jobs.monitor.run_once, "监控", render)).props("outline dense")
                     ui.button("运行搜索", icon="manage_search", on_click=lambda: run_job(jobs.search.run_once, "搜索", render)).props("outline dense")
                     with ui.button(icon="delete_sweep").props("outline color=negative dense"):
@@ -85,8 +111,19 @@ def register(jobs) -> None:
                             ui.menu_item("清理已过滤 / 未匹配 / 已过期", on_click=lambda: clear(["filtered", "no_match", "expired"]))
                             ui.menu_item("清理全部抓取记录", on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
 
-            ui.label("监控/搜索抓到的每条推文都记录在此。「已进审核队列」的去审核队列处理；"
-                     "「未匹配/已过滤」的可以点「重新匹配」再试一次（比如新加了素材之后）。").classes("text-xs text-gray-400")
+            with ui.expansion("各状态是什么意思？为什么会被过滤？", icon="help_outline").classes("w-full text-sm"):
+                ui.markdown(
+                    "- **已进审核队列**：达标且配到了素材，回复草稿已生成，去「审核队列」批准即可发送。\n"
+                    "- **达标但没配到素材**：相关性够了，但素材库里没有合适语言/场景的「回复」素材（或 AI 认为都不合适）。"
+                    "补充素材后点「重新匹配」。\n"
+                    "- **未达标 / 被过滤**：下面几种情况之一，每条卡片上都写了具体原因——\n"
+                    "  ① 相关性打分低于规则的达标分（没配 LLM 时只是关键词粗估，普遍偏低）；\n"
+                    "  ② 推文语言不在规则选的语言内；\n"
+                    "  ③ 预检拦下：转推 / 自己账号的推文 / 推文太旧（设置 → 合规参数「推文最大年龄」）/ 作者在黑名单 / "
+                    "该推文已回复过 / 作者在冷却期（设置 → 合规参数「作者冷却天数」）。\n"
+                    "- **待匹配**：抓到了还没来得及匹配（一般几秒内会变）。\n"
+                    "- **已过期**：待审核超时（设置 → 合规参数「回复条目时效」）。"
+                ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-2")
 
             async def clear(statuses: list[str]):
@@ -118,11 +155,21 @@ def register(jobs) -> None:
 
             def render():
                 body.clear()
-                status_f.set_options(_status_options(), value=status_f.value)
-                rows = _load(status_f.value, source_f.value)
+                rid = int(rule_f.value or 0)
+                src = source_f.value
+                if rid and src != "search":
+                    src = "search"; source_f.value = "search"
+                rule_f.set_visibility(src in ("search", "all"))
+                status_f.set_options(_status_options(src, rid), value=status_f.value)
+                rows = _load(status_f.value, src, rid)
                 with body:
                     if not rows:
-                        ui.label("还没有抓取记录。点上方「运行监控」或「运行搜索」试试。").classes("text-gray-400")
+                        c = _counts(src, rid)
+                        if sum(c.values()) == 0:
+                            ui.label("这个范围内还没有抓取记录。点上方「运行监控」或「运行搜索」试试；"
+                                     "如果刚运行过却没记录，看弹出的结果说明（可能是游标之后没新推文，或账号连不上）。").classes("text-gray-400")
+                        else:
+                            ui.label("这个状态下没有记录，换个状态筛选看看。").classes("text-gray-400")
                         return
                     ui.label(f"最近 {len(rows)} 条" + ("（已达显示上限，可清理旧记录）" if len(rows) >= _LIMIT else "")).classes("text-xs text-gray-400")
                     for t in rows:
@@ -130,11 +177,12 @@ def register(jobs) -> None:
 
             status_f.on("update:model-value", lambda e: render())
             source_f.on("update:model-value", lambda e: render())
+            rule_f.on("update:model-value", lambda e: render())
             render()
 
 
-def _status_options() -> dict:
-    c = _counts()
+def _status_options(source: str = "all", rule_id: int = 0) -> dict:
+    c = _counts(source, rule_id)
     opts = {"all": f"全部状态（{sum(c.values())}）"}
     for k, v in TARGET_STATUS_LABEL.items():
         opts[k] = f"{v}（{c.get(k, 0)}）"
@@ -149,12 +197,14 @@ def _card(t, rematch, delete_one, blacklist):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
             src = f"监控 @{t['watched_handle']}" if t["source"] == "monitor" and t["watched_handle"] else \
-                (f"搜索「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索"))
+                (f"搜索「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索（规则已删）"))
             ui.badge(src).classes("bg-slate-600")
             ui.badge(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"])).classes(_STATUS_COLOR.get(t["process_status"], "bg-gray-500"))
             if t["llm_relevance_score"] is not None:
                 sc = t["llm_relevance_score"]
-                ui.badge(f"相关性 {sc}/10").classes("bg-emerald-600" if sc >= 7 else "bg-gray-500")
+                thr = t["rule_min"] if t["rule_min"] is not None else 7
+                ui.badge(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if t["source"] == "search" else "")) \
+                    .classes("bg-emerald-600" if sc >= thr else "bg-gray-500")
             if t["lang"]:
                 ui.badge(t["lang"]).classes("bg-slate-400")
             ui.label(f"抓取于 {fmt_time(t['fetched_at'])} · 发推于 {fmt_time(t['tweet_created_at'])}").classes("text-xs text-gray-400")
@@ -165,12 +215,18 @@ def _card(t, rematch, delete_one, blacklist):
         if t["text_zh"]:
             ui.label("中文：" + t["text_zh"]).classes("text-xs text-gray-500")
         if t["llm_relevance_reason"]:
-            ui.label("说明：" + t["llm_relevance_reason"]).classes("text-xs text-gray-500")
+            if t["process_status"] in ("filtered", "no_match", "expired"):
+                with ui.row().classes("items-start gap-1 no-wrap"):
+                    ui.icon("filter_alt").classes("text-orange-500 text-base mt-0.5")
+                    ui.label("为什么没进队列：" + t["llm_relevance_reason"]).classes("text-xs text-orange-700 whitespace-pre-wrap")
+            else:
+                ui.label("打分理由：" + t["llm_relevance_reason"]).classes("text-xs text-gray-500")
         tweet_link(t["author_handle"], t["tweet_id"])
         with ui.row().classes("gap-2 items-center"):
             if t["process_status"] == "queued" and t["queue_id"]:
                 ui.link(f"查看审核队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
             elif t["process_status"] in ("no_match", "filtered", "expired", "new"):
-                ui.button("重新匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense")
+                ui.button("重新匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense") \
+                    .tooltip("跳过打分/预检，直接拿这条去匹配素材")
             if t["author_id"]:
                 ui.button("拉黑作者", on_click=lambda: blacklist(t["author_id"], t["author_handle"])).props("flat dense color=negative")

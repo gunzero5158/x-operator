@@ -2,10 +2,11 @@
 
 - 每次取连接执行 spec 要求的 PRAGMA（WAL / 外键 / busy_timeout）。
 - row_factory=sqlite3.Row，查询结果可按列名访问。
-- 首次建库后写入 schema_version 并种子化 app_settings + 演示数据（便于 MVP 立即可测）。
+- 首次建库后写入 schema_version 并种子化 app_settings 默认值；旧库自动升级（v3 起清除演示数据）。
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -30,13 +31,9 @@ def init_db(db_path: str | Path) -> None:
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         if row is None:
             conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
-            fresh = True
         else:
-            fresh = False
             _migrate(conn, int(row["version"]))
         seed.seed_settings(conn)
-        if fresh:
-            seed.seed_demo_data(conn)
         conn.commit()
 
 
@@ -48,11 +45,15 @@ _ADDED_COLUMNS = [
 
 
 def _migrate(conn: sqlite3.Connection, current: int) -> None:
-    """把旧版本库升级到 SCHEMA_VERSION。只做加列，不改约束，数据零丢失。"""
+    """把旧版本库升级到 SCHEMA_VERSION。加列不改约束；v3 起清除旧版本写入的演示数据。"""
     for table, col, ddl in _ADDED_COLUMNS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    if current < 3:
+        removed = seed.purge_demo_data(conn)
+        if removed:
+            logging.getLogger("x_operator.db").info("已清除旧版演示数据：%s", removed)
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 

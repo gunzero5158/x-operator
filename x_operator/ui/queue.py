@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from .. import config
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, run_job, shell,
                      tweet_link)
@@ -101,8 +100,7 @@ def register(jobs) -> None:
                 with ui.row().classes("items-center gap-2"):
                     status_sel = ui.select(_status_options(), value="pending").props("dense outlined")
                     clear_btn = ui.button("清空此状态", icon="delete_sweep").props("outline color=negative dense")
-                    dry = config.get_bool("dry_run", True)
-                    ui.button("触发发送" + ("（Mock）" if dry else ""), icon="send",
+                    ui.button("触发发送", icon="send",
                               on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
 
             ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）。"

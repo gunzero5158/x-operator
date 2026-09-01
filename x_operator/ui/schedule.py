@@ -79,12 +79,12 @@ def register(jobs) -> None:
         with ui.dialog() as dialog, ui.card().classes("min-w-[520px]"):
             ui.label("编辑定时计划" if sp else "新建定时计划").classes("text-lg font-bold")
             acc = ui.select({a["id"]: a["handle"] for a in accounts},
-                            value=sp["account_id"] if sp else accounts[0]["id"], label="账号").props("outlined")
+                            value=sp["account_id"] if sp else accounts[0]["id"], label="账号").classes("w-full").props("outlined")
             mat_opts = {m["id"]: m["text"][:40] for m in mats}
             mat_val = sp["material_id"] if sp and sp["material_id"] in mat_opts else mats[0]["id"]
-            mat = ui.select(mat_opts, value=mat_val, label="发帖素材").props("outlined")
+            mat = ui.select(mat_opts, value=mat_val, label="发帖素材").classes("w-full").props("outlined")
             stype = ui.select({"once": "一次性", "daily": "每天", "weekly": "每周", "cron": "cron(M H * * *)"},
-                              value=sp["schedule_type"] if sp else "daily", label="类型").props("outlined")
+                              value=sp["schedule_type"] if sp else "daily", label="类型").classes("w-full").props("outlined")
             expr = ui.input("表达式", value=sp["schedule_expr"] if sp else "21:00").classes("w-full").props("outlined")
             ui.label("提示：once→2026-09-01T21:00 · daily→21:00 · weekly→mon,thu 21:00 · cron→0 21 * * *（按账号时区）").classes("text-xs text-gray-400")
             auto = ui.switch("自动批准（到点直接进待发送，不经人工审核）", value=bool(sp["auto_approve"]) if sp else False)

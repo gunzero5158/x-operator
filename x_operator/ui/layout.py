@@ -6,7 +6,6 @@ from typing import Any, Callable
 
 from nicegui import run, ui
 
-from .. import config
 from ..db.database import get_conn
 
 # (路径, 名称, material 图标)
@@ -36,14 +35,11 @@ def _alert_count() -> int:
 
 @contextmanager
 def shell(active: str):
-    dry = config.get_bool("dry_run", True)
     with ui.header().classes("items-center justify-between bg-slate-900 text-white px-4 py-2 shadow-lg gap-3"):
-        # 左：品牌 + 运行模式徽标
+        # 左：品牌
         with ui.row().classes("items-center gap-2 shrink-0"):
             ui.icon("smart_toy").classes("text-2xl text-sky-400")
             ui.label("x-operator").classes("text-lg font-bold")
-            mode = "Mock 演示" if dry else "真实发送"
-            ui.badge(mode).classes(("bg-amber-500" if dry else "bg-red-600") + " text-white font-semibold")
 
         # 中：醒目导航区——成块底色 + 图标 + hover/active 高亮（密集操作区，视觉强化）
         pc = _pending_count()
@@ -92,8 +88,11 @@ def notify_long(msg: str, ok: bool = True, kind: str | None = None) -> None:
               multi_line=True, close_button=True, timeout=10000)
 
 
-async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None] | None = None):
-    """在线程池里跑阻塞的 job（抓取/LLM/发送可能要几十秒），不卡住页面；完成后弹结果。"""
+async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None] | None = None,
+                  result_link: tuple[str, str] | None = None):
+    """在线程池里跑阻塞的 job（抓取/LLM/发送可能要几十秒），不卡住页面；完成后弹结果。
+
+    result_link=(按钮文字, 路径) 时改为弹对话框，带一个「去看结果」按钮（比一闪而过的提示更好找）。"""
     try:
         res = await run.io_bound(fn)
     except Exception as e:
@@ -101,22 +100,32 @@ async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None]
         if refresh:
             refresh()
         return None
-    if hasattr(res, "as_msg"):
-        ok = getattr(res, "ok", True)
-        notify_long(res.as_msg(), ok=ok)
+    ok = getattr(res, "ok", True)
+    msg = res.as_msg() if hasattr(res, "as_msg") else f"{label}完成"
+    if result_link:
+        text, href = result_link
+        with ui.dialog() as dlg, ui.card().classes("min-w-96 max-w-[90vw]"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("check_circle" if ok else "warning").classes("text-2xl " + ("text-green-600" if ok else "text-orange-500"))
+                ui.label(f"{label}结果").classes("text-lg font-bold")
+            ui.label(msg).classes("text-sm whitespace-pre-wrap")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("关闭", on_click=dlg.close).props("flat")
+                ui.button(text, icon="arrow_forward", on_click=lambda: ui.navigate.to(href)).props("color=primary")
+        dlg.open()
     else:
-        ui.notify(f"{label}完成", type="positive")
+        notify_long(msg, ok=ok)
     if refresh:
         refresh()
     return res
 
 
 def tweet_link(author_handle: str | None, tweet_id: str | None):
-    """指向 X 上原推的链接；演示模式的假 id 打不开，就只显示 id。"""
+    """指向 X 上原推的链接。"""
     if not tweet_id:
         return
-    if config.get_bool("dry_run", True) or not str(tweet_id).isdigit():
-        ui.label(f"推文 id {tweet_id}（演示数据，非真实链接）").classes("text-xs text-gray-400")
+    if not str(tweet_id).isdigit():
+        ui.label(f"推文 id {tweet_id}（非真实链接）").classes("text-xs text-gray-400")
     else:
         ui.link("在 X 上打开原推 ↗", f"https://x.com/{author_handle or 'i'}/status/{tweet_id}",
                 new_tab=True).classes("text-xs")
