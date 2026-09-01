@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL = r"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS watched_users (
     include_replies    INTEGER NOT NULL DEFAULT 0 CHECK (include_replies IN (0,1)),
     enabled            INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
     hit_count          INTEGER NOT NULL DEFAULT 0,
+    lookback_hours     INTEGER NOT NULL DEFAULT 24,
+    reply_mode         TEXT    NOT NULL DEFAULT 'material',
+    ai_brief           TEXT    NOT NULL DEFAULT '',
+    allow_polish       INTEGER NOT NULL DEFAULT 0,
     note               TEXT    NOT NULL DEFAULT '',
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -90,6 +94,10 @@ CREATE TABLE IF NOT EXISTS search_rules (
     newest_id_cursor    TEXT,
     max_results_per_run INTEGER NOT NULL DEFAULT 15 CHECK (max_results_per_run BETWEEN 10 AND 100),
     min_llm_score       INTEGER NOT NULL DEFAULT 5  CHECK (min_llm_score BETWEEN 0 AND 10),
+    lookback_hours      INTEGER NOT NULL DEFAULT 24,
+    reply_mode          TEXT    NOT NULL DEFAULT 'material',
+    ai_brief            TEXT    NOT NULL DEFAULT '',
+    allow_polish        INTEGER NOT NULL DEFAULT 0,
     enabled             INTEGER NOT NULL DEFAULT 1  CHECK (enabled IN (0,1)),
     last_run_at         TEXT,
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -135,6 +143,8 @@ CREATE TABLE IF NOT EXISTS review_queue (
     retry_count       INTEGER NOT NULL DEFAULT 0,
     sent_tweet_id     TEXT,
     error_msg         TEXT,
+    origin            TEXT    NOT NULL DEFAULT 'ai_match',
+    verify_status     TEXT,
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     decided_at        TEXT,
     sent_at           TEXT,

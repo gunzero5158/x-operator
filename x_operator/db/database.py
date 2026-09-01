@@ -41,6 +41,17 @@ def init_db(db_path: str | Path) -> None:
 _ADDED_COLUMNS = [
     ("accounts", "credentials", "TEXT NOT NULL DEFAULT '{}'"),
     ("materials", "deleted_at", "TEXT"),
+    # v5：时间窗 / 回复方式下放到每条规则、每个推主；队列条目记录来源与发送后核实结果
+    ("search_rules", "lookback_hours", "INTEGER NOT NULL DEFAULT 24"),
+    ("search_rules", "reply_mode", "TEXT NOT NULL DEFAULT 'material'"),
+    ("search_rules", "ai_brief", "TEXT NOT NULL DEFAULT ''"),
+    ("search_rules", "allow_polish", "INTEGER NOT NULL DEFAULT 0"),
+    ("watched_users", "lookback_hours", "INTEGER NOT NULL DEFAULT 24"),
+    ("watched_users", "reply_mode", "TEXT NOT NULL DEFAULT 'material'"),
+    ("watched_users", "ai_brief", "TEXT NOT NULL DEFAULT ''"),
+    ("watched_users", "allow_polish", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_queue", "origin", "TEXT NOT NULL DEFAULT 'ai_match'"),
+    ("review_queue", "verify_status", "TEXT"),
 ]
 
 

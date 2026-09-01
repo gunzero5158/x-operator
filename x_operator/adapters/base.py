@@ -116,3 +116,7 @@ class XClient(ABC):
     def upload_media(self, file_path: str, media_type: str,
                      alt_text: str | None = None) -> str:
         raise MediaError("MVP 暂不支持媒体上传")
+
+    def tweet_exists(self, tweet_id: str) -> bool | None:
+        """发送后核实：True=在 X 上能查到；False=查不到（被删/被限制）；None=无法判断。"""
+        return None

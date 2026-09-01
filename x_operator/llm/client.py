@@ -151,16 +151,70 @@ class LLMClient:
         obj = self.chat_json("relevance", messages, required_keys=["results"], tier="light", temperature=0.2)
         return obj["results"]
 
-    def match_reply(self, tweet_text: str, tweet_lang: str, candidates: list[dict]) -> dict:
+    def match_reply(self, tweet_text: str, tweet_lang: str, candidates: list[dict],
+                    allow_polish: bool = False) -> dict:
         if not self.configured:
             return self.match_heuristic(tweet_text, tweet_lang, candidates)
         messages = [
-            {"role": "system", "content": prompts.MATCH_SYSTEM},
+            {"role": "system", "content": prompts.match_system(allow_polish)},
             {"role": "user", "content": prompts.match_user(tweet_text, tweet_lang, candidates)},
         ]
         return self.chat_json("match", messages,
                               required_keys=["skip", "reply_text", "confidence", "reason"],
-                              tier="strong", temperature=0.7)
+                              tier="strong", temperature=0.7 if allow_polish else 0.2)
+
+    # ---------------- 需要真实 LLM 的创作类能力（无网关时抛 LLMError，UI 会提示去配置） ----------------
+    def _require(self, what: str) -> None:
+        if not self.configured:
+            raise LLMError(f"{what}需要 LLM：请先到「设置 → LLM」填好网关 base_url 和 api_key")
+
+    def write_reply(self, tweet_text: str, tweet_lang: str, brief: str, must_include: list[str]) -> dict:
+        """按创作要求为一条推文写回复。返回 {reply_text, reason}；必须包含项缺失会重试一次。"""
+        self._require("AI 撰写回复")
+        messages = [
+            {"role": "system", "content": prompts.WRITE_SYSTEM},
+            {"role": "user", "content": prompts.write_user(tweet_text, tweet_lang, brief, must_include)},
+        ]
+        for attempt in range(2):
+            obj = self.chat_json("write", messages, required_keys=["reply_text", "reason"], tier="strong", temperature=0.8)
+            text = str(obj.get("reply_text") or "")
+            missing = [m for m in must_include if m and m not in text]
+            if not missing:
+                return {"reply_text": text, "reason": str(obj.get("reason") or "")}
+            messages = messages + [
+                {"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)},
+                {"role": "user", "content": "你的回复缺少了必须原样包含的字符串：" + "、".join(missing) + "。请重写，务必包含。"},
+            ]
+        raise LLMFormatError("AI 两次都没把必须包含的内容写进去：" + "、".join(missing))
+
+    def generate_search_rule(self, description: str) -> dict:
+        """自然语言描述 → {name, keywords[], semantic_criteria, langs[]}。"""
+        self._require("AI 生成搜索规则")
+        messages = [
+            {"role": "system", "content": prompts.RULE_GEN_SYSTEM},
+            {"role": "user", "content": prompts.rule_gen_user(description)},
+        ]
+        obj = self.chat_json("rule_gen", messages, required_keys=["name", "keywords", "semantic_criteria", "langs"],
+                             tier="strong", temperature=0.5)
+        obj["keywords"] = [str(k).strip() for k in (obj.get("keywords") or []) if str(k).strip()]
+        obj["langs"] = [str(x).strip().lower() for x in (obj.get("langs") or []) if str(x).strip()]
+        return obj
+
+    def generate_materials(self, kind: str, lang: str, topic: str, style: str, scenario: str,
+                           must_include: list[str], count: int) -> list[dict]:
+        """批量生成素材 → [{text, scenario_tags}]。"""
+        self._require("AI 生成素材")
+        messages = [
+            {"role": "system", "content": prompts.MATERIAL_GEN_SYSTEM},
+            {"role": "user", "content": prompts.material_gen_user(kind, lang, topic, style, scenario, must_include, count)},
+        ]
+        obj = self.chat_json("material_gen", messages, required_keys=["items"], tier="strong", temperature=0.9, timeout_sec=120)
+        items = []
+        for it in obj.get("items") or []:
+            text = str(it.get("text") or "").strip()
+            if text:
+                items.append({"text": text, "scenario_tags": str(it.get("scenario_tags") or "").strip()})
+        return items
 
 
 _NOISE_RE = re.compile(r"https?://\S+|www\.\S+|[@#]\S+|\s+")

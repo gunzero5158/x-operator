@@ -41,21 +41,31 @@ def register(jobs) -> None:
                 with ui.tab_panel(t_llm):
                     _llm_panel()
                 with ui.tab_panel(t_comp):
+                    ui.label("这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。").classes("text-xs text-gray-400")
                     _numeric_panel([
-                        ("cooldown_days", "作者冷却天数（对同一作者两次互动的最小间隔）"),
-                        ("grace_period_hours", "定时补发宽限小时"),
-                        ("reply_ttl_hours", "回复条目时效小时（待审核超过此时长自动过期）"),
-                        ("tweet_max_age_hours", "推文最大年龄小时（更旧的推文不回复）"),
-                        ("nurture_days", "养号期天数（新小号限额减半）"),
-                        ("match_confidence_threshold", "匹配置信度阈值(0-1)"),
+                        ("cooldown_days", "作者冷却天数",
+                         "对同一个作者两次互动之间至少隔几天，避免被对方和 X 当成骚扰。推荐 7；养号期小号 14。"),
+                        ("reply_ttl_hours", "回复条目时效（小时）",
+                         "待审核条目超过这个时长自动过期——回复太旧的推文没意义还显得像机器人。推荐 48；热点类 24。"),
+                        ("match_confidence_threshold", "素材匹配置信度阈值（0-1）",
+                         "AI 匹配素材时对「这条素材合适」的信心低于此值就不生成、标为未生成回复。推荐 0.7；想多出草稿自己筛就 0.5。"),
+                        ("grace_period_hours", "定时补发宽限（小时）",
+                         "程序没开着导致定时计划错过了，重启后在多少小时内还补发。推荐 2；超过就标为错过、不补。"),
+                        ("nurture_days", "养号期天数",
+                         "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。"),
                     ])
                 with ui.tab_panel(t_budget):
                     _numeric_panel([
-                        ("daily_read_budget", "每日读额度（条）"),
-                        ("budget_reserve_reads", "熔断保留读额度"),
-                        ("monthly_budget_usd", "月预算(USD)"),
-                        ("monitor_interval_minutes", "监控间隔(分钟)（改后需重启生效）"),
-                        ("search_runs_per_day", "每日搜索次数"),
+                        ("daily_read_budget", "每日读额度（条）",
+                         "每天最多从 X 读多少条推文（监控+搜索合计），防止官方 API 账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。"),
+                        ("budget_reserve_reads", "熔断保留读额度",
+                         "读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。"),
+                        ("monthly_budget_usd", "月预算（USD）",
+                         "仅用于仪表盘参考显示。"),
+                        ("monitor_interval_minutes", "自动监控间隔（分钟）",
+                         "开了后台自动轮询时，多久跑一次监控。推荐 50~120；改后需重启生效。"),
+                        ("search_runs_per_day", "每日自动搜索次数",
+                         "开了后台自动轮询时，一天跑几次搜索。推荐 2~4。"),
                     ])
                 with ui.tab_panel(t_bl):
                     _blacklist_panel()
@@ -107,8 +117,9 @@ def _llm_panel():
 
 def _numeric_panel(fields):
     inputs = {}
-    for key, label in fields:
+    for key, label, hint in fields:
         inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
+        ui.label(hint).classes("text-xs text-gray-400 -mt-2 mb-2")
 
     def save():
         for key, inp in inputs.items():
@@ -302,7 +313,10 @@ def _accounts_panel():
                 tz_val = existing["timezone"] if existing else "Asia/Tokyo"
                 tz_opts = _TZ_OPTIONS if tz_val in _TZ_OPTIONS else [tz_val] + _TZ_OPTIONS
                 tz = ui.select(tz_opts, value=tz_val, label="时区").props("outlined dense").classes("flex-1")
-            ui.label("活跃时段相同（如 00:00-00:00）表示全天可发。").classes("text-xs text-gray-400")
+            ui.label("日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。"
+                     "间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。"
+                     "活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。"
+                     ).classes("text-xs text-gray-400")
             note = ui.input("备注", value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
 
             def collect():

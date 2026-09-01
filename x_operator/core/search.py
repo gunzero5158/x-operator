@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
 from ..adapters import factory
@@ -18,8 +19,8 @@ from ..adapters.base import TweetData, XClientError
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from .matcher import MatchEngine
-from .monitor import (FILTER_REASONS, _log_read, get_primary_account, precheck,
-                      store_target)
+from .monitor import (FILTER_REASONS, _log_read, _row_int, get_primary_account,
+                      precheck, store_target)
 
 LANG_LABEL = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "es": "西班牙语",
               "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
@@ -110,13 +111,21 @@ class SearchJob:
 
     def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row, preview: bool = False) -> list[ScoredCandidate]:
         client = factory.get_client(account)
+        lookback_h = _row_int(rule, "lookback_hours", 24)
+        # 有游标：抓上次之后的全部；没有游标（首次/重置后）：只抓最近 lookback_hours 小时
+        start_time = None
+        if not rule["newest_id_cursor"] and lookback_h:
+            start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
         result = client.search_recent(effective_query(rule), since_id=rule["newest_id_cursor"],
-                                      max_results=rule["max_results_per_run"])
+                                      start_time=start_time, max_results=rule["max_results_per_run"])
         _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
-        if not result.tweets:
+        tweets = result.tweets
+        if start_time:
+            tweets = [t for t in tweets if t.created_at >= start_time]
+        if not tweets:
             return []
         payload = [{"tweet_id": t.tweet_id, "author_handle": t.author_handle, "text": t.text}
-                   for t in result.tweets]
+                   for t in tweets]
         try:
             scores = self.llm.score_relevance(rule["semantic_criteria"], payload)
         except LLMError as e:
@@ -125,7 +134,7 @@ class SearchJob:
                 s["reason"] = f"LLM 调用失败（{str(e)[:60]}），改用关键词粗略打分：" + s.get("reason", "")
         score_map = {s["tweet_id"]: s for s in scores}
         scored = []
-        for t in result.tweets:
+        for t in tweets:
             s = score_map.get(t.tweet_id, {"score": 0, "reason": "LLM 没有返回这条的打分"})
             scored.append(ScoredCandidate(t, int(s.get("score", 0)), s.get("reason", "")))
         return scored
@@ -171,8 +180,9 @@ class SearchJob:
                         stats.filtered += 1
                         below += 1
                         continue
-                    # 预检
-                    pre = precheck(t, account["handle"])
+                    # 预检（时间窗用规则自己的 lookback_hours；有游标时不再按年龄卡）
+                    pre = precheck(t, account["handle"],
+                                   max_age_h=None if rule["newest_id_cursor"] else _row_int(rule, "lookback_hours", 24))
                     if pre:
                         store_target(t, "search", rule["id"], process_status="filtered", score=cand.score,
                                      reason="预检拦下：" + FILTER_REASONS.get(pre, pre) + f"。打分理由：{cand.reason}")
@@ -184,7 +194,7 @@ class SearchJob:
                         continue
                     with get_conn() as conn:
                         target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (tid,)).fetchone()
-                    outcome = self.match.run(target, account)
+                    outcome = self.match.run(target, account, cfg=rule)
                     if outcome.status == "queued":
                         stats.queued += 1
                     else:

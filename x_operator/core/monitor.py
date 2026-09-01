@@ -53,6 +53,17 @@ def get_primary_account() -> sqlite3.Row | None:
         return row
 
 
+def _row_int(row: sqlite3.Row, key: str, default: int) -> int:
+    try:
+        v = row[key]
+    except (IndexError, KeyError):
+        return default
+    try:
+        return int(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 def is_demo_id(x_user_id: str | None) -> bool:
     """旧版本演示数据里的假用户 id（mock_user_ 开头）；必须跳过，否则 X API 会报错。"""
     return bool(x_user_id) and str(x_user_id).startswith("mock_user_")
@@ -68,14 +79,15 @@ FILTER_REASONS = {
 }
 
 
-def precheck(t: TweetData, account_handle: str) -> str | None:
-    """返回过滤原因码或 None。"""
+def precheck(t: TweetData, account_handle: str, max_age_h: int | None = None) -> str | None:
+    """返回过滤原因码或 None。max_age_h = 该规则/推主自己的时间窗（小时）。"""
     if t.is_retweet:
         return "retweet"
     if t.author_handle == account_handle:
         return "own_account"
-    max_age_h = config.get_int("tweet_max_age_hours", 48)
-    if t.created_at < datetime.now(timezone.utc) - timedelta(hours=max_age_h):
+    if max_age_h is None:
+        max_age_h = config.get_int("tweet_max_age_hours", 168)
+    if max_age_h and t.created_at < datetime.now(timezone.utc) - timedelta(hours=max_age_h):
         return "too_old"
     with get_conn() as conn:
         if conn.execute("SELECT 1 FROM blacklist WHERE x_user_id=?", (t.author_id,)).fetchone():
@@ -143,17 +155,26 @@ class MonitorJob:
                 stats.notes.append(f"@{user['handle']} 是旧版演示数据（假推主），已跳过，请删掉后重新添加")
                 continue
             stats.users_polled += 1
+            lookback_h = _row_int(user, "lookback_hours", 24)
             try:
                 result = client.get_user_tweets(user["x_user_id"], since_id=user["last_seen_tweet_id"],
                                                 max_results=5, include_replies=bool(user["include_replies"]))
-                stats.tweets_fetched += len(result.tweets)
                 _log_read(account["id"], client.api_kind, "get_user_tweets", result.reads_consumed)
+                tweets = result.tweets
+                # 首次抓取（没有游标）只看时间窗内的；之后按游标「上次之后的全部」
+                if not user["last_seen_tweet_id"] and lookback_h:
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
+                    dropped = [t for t in tweets if t.created_at < cutoff]
+                    tweets = [t for t in tweets if t.created_at >= cutoff]
+                    if dropped and not tweets:
+                        stats.notes.append(f"@{user['handle']} 最近 {lookback_h} 小时内没有新推文（更早的 {len(dropped)} 条按时间窗跳过，可在推主设置里调大「首次回溯」）")
+                stats.tweets_fetched += len(tweets)
                 hit = 0
-                for t in result.tweets:
-                    reason = precheck(t, account["handle"])
+                for t in tweets:
+                    reason = precheck(t, account["handle"], max_age_h=None if user["last_seen_tweet_id"] else lookback_h)
                     if reason:
                         store_target(t, "monitor", user["id"], process_status="filtered",
-                                     reason=FILTER_REASONS.get(reason, reason))
+                                     reason="预检拦下：" + FILTER_REASONS.get(reason, reason))
                         stats.filtered += 1
                         continue
                     tid = store_target(t, "monitor", user["id"], process_status="new")
@@ -161,7 +182,7 @@ class MonitorJob:
                         continue
                     with get_conn() as conn:
                         target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (tid,)).fetchone()
-                    outcome = self.match.run(target, account)
+                    outcome = self.match.run(target, account, cfg=user)
                     if outcome.status == "queued":
                         stats.queued += 1
                         hit += 1

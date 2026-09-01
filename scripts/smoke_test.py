@@ -59,9 +59,9 @@ with get_conn() as conn:
     dry = conn.execute("SELECT value FROM app_settings WHERE key='dry_run'").fetchone()
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
     age = conn.execute("SELECT value FROM app_settings WHERE key='tweet_max_age_hours'").fetchone()["value"]
-assert ver == 4 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 5 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and age == "168", (my_min, age)
-print("[1] v2→v4 升级 OK：演示数据全部清除、用户数据保留；旧默认阈值放宽（达标分 7→5，最大年龄 48→168h）")
+print("[1] v2→v5 升级 OK：演示数据全部清除、用户数据保留；旧默认阈值放宽（达标分 7→5，最大年龄 48→168h）")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -121,6 +121,47 @@ with get_conn() as conn:
     nm = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('no_match','filtered') LIMIT 1").fetchone()
 if nm:
     out = jobs.match.rematch(nm["id"]); print("[3h] 重新匹配:", out.status, out.reason[:50])
+
+# ---------- 3x. v5 新能力：手动选素材 / AI 撰写（无 LLM 应给明确提示）/ 回复方式 manual / 发送后核实 ----------
+with get_conn() as conn:
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_rules)")}
+    assert {"lookback_hours", "reply_mode", "ai_brief", "allow_polish"} <= cols, cols
+    qcols = {r["name"] for r in conn.execute("PRAGMA table_info(review_queue)")}
+    assert {"origin", "verify_status"} <= qcols, qcols
+    sent_row = conn.execute("SELECT verify_status, origin FROM review_queue WHERE status='sent' LIMIT 1").fetchone()
+assert sent_row["verify_status"] == "ok" and sent_row["origin"] == "ai_match", dict(sent_row)
+print("[3i] 发送后自动回查 verify_status=ok，origin 记录 OK")
+with get_conn() as conn:
+    tgt = conn.execute("SELECT id, lang FROM target_tweets WHERE process_status IN ('filtered','no_match') LIMIT 1").fetchone()
+    mat = conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' AND lang=?", (tgt["lang"],)).fetchone() \
+        or conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' LIMIT 1").fetchone()
+out = jobs.match.manual_match(tgt["id"], mat["id"], "我手动改过的文案")
+assert out.status == "queued", out
+with get_conn() as conn:
+    q = conn.execute("SELECT origin, final_text, material_id FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()
+assert q["origin"] == "manual" and q["final_text"] == "我手动改过的文案" and q["material_id"] == mat["id"], dict(q)
+print("[3j] 手动选素材进队列 OK")
+with get_conn() as conn:
+    tgt2 = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') LIMIT 1").fetchone()
+out = jobs.match.ai_write(tgt2["id"], "推荐我们的网关 @ApiMaxJP")
+assert out.status == "no_match" and "设置 → LLM" in out.reason, out
+print("[3k] 无 LLM 时 AI 撰写给出明确提示 OK:", out.reason[:40])
+from x_operator.core.matcher import extract_must_include  # noqa: E402
+assert extract_must_include("带上 https://apimax.jp/ 和 @ApiMaxJP，谢谢") == ["https://apimax.jp/", "@ApiMaxJP"]
+# reply_mode=manual：达标推文不自动生成
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_mode='manual', newest_id_cursor=NULL WHERE name='规则A'"); conn.commit()
+s2 = jobs.search.run_once()
+with get_conn() as conn:
+    manual_reason = conn.execute("SELECT llm_relevance_reason FROM target_tweets WHERE source='search' AND process_status='no_match' "
+                                 "AND llm_relevance_reason LIKE '%手动处理%' LIMIT 1").fetchone()
+assert s2.queued == 0 and manual_reason is not None, (s2.as_msg(), manual_reason)
+print("[3l] 回复方式=只抓取手动处理 OK")
+# lookback：把游标清空、时间窗设为 0.0001 小时 → 全部被时间窗挡下
+with get_conn() as conn:
+    conn.execute("UPDATE watched_users SET last_seen_tweet_id=NULL, lookback_hours=1"); conn.commit()
+m3 = jobs.monitor.run_once(); assert m3.tweets_fetched == 3, m3.as_msg()  # Mock 推文都在几分钟内，1 小时窗内全保留
+print("[3m] 监控首次回溯时间窗 OK")
 
 # ---------- 4. 登录流程离线模拟 ----------
 from x_operator.adapters.real import (UnofficialXClient, validate_unofficial_credentials,  # noqa: E402

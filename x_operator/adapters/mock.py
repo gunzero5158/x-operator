@@ -110,3 +110,6 @@ class MockXClient(XClient):
     def reply(self, text: str, in_reply_to_tweet_id: str,
               media_ids: list[str] | None = None) -> PostResult:
         return PostResult(tweet_id="mock_reply_" + _next_id())
+
+    def tweet_exists(self, tweet_id: str) -> bool | None:
+        return True

@@ -6,11 +6,13 @@
 """
 from __future__ import annotations
 
-from nicegui import ui
+from nicegui import run, ui
 
+from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, run_job, shell,
-                     tweet_link)
+from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
+                     shell, tweet_link)
+from .pickers import ai_write_dialog, pick_material_dialog
 
 _LIMIT = 150
 
@@ -153,6 +155,27 @@ def register(jobs) -> None:
                 ui.notify(f"已拉黑 @{handle}，之后不再对其回复", type="warning")
                 render()
 
+            async def pick(t):
+                res = await pick_material_dialog(t["text"], t["lang"])
+                if res is None:
+                    return
+                mid, text = res
+                outcome = await run.io_bound(jobs.match.manual_match, t["id"], mid, text)
+                notify_long(("已进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
+                            ok=outcome.status == "queued")
+                render()
+
+            async def write(t):
+                cfg = load_source_cfg(t)
+                default_brief = ""
+                if cfg is not None:
+                    try:
+                        default_brief = cfg["ai_brief"] or ""
+                    except (IndexError, KeyError):
+                        default_brief = ""
+                await ai_write_dialog(jobs, t["id"], t["text"], default_brief)
+                render()
+
             def render():
                 body.clear()
                 rid = int(rule_f.value or 0)
@@ -173,7 +196,7 @@ def register(jobs) -> None:
                         return
                     ui.label(f"最近 {len(rows)} 条" + ("（已达显示上限，可清理旧记录）" if len(rows) >= _LIMIT else "")).classes("text-xs text-gray-400")
                     for t in rows:
-                        _card(t, rematch, delete_one, blacklist)
+                        _card(t, rematch, delete_one, blacklist, pick, write)
 
             status_f.on("update:model-value", lambda e: render())
             source_f.on("update:model-value", lambda e: render())
@@ -193,7 +216,7 @@ _STATUS_COLOR = {"queued": "bg-green-600", "no_match": "bg-orange-500", "filtere
                  "new": "bg-blue-500", "expired": "bg-gray-400"}
 
 
-def _card(t, rematch, delete_one, blacklist):
+def _card(t, rematch, delete_one, blacklist, pick, write):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
             src = f"监控 @{t['watched_handle']}" if t["source"] == "monitor" and t["watched_handle"] else \
@@ -222,11 +245,15 @@ def _card(t, rematch, delete_one, blacklist):
             else:
                 ui.label("打分理由：" + t["llm_relevance_reason"]).classes("text-xs text-gray-500")
         tweet_link(t["author_handle"], t["tweet_id"])
-        with ui.row().classes("gap-2 items-center"):
+        with ui.row().classes("gap-2 items-center flex-wrap"):
             if t["process_status"] == "queued" and t["queue_id"]:
                 ui.link(f"查看审核队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
             elif t["process_status"] in ("no_match", "filtered", "expired", "new"):
-                ui.button("重新匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense") \
-                    .tooltip("跳过打分/预检，直接拿这条去匹配素材")
+                ui.button("选素材", icon="checklist", on_click=lambda: pick(t)).props("dense outline color=primary") \
+                    .tooltip("从素材库里手动挑一条（可改文案），进待审核")
+                ui.button("AI 撰写", icon="auto_awesome", on_click=lambda: write(t)).props("dense outline color=purple") \
+                    .tooltip("按你写的创作要求让 AI 现写一条回复，进待审核（需 LLM）")
+                ui.button("自动匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense") \
+                    .tooltip("跳过打分/预检，按来源规则的回复方式自动生成一次")
             if t["author_id"]:
                 ui.button("拉黑作者", on_click=lambda: blacklist(t["author_id"], t["author_handle"])).props("flat dense color=negative")

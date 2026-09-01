@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from nicegui import ui
+from nicegui import run, ui
 
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, shell
@@ -102,6 +102,7 @@ def register(jobs) -> None:
                     status_f = ui.select({"all": "全部状态", "active": "启用", "draft": "草稿", "archived": "归档"},
                                          value="all").props("dense outlined")
                     trash_btn = ui.button("回收站", icon="delete_sweep", on_click=lambda: toggle_trash()).props("outline")
+                    ai_btn = ui.button("AI 生成素材", icon="auto_awesome", on_click=lambda: _ai_dialog(jobs, render)).props("outline color=purple")
                     new_btn = ui.button("新建素材", icon="add", on_click=lambda: _edit_dialog(None, render)).props("color=primary")
 
             hint = ui.label("").classes("text-xs text-gray-400")
@@ -141,6 +142,7 @@ def register(jobs) -> None:
                 title.text = "素材库 · 回收站" if trash else "素材库"
                 status_f.set_visibility(not trash)
                 new_btn.set_visibility(not trash)
+                ai_btn.set_visibility(not trash)
                 hint.text = ("回收站里的素材不会被匹配引擎使用；可恢复或彻底删除。" if trash
                              else "「删除」会移入回收站（可恢复）；「归档」保留但不再参与匹配。")
                 rows = _load(kind_f.value, status_f.value, trash)
@@ -205,3 +207,79 @@ def register(jobs) -> None:
                 ui.button("保存", on_click=do_save).props("color=primary")
                 ui.button("取消", on_click=dialog.close).props("flat")
         dialog.open()
+
+    async def _ai_dialog(jobs, refresh):
+        """AI 批量生成素材：填主题/风格/语言/场景/必须包含 → 预览勾选 → 入库。"""
+        if not jobs.llm.configured:
+            ui.notify("「AI 生成素材」需要先到「设置 → LLM」配置网关", type="warning", multi_line=True); return
+        with ui.dialog() as dlg, ui.card().classes("w-[760px] max-w-[95vw] max-h-[92vh] overflow-auto"):
+            ui.label("AI 生成素材").classes("text-lg font-bold")
+            with ui.row().classes("w-full gap-3 no-wrap"):
+                kind = ui.select({"reply": "回复（在别人推文下用）", "post": "发帖（自己发的推文）"}, value="reply", label="类型").classes("flex-1").props("outlined")
+                lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语"}, value="ja", label="语言").classes("flex-1").props("outlined")
+                count = ui.number("生成条数", value=5, min=1, max=20, step=1).classes("w-32").props("outlined")
+            ui.label("类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            topic = ui.textarea("主题 / 要传达的信息", value="").classes("w-full").props("outlined autogrow")
+            ui.label("例：我们是按量计费的多模型 AI API 网关，一个 key 用 GPT/Claude/Gemini，比官方直连便宜；面向独立开发者。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            style = ui.input("风格 / 语气", value="").classes("w-full").props("outlined")
+            ui.label("例：像同行随口聊天，不像客服；简短；可以带一点自嘲。留空=自然口语。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            scenario = ui.input("使用场景（选填）", value="").classes("w-full").props("outlined")
+            ui.label("例：对方在抱怨 API 太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            must = ui.input("必须包含（选填，多个用逗号）", value="").classes("w-full").props("outlined")
+            ui.label("例：@ApiMaxJP, https://apimax.jp 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            preview = ui.column().classes("w-full gap-1")
+            chosen: dict[int, bool] = {}
+            items_holder: dict = {"items": []}
+            status_sel = ui.select({"active": "直接启用", "draft": "先存为草稿"}, value="active", label="入库状态").classes("w-64").props("outlined dense")
+
+            async def gen():
+                if not (topic.value or "").strip():
+                    ui.notify("请先填主题", type="negative"); return
+                gen_btn.disable(); preview.clear()
+                with preview:
+                    ui.spinner(); ui.label("AI 生成中（10~40 秒）…").classes("text-xs text-gray-400")
+                try:
+                    items = await run.io_bound(jobs.llm.generate_materials, kind.value, lang.value, topic.value.strip(),
+                                               (style.value or "").strip(), (scenario.value or "").strip(),
+                                               [m.strip() for m in (must.value or "").replace("，", ",").split(",") if m.strip()],
+                                               int(count.value or 5))
+                except Exception as e:
+                    preview.clear()
+                    with preview:
+                        ui.label(f"生成失败：{e}").classes("text-red-500 whitespace-pre-wrap")
+                    gen_btn.enable(); return
+                gen_btn.enable()
+                items_holder["items"] = items
+                chosen.clear()
+                preview.clear()
+                with preview:
+                    if not items:
+                        ui.label("AI 没有返回内容，换个说法再试").classes("text-orange-600"); return
+                    ui.label(f"生成了 {len(items)} 条，取消勾选不想要的，可以直接在框里改：").classes("text-sm font-semibold")
+                    for i, it in enumerate(items):
+                        chosen[i] = True
+                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                            cb = ui.checkbox(value=True)
+                            cb.on("update:model-value", lambda e, i=i: chosen.__setitem__(i, bool(e.args)))
+                            with ui.column().classes("flex-1 gap-0"):
+                                ta = ui.textarea(value=it["text"]).classes("w-full").props("outlined autogrow dense")
+                                ta.on("update:model-value", lambda e, i=i: items_holder["items"][i].__setitem__("text", e.args))
+                                ui.label("#" + (it["scenario_tags"] or "")).classes("text-xs text-gray-400")
+
+            def save_all():
+                items = items_holder["items"]
+                picked = [it for i, it in enumerate(items) if chosen.get(i)]
+                if not picked:
+                    ui.notify("没有勾选任何一条", type="warning"); return
+                with get_conn() as conn:
+                    for it in picked:
+                        conn.execute("INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) VALUES (?,?,?,?,?,'ai')",
+                                     (kind.value, (it["text"] or "").strip(), lang.value, it.get("scenario_tags", ""), status_sel.value))
+                    conn.commit()
+                dlg.close(); refresh(); ui.notify(f"已入库 {len(picked)} 条（标记为 AI 生成）", type="positive")
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("取消", on_click=dlg.close).props("flat")
+                gen_btn = ui.button("生成预览", icon="auto_awesome", on_click=gen).props("color=purple")
+                ui.button("入库勾选的", icon="save", on_click=save_all).props("color=primary")
+        dlg.open()

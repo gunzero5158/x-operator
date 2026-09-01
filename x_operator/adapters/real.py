@@ -202,6 +202,15 @@ class OfficialXClient(XClient):
         d = resp.data
         return UserData(user_id=str(d.id), handle=d.username, display_name=d.name or "")
 
+    def tweet_exists(self, tweet_id: str) -> bool | None:
+        try:
+            resp = self._client.get_tweet(tweet_id, user_auth=True)
+        except self._tweepy.NotFound:
+            return False
+        except Exception:
+            return None
+        return bool(resp and resp.data)
+
     _TWEET_FIELDS = ["created_at", "lang", "referenced_tweets", "author_id", "in_reply_to_user_id"]
 
     def _to_tweets(self, resp) -> list[TweetData]:
@@ -634,6 +643,15 @@ class UnofficialXClient(XClient):
         if u is None:
             raise TargetNotFound(f"找不到用户 @{h}")
         return UserData(user_id=str(u.id), handle=u.screen_name, display_name=u.name or "")
+
+    def tweet_exists(self, tweet_id: str) -> bool | None:
+        try:
+            tw = self._call(lambda: self._client.get_tweet_by_id(tweet_id), "核实推文")
+        except TargetNotFound:
+            return False
+        except XClientError:
+            return None
+        return tw is not None
 
     def get_user_tweets(self, user_id: str, since_id: str | None = None,
                         max_results: int = 5, include_replies: bool = False) -> FetchResult:

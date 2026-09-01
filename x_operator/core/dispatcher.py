@@ -52,7 +52,7 @@ class Dispatcher:
                 ok, why = self._dispatch_account(account)
                 if ok:
                     report.sent += 1
-                elif why:
+                if why:
                     report.notes.append(f"@{account['handle']}：{why}")
             except Exception as e:  # 账号间隔离
                 report.notes.append(f"@{account['handle']}：{e}")
@@ -101,7 +101,11 @@ class Dispatcher:
             return False, gr.detail
 
         if self.send_item(account, item):
-            return True, ""
+            with get_conn() as conn:
+                vs = conn.execute("SELECT verify_status FROM review_queue WHERE id=?", (item["id"],)).fetchone()["verify_status"]
+            tail = {"ok": "，已回查确认存在 ✅", "missing": "，⚠ 但回查时在 X 上查不到（可能被限制/静默丢弃）",
+                    }.get(vs, "")
+            return True, f"条目 #{item['id']} 已发出：{self.last_sent_url}{tail}"
         with get_conn() as conn:
             row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (item["id"],)).fetchone()
         if row["status"] == "approved":
@@ -165,11 +169,37 @@ class Dispatcher:
                     "VALUES (?,?,?,?,1,?)",
                     (account["id"], client.api_kind, item["action_type"], has_link, utcnow_iso()))
                 conn.commit()
-            return True
         except sqlite3.IntegrityError:
             # 去重账本冲突（竞态）
             self._set_status(item["id"], "failed", error_msg="去重账本冲突：该推文已被回复")
             return False
+        # 发送后核实：X 有时返回成功但推文被静默丢弃/限制，这里立刻回查一次
+        self.verify_item(item["id"], client=client)
+        self.last_sent_url = f"https://x.com/{account['handle']}/status/{res.tweet_id}"
+        return True
+
+    last_sent_url: str | None = None
+
+    def verify_item(self, item_id: int, client=None) -> str:
+        """回查已发条目在 X 上是否真的存在。返回 verify_status：ok / missing / unknown。"""
+        with get_conn() as conn:
+            item = conn.execute("SELECT rq.*, a.handle FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
+                                "WHERE rq.id=?", (item_id,)).fetchone()
+        if item is None or item["status"] != "sent" or not item["sent_tweet_id"]:
+            return "unknown"
+        try:
+            if client is None:
+                with get_conn() as conn:
+                    acc = conn.execute("SELECT * FROM accounts WHERE id=?", (item["account_id"],)).fetchone()
+                client = factory.get_client(acc)
+            exists = client.tweet_exists(item["sent_tweet_id"])
+        except Exception:
+            exists = None
+        status = "ok" if exists else ("missing" if exists is False else "unknown")
+        with get_conn() as conn:
+            conn.execute("UPDATE review_queue SET verify_status=? WHERE id=?", (status, item_id))
+            conn.commit()
+        return status
 
     def _set_status(self, item_id: int, status: str, skip_reason: str | None = None,
                     error_msg: str | None = None) -> None:

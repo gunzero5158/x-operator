@@ -134,7 +134,7 @@ def tweet_link(author_handle: str | None, tweet_id: str | None):
 TARGET_STATUS_LABEL = {
     "new": "待匹配",
     "queued": "已进审核队列",
-    "no_match": "未匹配到合适素材",
+    "no_match": "达标但未生成回复",
     "filtered": "已过滤/未达标",
     "expired": "已过期",
 }
