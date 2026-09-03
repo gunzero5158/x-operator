@@ -57,9 +57,9 @@ with get_conn() as conn:
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
     obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
     thr = conn.execute("SELECT value FROM app_settings WHERE key='match_confidence_threshold'").fetchone()["value"]
-assert ver == 7 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 8 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
-print("[1] v2→v7 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
+print("[1] v2→v8 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -468,6 +468,39 @@ with get_conn() as conn:
     q = conn.execute("SELECT material_id, final_text, llm_confidence FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()
 assert q["material_id"] and q["final_text"] and q["llm_confidence"] == 0.35, dict(q)
 print("[6f7] 素材匹配宽进（无同语言 / AI 出错 / AI 跳过都给草稿）OK")
+# 多账号：回复在小号间自动轮流、主号不参与；规则可指定固定账号；待审核可改账号
+from x_operator.core.accounts import choose_reply_account, account_options  # noqa: E402
+from x_operator.ui.queue import _set_account  # noqa: E402
+with get_conn() as conn:
+    for h in ("small1", "small2"):
+        conn.execute("INSERT INTO accounts(handle, access_type, is_primary, credentials, active_hours_start, active_hours_end, min_interval_sec, max_interval_sec, daily_reply_limit) "
+                     "VALUES (?,'unofficial',0,?,'00:00','00:00',0,0,15)", (h, json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32})))
+    conn.commit()
+    ids = {r["handle"]: r["id"] for r in conn.execute("SELECT id, handle FROM accounts")}
+assert set(account_options()) >= {0, ids["tester"], ids["small1"], ids["small2"]}
+jobs.search.run_once(rule_ids=[rule["id"]])   # 多抓几条来分
+got = []
+for _ in range(4):
+    out = jobs.match.rematch(_pick_unqueued()); assert out.status == "queued", out
+    with get_conn() as conn:
+        got.append(conn.execute("SELECT account_id FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["account_id"])
+assert set(got) == {ids["small1"], ids["small2"]} and got.count(ids["small1"]) == 2, (got, ids)   # 均匀分摊、主号不参与
+assert "自动轮流" in out.reason, out.reason
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_account_id=? WHERE id=?", (ids["tester"], rule["id"])); conn.commit()
+out = jobs.match.rematch(_pick_unqueued())
+with get_conn() as conn:
+    assert conn.execute("SELECT account_id FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["account_id"] == ids["tester"]
+assert "指定账号" in out.reason, out.reason
+assert _set_account(out.queue_id, ids["small2"])
+with get_conn() as conn:
+    assert conn.execute("SELECT account_id FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["account_id"] == ids["small2"]
+    conn.execute("UPDATE search_rules SET reply_account_id=NULL WHERE id=?", (rule["id"],))
+    conn.execute("UPDATE accounts SET status='paused' WHERE handle IN ('small1','small2')"); conn.commit()
+    acc_row = conn.execute("SELECT * FROM accounts WHERE handle='tester'").fetchone()
+chosen, note = choose_reply_account(None, acc_row)
+assert chosen["id"] == ids["tester"] and "没有启用中的小号" in note, note   # 没小号才退回主号
+print("[6f8] 多账号回复分摊（自动轮流 / 指定账号 / 队列改账号 / 无小号退回主号）OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

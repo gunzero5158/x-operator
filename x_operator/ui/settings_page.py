@@ -227,7 +227,10 @@ _OFFICIAL_GUIDE = """
 def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
     ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
-             "弹窗里有手把手的获取步骤。主号只能用官方通道。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
+             "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
+    ui.label("多账号分工：「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）负责抓取；回复默认在启用中的小号里自动轮流、"
+             "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，审核队列里每条也能临时改。"
+             "发帖的账号在定时计划里选。").classes("text-xs text-gray-400")
     sys_proxy = detect_system_proxy()
     ui.label("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
              "。账号里代理留空时自动使用它。").classes("text-xs text-gray-400")

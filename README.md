@@ -83,6 +83,17 @@ uv run python -m x_operator.main
 
 无论哪种，都只生成**待审核**草稿，最后由你批准才发。
 
+### 多账号：谁来回、谁来发
+
+- **主号**：账号弹窗里的「设为主号」开关（只有官方 API 通道能当主号）。主号负责抓取（读），默认**不参与回复**。
+- **回复账号**：每条搜索规则 / 每个监控推主可选——
+  - 「自动轮流」（默认）：在启用中的小号里挑最闲的（按今天已回 + 队列里待审核/待发送的条数，跳过已到日上限的），
+    一轮抓到的多条草稿会均匀分到各小号；一个小号都没有时才退回主号。
+  - 指定某个账号：固定用它。
+  - 审核队列里每条待审核条目都能临时改「发送账号」。
+- **发帖账号**：定时计划新建时选。
+- 去重账本按推文去重：同一条推文只会被一个账号回。
+
 ### 时间窗
 
 不再有全局的「推文最大年龄」。每条搜索规则、每个监控推主各有一个**首次回溯（小时，默认 24）**：
@@ -148,10 +159,10 @@ bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无�
 
 ```
 x_operator/
-  db/         schema.py(DDL v6) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v8) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
-  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py
+  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流)
   ui/         layout.py pickers.py(共用弹窗/回复方式字段) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
 scripts/      smoke_test.py serve_check.sh

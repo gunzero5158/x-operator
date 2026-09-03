@@ -8,6 +8,7 @@ from __future__ import annotations
 from nicegui import run, ui
 
 from .. import config
+from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
 from ..db.database import get_conn
@@ -40,14 +41,14 @@ def _save(rid, data: dict):
     with get_conn() as conn:
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
-                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=? WHERE id=?",
+                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], rid))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"]))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"]))
         conn.commit()
 
 
@@ -114,6 +115,7 @@ def register(jobs) -> None:
                 with get_conn() as conn:
                     rows = conn.execute("SELECT * FROM search_rules ORDER BY id").fetchall()
                 counts = _rule_counts()
+                acc_opts = account_options()
                 with body:
                     if not rows:
                         ui.label("暂无搜索规则。点「新建规则」手动填，或点「AI 生成规则」用大白话描述你想找谁。").classes("text-gray-400")
@@ -132,6 +134,8 @@ def register(jobs) -> None:
                                     ui.badge(f"观看 ≥ {fmt_views(r['min_views'])}").classes("bg-amber-600")
                                 ui.badge(REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"])).classes(
                                     "bg-purple-600" if r["reply_mode"] == "ai_write" else "bg-teal-600")
+                                ui.badge("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）"))
+                                         ).classes("bg-slate-500")
                                 if not r["enabled"]:
                                     ui.badge("已停用").classes("bg-gray-400")
                                 ui.label(f"上次运行 {fmt_time(r['last_run_at']) if r['last_run_at'] else '未运行'}"
@@ -188,7 +192,8 @@ def register(jobs) -> None:
             _hint("min_score"); _hint("max_results"); _hint("lookback")
             min_views = ui.number("观看量门槛（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("w-full").props("outlined")
             _hint("min_views")
-            mode, brief, polish = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后")
+            mode, brief, polish, acc = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0),
+                                                         "抓到达标推文后", g("reply_account_id", 0))
 
             def do_save():
                 if not (name.value or "").strip() or not (kq.value or "").strip() or not (sc.value or "").strip():
@@ -202,7 +207,8 @@ def register(jobs) -> None:
                             max_results=max(10, min(100, int(max_results.value or 10))),
                             lookback=max(1, int(lookback.value or 24)),
                             min_views=max(0, int(min_views.value or 0)),
-                            reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0)
+                            reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0,
+                            reply_account_id=(int(acc.value) or None) if acc.value else None)
                 try:
                     _save(r["id"] if r else None, data)
                 except Exception as e:

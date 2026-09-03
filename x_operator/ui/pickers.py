@@ -4,6 +4,7 @@ from __future__ import annotations
 from nicegui import run, ui
 
 from ..db.database import get_conn, utcnow_iso
+from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
 from .layout import confirm, notify_long
 
@@ -99,6 +100,8 @@ REPLY_HINTS = {
     "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做 XX 产品，"
                 "回复要先接对方的话再提一句，像同行聊天，结尾带 @你的官号。",
     "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
+    "reply_account": "这条规则/推主抓到的推文由哪个账号回复。自动轮流=在启用中的小号里挑最闲的（按今天已回+待发条数，跳过已到日上限的），"
+                     "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。审核队列里每条也能临时改。推荐自动轮流。",
 }
 
 
@@ -106,13 +109,18 @@ def hint(text: str):
     ui.label(text).classes("text-xs text-gray-400 -mt-2 mb-1")
 
 
-def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str):
-    """画出「回复方式 / AI 创作要求 / 允许润色」三个控件（带说明、按模式显隐），返回 (mode, brief, polish)。"""
+def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str,
+                      account_value: int | None = 0):
+    """画出「回复方式 / AI 创作要求 / 允许润色 / 回复账号」控件（带说明、按模式显隐），返回 (mode, brief, polish, acc)。"""
     ui.separator()
     ui.label("回复方式").classes("font-semibold text-sm")
     mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
                      label=mode_label).classes("w-full").props("outlined")
     hint(REPLY_HINTS["reply_mode"])
+    opts = account_options()
+    acc = ui.select(opts, value=(account_value or 0) if (account_value or 0) in opts else 0,
+                    label="回复账号").classes("w-full").props("outlined")
+    hint(REPLY_HINTS["reply_account"])
     brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
     brief_hint = ui.label(REPLY_HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
     tpl_box = ui.column().classes("w-full gap-0")
@@ -126,7 +134,7 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
         brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai); tpl_box.set_visibility(is_ai)
         polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
     mode.on("update:model-value", lambda e: sync()); sync()
-    return mode, brief, polish
+    return mode, brief, polish, acc
 
 
 def reply_mode_invalid(mode, brief) -> str:

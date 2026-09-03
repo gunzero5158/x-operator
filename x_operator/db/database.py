@@ -57,6 +57,9 @@ _ADDED_COLUMNS = [
     # v6：搜索规则观看量门槛；抓取记录保存观看量
     ("search_rules", "min_views", "INTEGER NOT NULL DEFAULT 0"),
     ("target_tweets", "view_count", "INTEGER"),
+    # v8：每条规则/推主可指定回复账号（NULL = 自动轮流）
+    ("search_rules", "reply_account_id", "INTEGER"),
+    ("watched_users", "reply_account_id", "INTEGER"),
 ]
 
 

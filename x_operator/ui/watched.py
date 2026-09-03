@@ -8,6 +8,7 @@ from nicegui import run, ui
 
 from ..adapters import factory
 from ..adapters.base import XClientError
+from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.monitor import get_primary_account
 from ..db.database import get_conn, utcnow_iso
@@ -85,6 +86,7 @@ def register(jobs) -> None:
                 body.clear()
                 with get_conn() as conn:
                     rows = conn.execute("SELECT * FROM watched_users ORDER BY id").fetchall()
+                acc_opts = account_options()
                 with body:
                     if not rows:
                         ui.label("暂无监控推主").classes("text-gray-400")
@@ -100,6 +102,8 @@ def register(jobs) -> None:
                                         ui.badge(f"首次回溯 {u['lookback_hours']}h").classes("bg-slate-400")
                                         ui.badge(REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"])).classes(
                                             "bg-purple-600" if u["reply_mode"] == "ai_write" else "bg-teal-600")
+                                        ui.badge("回复账号：" + ("自动轮流" if not u["reply_account_id"] else acc_opts.get(u["reply_account_id"], "（已删除→自动轮流）"))
+                                                 ).classes("bg-slate-500")
                                         if not u["enabled"]:
                                             ui.badge("已停用").classes("bg-gray-400")
                                     ui.label(f"命中 {u['hit_count']} 次 · 游标 {u['last_seen_tweet_id'] or '无（下次按首次回溯抓）'}"
@@ -127,16 +131,18 @@ def register(jobs) -> None:
             hint(HINTS["lookback"])
             incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
             hint(HINTS["include"])
-            mode, brief, polish = reply_mode_fields(u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后")
+            mode, brief, polish, acc = reply_mode_fields(u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后",
+                                                         u["reply_account_id"])
 
             def save():
                 problem = reply_mode_invalid(mode, brief)
                 if problem:
                     ui.notify(problem, type="negative"); return
                 with get_conn() as conn:
-                    conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=? WHERE id=?",
+                    conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=? WHERE id=?",
                                  ((note.value or "").strip(), 1 if incl.value else 0, max(1, int(lookback.value or 24)), mode.value,
-                                  (brief.value or "").strip(), 1 if polish.value else 0, u["id"]))
+                                  (brief.value or "").strip(), 1 if polish.value else 0,
+                                  (int(acc.value) or None) if acc.value else None, u["id"]))
                     conn.commit()
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 

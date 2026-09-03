@@ -19,6 +19,7 @@ from typing import Literal
 from .. import config
 from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
+from .accounts import choose_reply_account
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
 
@@ -87,21 +88,24 @@ class MatchEngine:
 
     # ---------------- 自动路线 ----------------
     def run(self, target: sqlite3.Row, account: sqlite3.Row, cfg: sqlite3.Row | None = None) -> MatchOutcome:
+        """account = 抓取用的账号；真正用哪个账号回复由规则/推主的「回复账号」决定（见 core/accounts.py）。"""
         if cfg is None:
             cfg = load_source_cfg(target)
         mode = _cfg_get(cfg, "reply_mode", "material")
         if mode == "manual":
             self._mark_no_match(target["id"], "规则设置为「只抓取，手动处理」：请在这里点「选素材」或「AI 撰写」")
             return MatchOutcome("no_match", None, "等待手动处理")
+        reply_acc, acc_note = choose_reply_account(cfg, account)
         if mode == "ai_write":
             brief = (_cfg_get(cfg, "ai_brief", "") or "").strip()
             if not brief:
                 self._mark_no_match(target["id"], "规则选了「AI 按要求创作」但没填创作要求，请编辑规则补上")
                 return MatchOutcome("no_match", None, "缺少创作要求")
-            return self.ai_write(target["id"], brief, account=account, origin="ai_write")
-        return self._match_material(target, account, bool(_cfg_get(cfg, "allow_polish", 0)))
+            return self.ai_write(target["id"], brief, account=reply_acc, origin="ai_write", acc_note=acc_note)
+        return self._match_material(target, reply_acc, bool(_cfg_get(cfg, "allow_polish", 0)), acc_note=acc_note)
 
-    def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool) -> MatchOutcome:
+    def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool,
+                        acc_note: str = "") -> MatchOutcome:
         """「宽进」：只要素材库里有启用的回复素材，就一定给出一条草稿进待审核——AI 择优；AI 拒绝/出错/说跳过/信心太低时
         退回到规则挑选（同语言里用得最少的一条），理由里写明，让审核的人知道这条是兜底出来的。"""
         lang = target["lang"] or "ja"
@@ -143,14 +147,16 @@ class MatchEngine:
                 reply_text = chosen["text"]
             reason = ("AI 择优" if self.llm.configured else "启发式") + (
                 "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + str(decision.get("reason") or "") + lang_note
+        if acc_note:
+            reason += f"｜{acc_note}"
         qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match")
         return MatchOutcome("queued", qid, reason)
 
     # ---------------- 手动路线 ----------------
     def manual_match(self, target_id: int, material_id: int, text: str | None = None,
                      account: sqlite3.Row | None = None) -> MatchOutcome:
-        """人工在抓取记录里选定一条素材（可顺手改文案）→ 进待审核。"""
-        target, account, err = self._prepare(target_id, account)
+        """人工在抓取记录里选定一条素材（可顺手改文案）→ 进待审核。account 不传时按来源规则的「回复账号」选。"""
+        target, account, err, acc_note = self._prepare(target_id, account)
         if err:
             return MatchOutcome("no_match", None, err)
         with get_conn() as conn:
@@ -158,15 +164,17 @@ class MatchEngine:
         if mat is None:
             return MatchOutcome("no_match", None, "素材不存在或已在回收站")
         final = (text or "").strip() or mat["text"]
-        qid = self._enqueue(account["id"], target["id"], mat["id"], final, "人工选定素材", 1.0, origin="manual")
-        return MatchOutcome("queued", qid, "已按你选的素材生成待审核条目")
+        reason = "人工选定素材" + (f"｜{acc_note}" if acc_note else "")
+        qid = self._enqueue(account["id"], target["id"], mat["id"], final, reason, 1.0, origin="manual")
+        return MatchOutcome("queued", qid, f"已按你选的素材生成待审核条目（{acc_note}）" if acc_note else "已按你选的素材生成待审核条目")
 
     def ai_write(self, target_id: int, brief: str, account: sqlite3.Row | None = None,
-                 origin: str = "ai_write") -> MatchOutcome:
-        """按创作要求让 LLM 现写回复 → 进待审核。"""
-        target, account, err = self._prepare(target_id, account)
+                 origin: str = "ai_write", acc_note: str = "") -> MatchOutcome:
+        """按创作要求让 LLM 现写回复 → 进待审核。account 不传时按来源规则的「回复账号」选。"""
+        target, account, err, note = self._prepare(target_id, account)
         if err:
             return MatchOutcome("no_match", None, err)
+        acc_note = acc_note or note
         brief = (brief or "").strip()
         if not brief:
             return MatchOutcome("no_match", None, "请先写创作要求（主题、立场、必须带的链接或 @账号、语气）")
@@ -177,12 +185,14 @@ class MatchEngine:
             self._mark_no_match(target["id"], f"AI 撰写失败：{e}")
             return MatchOutcome("no_match", None, f"AI 撰写失败：{e}")
         reason = "AI 按创作要求撰写" + (f"（已强制包含：{'、'.join(must)}）" if must else "") + "：" + (res.get("reason") or "")
+        if acc_note:
+            reason += f"｜{acc_note}"
         qid = self._enqueue(account["id"], target["id"], None, res["reply_text"], reason, 0.9, origin=origin)
         return MatchOutcome("queued", qid, reason)
 
     def rematch(self, target_id: int) -> MatchOutcome:
         """「抓取记录」页的重新匹配：按来源规则的回复方式再跑一次。"""
-        target, account, err = self._prepare(target_id, None)
+        target, account, err, acc_note = self._prepare(target_id, None)
         if err:
             return MatchOutcome("no_match", None, err)
         with get_conn() as conn:
@@ -191,27 +201,30 @@ class MatchEngine:
         cfg = load_source_cfg(target)
         if _cfg_get(cfg, "reply_mode", "material") == "manual":
             # 手动模式下点「重新匹配」= 用素材库自动配一次
-            return self._match_material(target, account, bool(_cfg_get(cfg, "allow_polish", 0)))
+            return self._match_material(target, account, bool(_cfg_get(cfg, "allow_polish", 0)), acc_note=acc_note)
         return self.run(target, account, cfg)
 
     # ---------------- 内部 ----------------
     def _prepare(self, target_id: int, account: sqlite3.Row | None):
+        """返回 (target, 回复账号, 错误, 账号说明)。account 传了就用它；没传按来源规则的「回复账号」选。"""
         from .monitor import get_primary_account
         with get_conn() as conn:
             target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (target_id,)).fetchone()
             if target is None:
-                return None, None, "记录不存在"
+                return None, None, "记录不存在", ""
             if target["process_status"] == "queued":
-                return None, None, "该推文已在审核队列中（先到审核队列删除/跳过那条，再重新处理）"
+                return None, None, "该推文已在审核队列中（先到审核队列删除/跳过那条，再重新处理）", ""
             dup = conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?",
                                (target["tweet_id"],)).fetchone()
             if dup:
-                return None, None, "该推文已经回复过，不能再回复"
-        if account is None:
-            account = get_primary_account()
-        if account is None:
-            return None, None, "没有状态为「启用」的账号"
-        return target, account, ""
+                return None, None, "该推文已经回复过，不能再回复", ""
+        if account is not None:
+            return target, account, "", ""
+        fallback = get_primary_account()
+        if fallback is None:
+            return None, None, "没有状态为「启用」的账号", ""
+        reply_acc, note = choose_reply_account(load_source_cfg(target), fallback)
+        return target, reply_acc, "", note
 
     def _enqueue(self, account_id: int, target_id: int, material_id: int | None, text: str,
                  reason: str, confidence: float, origin: str) -> int:

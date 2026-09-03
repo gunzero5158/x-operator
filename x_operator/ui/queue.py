@@ -80,6 +80,20 @@ def _revert_to_pending(item_id: int, refresh):
     refresh()
 
 
+def _set_account(item_id: int, account_id: int) -> bool:
+    """待审核条目临时改用别的账号发。"""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE review_queue SET account_id=? WHERE id=? AND status='pending'", (account_id, item_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def _active_account_options() -> dict:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, handle, is_primary FROM accounts WHERE status='active' ORDER BY is_primary DESC, id").fetchall()
+    return {a["id"]: f"@{a['handle']}" + ("（主号）" if a["is_primary"] else "") for a in rows}
+
+
 def _swap_material(item_id: int, material_id: int, text: str) -> None:
     with get_conn() as conn:
         conn.execute("UPDATE review_queue SET material_id=?, final_text=?, origin='manual', llm_reason='人工换用素材' "
@@ -223,7 +237,16 @@ def _weighted_len(text: str) -> int:
 def _card(it, refresh, delete_cb, swap_cb, verify_cb, dirty: set):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
-            ui.badge(f"@{it['acc_handle']}").classes("bg-slate-600")
+            if it["status"] == "pending":
+                opts = _active_account_options()
+                if it["account_id"] not in opts:
+                    opts = {it["account_id"]: f"@{it['acc_handle']}（未启用）", **opts}
+                acc_sel = ui.select(opts, value=it["account_id"], label="发送账号").props("dense outlined").classes("w-44") \
+                    .tooltip("这条由哪个账号发出；改了就按新账号的间隔/日上限/活跃时段发")
+                acc_sel.on("update:model-value", lambda e: ui.notify("已改用 " + opts.get(acc_sel.value, "") + " 发送", type="positive")
+                           if _set_account(it["id"], int(acc_sel.value)) else ui.notify("该条目已不是待审核状态", type="warning"))
+            else:
+                ui.badge(f"@{it['acc_handle']}").classes("bg-slate-600")
             ui.badge("回复" if it["action_type"] == "reply" else "发帖").classes("bg-blue-600")
             origin = it["origin"] or ("scheduled" if it["scheduled_post_id"] else "ai_match")
             ui.badge(ORIGIN_LABEL.get(origin, origin)).classes(
