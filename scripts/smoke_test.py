@@ -432,6 +432,17 @@ try:
 except _LLMError as e:
     assert "SCENE_TIERS" in str(e) and "登记" in str(e), str(e)
 print("[6f5] LLM 模型分工登记表 OK")
+# 创作要求模板：存/覆盖/列出/删
+from x_operator.ui.pickers import load_templates, save_template, delete_template, _bump_template  # noqa: E402
+save_template("日本独立开发者", "推荐我们的网关 @ApiMaxJP，语气像同行")
+save_template("日本独立开发者", "改过的版本 @ApiMaxJP")
+save_template("英文创作者", "Mention https://apimax.jp/")
+tpls = load_templates(); assert [t["name"] for t in tpls] == ["日本独立开发者", "英文创作者"] or len(tpls) == 2, [dict(t) for t in tpls]
+assert next(t for t in tpls if t["name"] == "日本独立开发者")["text"] == "改过的版本 @ApiMaxJP"
+_bump_template(next(t for t in tpls if t["name"] == "英文创作者")["id"])
+assert load_templates()[0]["name"] == "英文创作者"   # 用得多的排前面
+delete_template(tpls[0]["id"]); assert len(load_templates()) == 1
+print("[6f6] 创作要求模板 OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

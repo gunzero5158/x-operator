@@ -192,6 +192,16 @@ CREATE TABLE IF NOT EXISTS action_log (
 );
 CREATE INDEX IF NOT EXISTS ix_actionlog_usage ON action_log(api_kind, created_at);
 
+-- AI 创作要求模板：抓取记录「AI 撰写」、规则/推主的「AI 创作要求」共用
+CREATE TABLE IF NOT EXISTS brief_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    text        TEXT    NOT NULL,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

@@ -3,9 +3,92 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
-from ..db.database import get_conn
+from ..db.database import get_conn, utcnow_iso
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
-from .layout import notify_long
+from .layout import confirm, notify_long
+
+
+# ====================================================================================
+# 创作要求模板（存在 brief_templates 表里，跟其他数据一样在本机 data/x_operator.db）
+# ====================================================================================
+def load_templates() -> list:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM brief_templates ORDER BY usage_count DESC, updated_at DESC").fetchall()
+
+
+def save_template(name: str, text: str) -> None:
+    """同名覆盖。"""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO brief_templates(name, text, created_at, updated_at) VALUES (?,?,?,?) "
+                     "ON CONFLICT(name) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
+                     (name, text, utcnow_iso(), utcnow_iso()))
+        conn.commit()
+
+
+def delete_template(tid: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM brief_templates WHERE id=?", (tid,))
+        conn.commit()
+
+
+def _bump_template(tid: int) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE brief_templates SET usage_count=usage_count+1 WHERE id=?", (tid,))
+        conn.commit()
+
+
+def template_controls(brief) -> None:
+    """在创作要求文本框下面画一行：从模板选 / 存为模板 / 删除模板。brief 是那个 textarea。"""
+    def options() -> dict:
+        return {t["id"]: f"{t['name']}（用过 {t['usage_count']} 次）" for t in load_templates()}
+
+    with ui.row().classes("w-full items-center gap-2 no-wrap"):
+        sel = ui.select(options(), label="从模板选（填入上面的创作要求）", with_input=False).classes("flex-1").props("outlined dense clearable")
+        save_btn = ui.button("存为模板", icon="bookmark_add").props("outline dense")
+        del_btn = ui.button(icon="delete").props("flat dense color=negative").tooltip("删除当前选中的模板")
+
+    def on_pick(e):
+        tid = sel.value
+        if not tid:
+            return
+        row = next((t for t in load_templates() if t["id"] == tid), None)
+        if row is None:
+            return
+        brief.value = row["text"]
+        _bump_template(tid)
+        ui.notify(f"已填入模板「{row['name']}」，可以在上面继续改", type="info")
+    sel.on("update:model-value", on_pick)
+
+    async def on_save():
+        text = (brief.value or "").strip()
+        if not text:
+            ui.notify("上面的创作要求是空的，先写点内容再存", type="warning"); return
+        current = next((t for t in load_templates() if t["id"] == sel.value), None)
+        with ui.dialog() as dlg, ui.card().classes("min-w-96"):
+            ui.label("存为模板").classes("text-lg font-bold")
+            name_in = ui.input("模板名（同名会覆盖）", value=current["name"] if current else text[:20]).classes("w-full").props("outlined dense")
+            ui.label("起个一看就知道用在什么场景的名字，比如「日本独立开发者·成本痛点」").classes("text-xs text-gray-400")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
+                ui.button("保存", on_click=lambda: dlg.submit((name_in.value or "").strip())).props("color=primary")
+        dlg.open()
+        name = await dlg
+        if not name:
+            return
+        save_template(name, text)
+        sel.set_options(options())
+        ui.notify(f"模板「{name}」已保存，下次在这里直接选", type="positive")
+    save_btn.on_click(on_save)
+
+    async def on_delete():
+        current = next((t for t in load_templates() if t["id"] == sel.value), None)
+        if current is None:
+            ui.notify("先在下拉里选中一个模板", type="warning"); return
+        if await confirm(f"删除模板「{current['name']}」？", "不影响已经填进规则/推主里的创作要求。"):
+            delete_template(current["id"])
+            sel.set_options(options(), value=None)
+            ui.notify("已删除", type="positive")
+    del_btn.on_click(on_delete)
 
 LANG_NAME = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "und": "未知"}
 
@@ -32,12 +115,15 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     hint(REPLY_HINTS["reply_mode"])
     brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
     brief_hint = ui.label(REPLY_HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+    tpl_box = ui.column().classes("w-full gap-0")
+    with tpl_box:
+        template_controls(brief)
     polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
     polish_hint = ui.label(REPLY_HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
 
     def sync():
         is_ai = mode.value == "ai_write"
-        brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai)
+        brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai); tpl_box.set_visibility(is_ai)
         polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
     mode.on("update:model-value", lambda e: sync()); sync()
     return mode, brief, polish
@@ -123,6 +209,7 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
         ui.label("写清楚：① 主题/立场（比如：推荐按量计费的多模型网关）；② 必须带的东西——直接把链接或 @账号写在要求里，"
                  "AI 会原样放进正文，少了会自动重写；③ 语气（比如：像同行随口聊，不像客服）。"
                  "AI 会先回应对方说的内容，再自然带出你的主题。").classes("text-xs text-gray-400")
+        template_controls(brief)
         must_lbl = ui.label("").classes("text-xs text-sky-700")
 
         def upd():
