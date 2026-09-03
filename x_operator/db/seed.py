@@ -18,7 +18,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "grace_period_hours": "2",
     "reply_ttl_hours": "48",
     "nurture_days": "14",
-    "match_confidence_threshold": "0.7",
+    "match_confidence_threshold": "0.4",
     # 预算（读额度由 core/budget.py 实际执行：自动轮询在触及熔断线时停，手动运行在用完时拒绝）
     "monthly_budget_usd": "60",
     "daily_read_budget": "330",
@@ -65,6 +65,13 @@ def purge_demo_data(conn: sqlite3.Connection) -> dict[str, int]:
     run("action_log", "DELETE FROM action_log WHERE api_kind='x_mock'")
     run("watched_users", "DELETE FROM watched_users WHERE x_user_id LIKE 'mock_user_%'")
     run("app_settings", "DELETE FROM app_settings WHERE key='dry_run'")
+    return {k: v for k, v in n.items() if v}
+
+
+def loosen_match(conn: sqlite3.Connection) -> dict[str, int]:
+    """v7：素材匹配改为「宽进」——还停在旧默认 0.7 的置信度门槛放宽到 0.4；用户自己改过的不动。"""
+    n = {"match_confidence_threshold": conn.execute(
+        "UPDATE app_settings SET value='0.4' WHERE key='match_confidence_threshold' AND value='0.7'").rowcount}
     return {k: v for k, v in n.items() if v}
 
 

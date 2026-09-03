@@ -42,6 +42,7 @@ c.execute("INSERT INTO action_log(account_id,api_kind,endpoint,success,created_a
 c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply','我的素材','zh','active')")
 c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score) VALUES ('我的规则','foo bar','找人','ja,en',7)")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('tweet_max_age_hours','48')")
+c.execute("INSERT INTO app_settings(key,value) VALUES ('match_confidence_threshold','0.7')")
 c.commit(); c.close()
 init_db(old_db)
 with get_conn() as conn:
@@ -55,9 +56,10 @@ with get_conn() as conn:
     dry = conn.execute("SELECT value FROM app_settings WHERE key='dry_run'").fetchone()
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
     obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
-assert ver == 6 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
-assert my_min == 5 and obsolete == 0, (my_min, obsolete)
-print("[1] v2→v6 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
+    thr = conn.execute("SELECT value FROM app_settings WHERE key='match_confidence_threshold'").fetchone()["value"]
+assert ver == 7 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
+print("[1] v2→v7 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -439,6 +441,33 @@ _bump_template(next(t for t in tpls if t["name"] == "英文创作者")["id"])
 assert load_templates()[0]["name"] == "英文创作者"   # 用得多的排前面
 delete_template(tpls[0]["id"]); assert len(load_templates()) == 1
 print("[6f6] 创作要求模板 OK")
+# 素材匹配「宽进」：没同语言素材也给一条；AI 出错/说跳过也按规则兜底进待审核
+from x_operator.llm.client import LLMError as _LE  # noqa: E402
+
+
+def _pick_unqueued():
+    with get_conn() as conn:
+        return conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') "
+                            "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
+                            "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()["id"]
+
+
+tid = _pick_unqueued()
+with get_conn() as conn:
+    conn.execute("UPDATE target_tweets SET lang='ko' WHERE id=?", (tid,)); conn.commit()   # 素材库里没有韩语素材
+out = jobs.match.rematch(tid); assert out.status == "queued" and "没有「ko」" in out.reason, out
+tid = _pick_unqueued()
+orig_match = jobs.llm.match_reply
+jobs.llm.match_reply = lambda *a, **k: (_ for _ in ()).throw(_LE("模型拒绝"))
+out = jobs.match.rematch(tid); assert out.status == "queued" and "AI 匹配出错" in out.reason and "把关" in out.reason, out
+tid = _pick_unqueued()
+jobs.llm.match_reply = lambda *a, **k: {"skip": True, "material_id": None, "reply_text": "", "confidence": 0.0, "reason": "都不贴"}
+out = jobs.match.rematch(tid); assert out.status == "queued" and "都不太贴" in out.reason, out
+jobs.llm.match_reply = orig_match
+with get_conn() as conn:
+    q = conn.execute("SELECT material_id, final_text, llm_confidence FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()
+assert q["material_id"] and q["final_text"] and q["llm_confidence"] == 0.35, dict(q)
+print("[6f7] 素材匹配宽进（无同语言 / AI 出错 / AI 跳过都给草稿）OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

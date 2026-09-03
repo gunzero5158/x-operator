@@ -66,15 +66,16 @@ class MatchEngine:
         self.llm = llm
 
     # ---------------- 素材候选 ----------------
-    def pick_candidates(self, lang: str, tags: list[str], limit: int = 10) -> list[sqlite3.Row]:
+    def pick_candidates(self, lang: str, tags: list[str], limit: int = 15) -> tuple[list[sqlite3.Row], bool]:
+        """返回 (候选列表, 是否同语言)。优先同语言的启用回复素材；一条都没有就退回全部语言（宁可给一条让人审，也不空手）。"""
+        base = "SELECT * FROM materials WHERE kind='reply' AND status='active' AND deleted_at IS NULL"
         with get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM materials WHERE kind='reply' AND status='active' AND deleted_at IS NULL AND lang=? "
-                "ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC",
-                (lang,),
-            ).fetchall()
+            rows = conn.execute(base + " AND lang=? ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC", (lang,)).fetchall()
+            same_lang = bool(rows)
+            if not rows:
+                rows = conn.execute(base + " ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC").fetchall()
         if not rows:
-            return []
+            return [], same_lang
         tagset = set(t for t in tags if t)
 
         def overlap(m: sqlite3.Row) -> int:
@@ -82,7 +83,7 @@ class MatchEngine:
             return 1 if (tagset & mtags) else 0
 
         rows_sorted = sorted(rows, key=lambda m: (-overlap(m),))
-        return rows_sorted[:limit]
+        return rows_sorted[:limit], same_lang
 
     # ---------------- 自动路线 ----------------
     def run(self, target: sqlite3.Row, account: sqlite3.Row, cfg: sqlite3.Row | None = None) -> MatchOutcome:
@@ -101,42 +102,48 @@ class MatchEngine:
         return self._match_material(target, account, bool(_cfg_get(cfg, "allow_polish", 0)))
 
     def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool) -> MatchOutcome:
+        """「宽进」：只要素材库里有启用的回复素材，就一定给出一条草稿进待审核——AI 择优；AI 拒绝/出错/说跳过/信心太低时
+        退回到规则挑选（同语言里用得最少的一条），理由里写明，让审核的人知道这条是兜底出来的。"""
         lang = target["lang"] or "ja"
         tags = _infer_tags(target["text"])
-        candidates = self.pick_candidates(lang, tags)
+        candidates, same_lang = self.pick_candidates(lang, tags)
         if not candidates:
-            reason = f"素材库里没有语言为「{lang}」、状态为启用的回复素材。可到素材库添加，或在这里手动「选素材」/「AI 撰写」"
+            reason = "素材库里没有任何状态为「启用」的回复素材。到素材库添加（或用「AI 生成素材」）后再点「自动匹配」，也可在这里「AI 撰写」"
             self._mark_no_match(target["id"], reason)
             return MatchOutcome("no_match", None, reason)
+        lang_note = "" if same_lang else f"（素材库没有「{lang}」语言的回复素材，这次从全部语言里挑的，审核时注意语言）"
 
         cand_payload = [{"material_id": c["id"], "text": c["text"], "lang": c["lang"]} for c in candidates]
+        decision: dict = {}
+        fallback_why = ""
         try:
-            decision = self.llm.match_reply(target["text"], lang, cand_payload, allow_polish=allow_polish)
+            decision = self.llm.match_reply(target["text"], lang, cand_payload, allow_polish=allow_polish) or {}
         except LLMError as e:
-            self._mark_no_match(target["id"], f"LLM 匹配失败：{e}")
-            return MatchOutcome("no_match", None, f"LLM 匹配失败：{e}")
+            fallback_why = f"AI 匹配出错（{str(e)[:120]}）"
+        threshold = config.get_float("match_confidence_threshold", 0.4)
+        confidence = _to_float(decision.get("confidence"), 0.0)
+        if not fallback_why and (decision.get("skip") or confidence < threshold):
+            fallback_why = "AI 认为都不太贴（" + (str(decision.get("reason") or f"信心 {confidence:.2f} 低于 {threshold:.2f}")) + "）"
 
-        threshold = config.get_float("match_confidence_threshold", 0.7)
-        if decision.get("skip") or float(decision.get("confidence", 0)) < threshold:
-            reason = "AI 认为没有合适的素材：" + (decision.get("reason") or "置信度低于阈值") + "。可手动「选素材」或「AI 撰写」"
-            self._mark_no_match(target["id"], reason)
-            return MatchOutcome("no_match", None, reason)
-
-        try:
-            material_id = int(decision.get("material_id"))   # LLM 可能返回字符串 "12"
-        except (TypeError, ValueError):
-            material_id = None
-        chosen = next((c for c in candidates if c["id"] == material_id), None)
-        if chosen is None:
-            chosen = candidates[0]; material_id = chosen["id"]
-        # 不允许润色时，一律用素材原文（防 LLM 自由发挥）
-        reply_text = (decision.get("reply_text") or "").strip() if allow_polish else chosen["text"]
-        if not reply_text:
+        if fallback_why:
+            # 兜底：同语言里用得最少的那条（candidates 已按用量升序）
+            chosen = candidates[0]
             reply_text = chosen["text"]
-        confidence = float(decision.get("confidence", 0))
-        reason = ("AI 择优" if self.llm.configured else "启发式") + (
-            "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + (decision.get("reason") or "")
-        qid = self._enqueue(account["id"], target["id"], material_id, reply_text, reason, confidence, origin="ai_match")
+            confidence = 0.35
+            reason = f"{fallback_why}，先按规则给你一条用得最少的素材，请审核时把关{lang_note}"
+        else:
+            try:
+                material_id = int(decision.get("material_id"))   # LLM 可能返回字符串 "12"
+            except (TypeError, ValueError):
+                material_id = None
+            chosen = next((c for c in candidates if c["id"] == material_id), None) or candidates[0]
+            # 不允许润色时，一律用素材原文（防 LLM 自由发挥）
+            reply_text = (decision.get("reply_text") or "").strip() if allow_polish else chosen["text"]
+            if not reply_text:
+                reply_text = chosen["text"]
+            reason = ("AI 择优" if self.llm.configured else "启发式") + (
+                "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + str(decision.get("reason") or "") + lang_note
+        qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match")
         return MatchOutcome("queued", qid, reason)
 
     # ---------------- 手动路线 ----------------
@@ -239,6 +246,13 @@ _TAG_KEYWORDS = {
     "alternative": ["代替", "替代", "乗り換え", "alternative", "switch"],
     "compare": ["比較", "使い分け", "compare", "统一", "まとめ", "vs"],
 }
+
+
+def _to_float(v, default: float) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def _infer_tags(text: str) -> list[str]:

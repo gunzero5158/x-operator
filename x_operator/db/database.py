@@ -74,6 +74,10 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
         changed = seed.loosen_filters(conn)
         if changed:
             logging.getLogger("x_operator.db").info("已放宽旧默认过滤阈值：%s", changed)
+    if current < 7:
+        changed = seed.loosen_match(conn)
+        if changed:
+            logging.getLogger("x_operator.db").info("已放宽旧默认素材匹配门槛：%s", changed)
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
