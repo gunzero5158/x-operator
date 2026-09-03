@@ -197,6 +197,15 @@ QUEUE_STATUS_LABEL = {
 }
 
 
+def fmt_views(n: int | None) -> str:
+    """观看量的易读写法：1234 → 1234；12345 → 1.2万；1234567 → 123.5万。"""
+    if n is None:
+        return "—"
+    if n >= 10000:
+        return f"{n / 10000:.1f}万".replace(".0万", "万")
+    return str(n)
+
+
 def fmt_time(iso: str | None) -> str:
     """UTC ISO → 本地易读（浏览器所在时区不可知，这里按账号常用的东京时间显示）。"""
     from ..db.database import parse_iso

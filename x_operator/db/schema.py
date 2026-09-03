@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DDL = r"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS search_rules (
     max_results_per_run INTEGER NOT NULL DEFAULT 15 CHECK (max_results_per_run BETWEEN 10 AND 100),
     min_llm_score       INTEGER NOT NULL DEFAULT 5  CHECK (min_llm_score BETWEEN 0 AND 10),
     lookback_hours      INTEGER NOT NULL DEFAULT 24,
+    min_views           INTEGER NOT NULL DEFAULT 0,
     reply_mode          TEXT    NOT NULL DEFAULT 'material',
     ai_brief            TEXT    NOT NULL DEFAULT '',
     allow_polish        INTEGER NOT NULL DEFAULT 0,
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS target_tweets (
     text                 TEXT    NOT NULL,
     lang                 TEXT,
     text_zh              TEXT,
+    view_count           INTEGER,
     tweet_created_at     TEXT    NOT NULL,
     source               TEXT    NOT NULL CHECK (source IN ('monitor','search')),
     source_rule_id       INTEGER,

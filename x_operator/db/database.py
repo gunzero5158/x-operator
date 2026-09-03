@@ -54,6 +54,9 @@ _ADDED_COLUMNS = [
     ("watched_users", "allow_polish", "INTEGER NOT NULL DEFAULT 0"),
     ("review_queue", "origin", "TEXT NOT NULL DEFAULT 'ai_match'"),
     ("review_queue", "verify_status", "TEXT"),
+    # v6：搜索规则观看量门槛；抓取记录保存观看量
+    ("search_rules", "min_views", "INTEGER NOT NULL DEFAULT 0"),
+    ("target_tweets", "view_count", "INTEGER"),
 ]
 
 

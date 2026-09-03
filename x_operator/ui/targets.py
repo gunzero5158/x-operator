@@ -10,7 +10,7 @@ from nicegui import run, ui
 
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
+from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
                      run_job_with_progress, shell, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
@@ -232,6 +232,8 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
                     .classes("bg-emerald-600" if sc >= thr else "bg-gray-500")
             if t["lang"]:
                 ui.badge(t["lang"]).classes("bg-slate-400")
+            if t["view_count"] is not None:
+                ui.badge(f"👁 {fmt_views(t['view_count'])}").classes("bg-slate-400").tooltip("抓取时的观看量")
             ui.label(f"抓取于 {fmt_time(t['fetched_at'])} · 发推于 {fmt_time(t['tweet_created_at'])}").classes("text-xs text-gray-400")
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_one(t["id"])).props("flat dense round color=negative").tooltip("删除此记录")

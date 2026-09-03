@@ -29,6 +29,9 @@ LANG_LABEL = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "e
 
 # X 官方「最近搜索」只能查 7 天；规则里填得再大也只能抓到这么多
 OFFICIAL_SEARCH_MAX_HOURS = 168
+# 观看量门槛开着时，为凑够「每次抓取条数」最多翻页扫描多少条：条数 × 倍数，封顶 SCAN_CAP，且不超过当日剩余读额度
+SCAN_FACTOR = 10
+SCAN_CAP = 500
 
 
 def rule_langs(rule: sqlite3.Row | dict) -> list[str]:
@@ -146,12 +149,28 @@ class SearchJob:
         start_time = None
         if not rule["newest_id_cursor"] and lookback_h:
             start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
-        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{'游标之后的新推文' if rule['newest_id_cursor'] else f'最近 {lookback_h} 小时'}）…")
+        max_results = int(rule["max_results_per_run"])
+        min_views = _row_int(rule, "min_views", 0)
+        scan_limit = 0
+        if min_views:
+            scan_limit = min(SCAN_CAP, max_results * SCAN_FACTOR)
+            b = budget.current()
+            if b.daily_budget > 0:
+                scan_limit = max(max_results, min(scan_limit, b.remaining))
+        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{'游标之后的新推文' if rule['newest_id_cursor'] else f'最近 {lookback_h} 小时'}"
+                 + (f"，观看量 ≥ {min_views}，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
         result = client.search_recent(effective_query(rule), since_id=rule["newest_id_cursor"],
-                                      start_time=start_time, max_results=rule["max_results_per_run"])
+                                      start_time=start_time, max_results=max_results,
+                                      min_views=min_views, scan_limit=scan_limit)
         _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
         tweets = result.tweets
-        _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条，正在去重和预检…")
+        if min_views and notes is not None and result.scanned:
+            tip = (f"规则「{rule['name']}」：扫描 {result.scanned} 条，观看量低于 {min_views} 的 {result.dropped_low_views} 条已跳过（不入库），"
+                   f"达标 {len(tweets)} 条")
+            if len(tweets) < max_results and scan_limit and result.scanned >= scan_limit:
+                tip += f"；已到本次扫描上限 {scan_limit} 条，想多抓可调低观看量门槛或调大「每次抓取条数」"
+            notes.append(tip)
+        _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条" + (f"（扫描 {result.scanned} 条）" if min_views else "") + "，正在去重和预检…")
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
         if tweets:

@@ -66,6 +66,7 @@ class TweetData:
     created_at: datetime
     is_retweet: bool
     in_reply_to_tweet_id: str | None
+    view_count: int | None = None   # 观看量（官方 impression_count / 非官方 view_count）；拿不到为 None
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,10 @@ class UserData:
 @dataclass(frozen=True)
 class FetchResult:
     tweets: list[TweetData]
-    newest_id: str | None
+    newest_id: str | None          # 本次「扫描到」的最新 id（含被观看量门槛丢掉的），游标推进用
     reads_consumed: int
+    scanned: int = 0               # 搜索时实际扫描的条数（翻页累计）
+    dropped_low_views: int = 0     # 其中因观看量低于门槛被丢掉的条数
 
 
 @dataclass(frozen=True)
@@ -115,7 +118,10 @@ class XClient(ABC):
     @abstractmethod
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None,
-                      max_results: int = 15) -> FetchResult: ...
+                      max_results: int = 15, min_views: int = 0,
+                      scan_limit: int = 0) -> FetchResult:
+        """min_views>0 时在抓取端做观看量门槛：一页不够就继续翻页，直到凑够 max_results 条达标的，
+        或累计扫描到 scan_limit 条（0 = 只扫一页）。低于门槛的不返回，但计入 newest_id 和 scanned。"""
 
     def upload_media(self, file_path: str, media_type: str,
                      alt_text: str | None = None) -> str:

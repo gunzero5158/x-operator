@@ -225,7 +225,7 @@ class OfficialXClient(XClient):
             return None
         return bool(resp and resp.data)
 
-    _TWEET_FIELDS = ["created_at", "lang", "referenced_tweets", "author_id", "in_reply_to_user_id"]
+    _TWEET_FIELDS = ["created_at", "lang", "referenced_tweets", "author_id", "in_reply_to_user_id", "public_metrics"]
 
     def _to_tweets(self, resp) -> list[TweetData]:
         users = {}
@@ -242,11 +242,17 @@ class OfficialXClient(XClient):
             created = tw.created_at or datetime.now(timezone.utc)
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
+            views = None
+            try:
+                v = (tw.public_metrics or {}).get("impression_count")
+                views = int(v) if v is not None else None
+            except Exception:
+                views = None
             out.append(TweetData(
                 tweet_id=str(tw.id), author_id=str(tw.author_id),
                 author_handle=users.get(str(tw.author_id), ""),
                 text=tw.text or "", lang=tw.lang, created_at=created,
-                is_retweet=is_rt, in_reply_to_tweet_id=reply_to,
+                is_retweet=is_rt, in_reply_to_tweet_id=reply_to, view_count=views,
             ))
         out.sort(key=lambda t: int(t.tweet_id))
         return out
@@ -272,8 +278,25 @@ class OfficialXClient(XClient):
         newest = tweets[-1].tweet_id if tweets else None
         return FetchResult(tweets=tweets, newest_id=newest, reads_consumed=len(tweets))
 
+    def _search_page(self, query: str, params: dict, since_id: str | None, start_time: datetime | None):
+        try:
+            return self._client.search_recent_tweets(query, **params)
+        except self._tweepy.BadRequest as e:
+            # since_id 超过 7 天会被 X 拒绝：退化为按 X 允许的最大窗口重查
+            if since_id and "since_id" in str(e) and "since_id" in params:
+                params.pop("since_id", None)
+                params["start_time"] = clamp_recent_window(start_time or datetime.min.replace(tzinfo=timezone.utc))
+                try:
+                    return self._client.search_recent_tweets(query, **params)
+                except Exception as e2:
+                    raise self._wrap(e2, "搜索推文")
+            raise self._wrap(e, "搜索推文")
+        except Exception as e:
+            raise self._wrap(e, "搜索推文")
+
     def search_recent(self, query: str, since_id: str | None = None,
-                      start_time: datetime | None = None, max_results: int = 15) -> FetchResult:
+                      start_time: datetime | None = None, max_results: int = 15,
+                      min_views: int = 0, scan_limit: int = 0) -> FetchResult:
         params: dict[str, Any] = dict(
             max_results=max(10, min(100, max_results)),
             tweet_fields=self._TWEET_FIELDS, expansions=["author_id"], user_fields=["username"],
@@ -283,24 +306,32 @@ class OfficialXClient(XClient):
             params["since_id"] = since_id
         elif start_time:
             params["start_time"] = clamp_recent_window(start_time)
-        try:
-            resp = self._client.search_recent_tweets(query, **params)
-        except self._tweepy.BadRequest as e:
-            # since_id 超过 7 天会被 X 拒绝：退化为按 X 允许的最大窗口重查
-            if since_id and "since_id" in str(e):
-                params.pop("since_id", None)
-                params["start_time"] = clamp_recent_window(start_time or datetime.min.replace(tzinfo=timezone.utc))
-                try:
-                    resp = self._client.search_recent_tweets(query, **params)
-                except Exception as e2:
-                    raise self._wrap(e2, "搜索推文")
-            else:
-                raise self._wrap(e, "搜索推文")
-        except Exception as e:
-            raise self._wrap(e, "搜索推文")
-        tweets = self._to_tweets(resp)
-        newest = tweets[-1].tweet_id if tweets else None
-        return FetchResult(tweets=tweets, newest_id=newest, reads_consumed=len(tweets))
+        kept: list[TweetData] = []
+        scanned = dropped = 0
+        newest: str | None = None
+        while True:
+            resp = self._search_page(query, params, since_id, start_time)
+            page = self._to_tweets(resp)
+            scanned += len(page)
+            for t in page:
+                if newest is None or int(t.tweet_id) > int(newest):
+                    newest = t.tweet_id
+                if min_views and (t.view_count or 0) < min_views:
+                    dropped += 1
+                else:
+                    kept.append(t)
+            next_token = None
+            try:
+                next_token = (resp.meta or {}).get("next_token")
+            except Exception:
+                pass
+            # 没有观看量门槛只扫一页；有门槛就翻页直到凑够 / 扫到上限 / 没有下一页
+            if not min_views or len(kept) >= max_results or not next_token or (scan_limit and scanned >= scan_limit):
+                break
+            params["next_token"] = next_token
+        kept.sort(key=lambda t: int(t.tweet_id))
+        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
+                           scanned=scanned, dropped_low_views=dropped)
 
     # ---- 写 ----
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:
@@ -650,6 +681,11 @@ class UnofficialXClient(XClient):
             created = created.replace(tzinfo=timezone.utc)
         user = getattr(tw, "user", None)
         reply_to = getattr(tw, "in_reply_to", None)
+        views = getattr(tw, "view_count", None)
+        try:
+            views = int(views) if views not in (None, "") else None
+        except (TypeError, ValueError):
+            views = None
         return TweetData(
             tweet_id=str(tw.id),
             author_id=str(getattr(user, "id", "") or ""),
@@ -659,6 +695,7 @@ class UnofficialXClient(XClient):
             created_at=created.astimezone(timezone.utc),
             is_retweet=getattr(tw, "retweeted_tweet", None) is not None,
             in_reply_to_tweet_id=str(reply_to) if reply_to else None,
+            view_count=views,
         )
 
     @staticmethod
@@ -709,14 +746,48 @@ class UnofficialXClient(XClient):
             tweets = [t for t in tweets if t.created_at >= start_time]
         return self._since_filter(tweets, since_id)
 
+    async def _search_pages(self, query: str, count: int, since_id: str | None, start_time: datetime | None,
+                            max_results: int, min_views: int, scan_limit: int):
+        """网页搜索「最新」是按时间倒序翻页的：凑够 / 到上限 / 翻到比游标还旧就停。"""
+        since_int = int(since_id) if since_id and since_id.isdigit() else None
+        kept: list[TweetData] = []
+        scanned = dropped = 0
+        newest: str | None = None
+        res = await self._client.search_tweet(query, "Latest", count=count)
+        while True:
+            page = [self._to_tweet(t) for t in (res or [])]
+            if not page:
+                break
+            hit_old = False
+            for t in page:
+                scanned += 1
+                if newest is None or int(t.tweet_id) > int(newest):
+                    newest = t.tweet_id
+                if (since_int is not None and int(t.tweet_id) <= since_int) or (start_time and t.created_at < start_time):
+                    hit_old = True
+                    continue
+                if min_views and (t.view_count or 0) < min_views:
+                    dropped += 1
+                else:
+                    kept.append(t)
+            if not min_views or len(kept) >= max_results or hit_old or (scan_limit and scanned >= scan_limit):
+                break
+            try:
+                res = await res.next()
+            except Exception:
+                break
+        return kept, scanned, dropped, newest
+
     def search_recent(self, query: str, since_id: str | None = None,
-                      start_time: datetime | None = None, max_results: int = 15) -> FetchResult:
-        res = self._call(lambda: self._client.search_tweet(query, "Latest", count=max(10, min(50, max_results))),
-                         "搜索推文")
-        tweets = [self._to_tweet(t) for t in (res or [])]
-        if start_time:
-            tweets = [t for t in tweets if t.created_at >= start_time]
-        return self._since_filter(tweets, since_id)
+                      start_time: datetime | None = None, max_results: int = 15,
+                      min_views: int = 0, scan_limit: int = 0) -> FetchResult:
+        count = max(10, min(50, max_results))
+        kept, scanned, dropped, newest = self._call(
+            lambda: self._search_pages(query, count, since_id, start_time, max_results, min_views, scan_limit),
+            "搜索推文")
+        kept.sort(key=lambda t: int(t.tweet_id))
+        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
+                           scanned=scanned, dropped_low_views=dropped)
 
     # ---- 写 ----
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:

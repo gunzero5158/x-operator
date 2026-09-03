@@ -27,6 +27,33 @@ class LLMFormatError(LLMError):
     pass
 
 
+# ====================================================================================
+# 场景 → 用哪档模型。这是**唯一**的登记表：chat_json 只认这里登记过的场景，没登记的直接报错，
+# 所以以后加任何新的 LLM 功能都必须先在这里补一行（设置 → LLM 页和 README 的对照表都从这里渲染）。
+# 原则：量大、判断简单的用轻量模型；要写东西、要做取舍的用强模型。
+# ====================================================================================
+SCENE_TIERS: dict[str, tuple[str, str]] = {
+    "ping":         ("light",  "设置页「保存并测试连接」"),
+    "relevance":    ("light",  "搜索规则：给每条抓到的推文打相关性分（量大、判断简单）"),
+    "match":        ("strong", "匹配素材库：从候选素材里择优；开了「允许润色」时还要改写"),
+    "write":        ("strong", "AI 按要求创作回复"),
+    "rule_gen":     ("strong", "AI 生成搜索规则（关键词、语义条件、语言）"),
+    "material_gen": ("strong", "AI 生成素材"),
+}
+TIER_LABEL = {"light": "轻量模型", "strong": "强模型"}
+TIER_SETTING_KEY = {"light": "llm_model_light", "strong": "llm_model_strong"}
+TIER_DEFAULT_MODEL = {"light": "gpt-4o-mini", "strong": "gpt-4o"}
+
+
+def model_for(scene: str) -> str:
+    """按登记表取该场景当前应使用的模型名。未登记的场景抛 LLMError。"""
+    if scene not in SCENE_TIERS:
+        raise LLMError(f"LLM 场景「{scene}」没有在 SCENE_TIERS 登记（x_operator/llm/client.py），"
+                       "请先登记它该用轻量模型还是强模型")
+    tier = SCENE_TIERS[scene][0]
+    return config.get(TIER_SETTING_KEY[tier]) or TIER_DEFAULT_MODEL[tier]
+
+
 # 命中即视为正例线索的关键词（启发式兜底用；覆盖中日英常见「成本痛点」表达）
 _POSITIVE_HINTS = ["高い", "コスト", "料金", "従量", "安く", "厳しい", "代替", "まとめ",
                    "顶不住", "太贵", "成本", "便宜", "按量", "统一",
@@ -46,10 +73,11 @@ class LLMClient:
 
     # ---------------- 真实网关调用 ----------------
     def chat_json(self, scene: str, messages: list[dict], required_keys: list[str],
-                  tier: str = "light", temperature: float = 0.2, timeout_sec: int = 60) -> dict:
+                  temperature: float = 0.2, timeout_sec: int = 60) -> dict:
+        """scene 必须是 SCENE_TIERS 里登记过的场景名，用哪个模型由登记表决定。"""
+        model = model_for(scene)
         base_url = (config.get("llm_base_url") or "").rstrip("/")
         api_key = config.get("llm_api_key") or ""
-        model = config.get("llm_model_strong" if tier == "strong" else "llm_model_light") or "gpt-4o-mini"
         if not base_url or not api_key:
             raise LLMError("LLM 网关未配置")
 
@@ -112,7 +140,7 @@ class LLMClient:
 
     def ping(self) -> str:
         self.chat_json("ping", [{"role": "user", "content": "只回复 JSON：{\"ok\":true}"}],
-                       required_keys=["ok"], tier="light", timeout_sec=20)
+                       required_keys=["ok"], timeout_sec=20)
         return "连接成功"
 
     # ---------------- 启发式兜底（离线可测） ----------------
@@ -155,7 +183,7 @@ class LLMClient:
             {"role": "system", "content": prompts.RELEVANCE_SYSTEM},
             {"role": "user", "content": prompts.relevance_user(semantic_criteria, tweets)},
         ]
-        obj = self.chat_json("relevance", messages, required_keys=["results"], tier="light", temperature=0.2)
+        obj = self.chat_json("relevance", messages, required_keys=["results"], temperature=0.2)
         return obj["results"]
 
     def match_reply(self, tweet_text: str, tweet_lang: str, candidates: list[dict],
@@ -168,7 +196,7 @@ class LLMClient:
         ]
         return self.chat_json("match", messages,
                               required_keys=["skip", "reply_text", "confidence", "reason"],
-                              tier="strong", temperature=0.7 if allow_polish else 0.2)
+                              temperature=0.7 if allow_polish else 0.2)
 
     # ---------------- 需要真实 LLM 的创作类能力（无网关时抛 LLMError，UI 会提示去配置） ----------------
     def _require(self, what: str) -> None:
@@ -183,7 +211,7 @@ class LLMClient:
             {"role": "user", "content": prompts.write_user(tweet_text, tweet_lang, brief, must_include)},
         ]
         for attempt in range(2):
-            obj = self.chat_json("write", messages, required_keys=["reply_text", "reason"], tier="strong", temperature=0.8)
+            obj = self.chat_json("write", messages, required_keys=["reply_text", "reason"], temperature=0.8)
             text = str(obj.get("reply_text") or "")
             missing = [m for m in must_include if m and m not in text]
             if not missing:
@@ -202,7 +230,7 @@ class LLMClient:
             {"role": "user", "content": prompts.rule_gen_user(description)},
         ]
         obj = self.chat_json("rule_gen", messages, required_keys=["name", "keywords", "semantic_criteria", "langs"],
-                             tier="strong", temperature=0.5)
+                             temperature=0.5)
         obj["keywords"] = [str(k).strip() for k in (obj.get("keywords") or []) if str(k).strip()]
         obj["langs"] = [str(x).strip().lower() for x in (obj.get("langs") or []) if str(x).strip()]
         return obj
@@ -215,7 +243,7 @@ class LLMClient:
             {"role": "system", "content": prompts.MATERIAL_GEN_SYSTEM},
             {"role": "user", "content": prompts.material_gen_user(kind, lang, topic, style, scenario, must_include, count)},
         ]
-        obj = self.chat_json("material_gen", messages, required_keys=["items"], tier="strong", temperature=0.9, timeout_sec=120)
+        obj = self.chat_json("material_gen", messages, required_keys=["items"], temperature=0.9, timeout_sec=120)
         items = []
         for it in obj.get("items") or []:
             text = str(it.get("text") or "").strip()

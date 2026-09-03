@@ -32,6 +32,10 @@ _SAMPLE_TWEETS = [
 ]
 
 
+# 与样本一一对应的观看量：高低混合，用来测「观看量 ≥ N」在抓取端翻页
+_SAMPLE_VIEWS = [50, 12000, 300, 8000, 90, 25000, 40, 700, 15000, 5]
+
+
 def _stable_id(seed: str) -> str:
     return str(int(hashlib.sha1(seed.encode()).hexdigest()[:12], 16))
 
@@ -72,13 +76,15 @@ class MockXClient(XClient):
         n = max(1, min(count, len(_SAMPLE_TWEETS)))
         tweets: list[TweetData] = []
         for i in range(n):
-            _kind, lang, text = _SAMPLE_TWEETS[(self._rot + i) % len(_SAMPLE_TWEETS)]
+            idx = (self._rot + i) % len(_SAMPLE_TWEETS)
+            _kind, lang, text = _SAMPLE_TWEETS[idx]
             created = now - timedelta(seconds=(n - 1 - i) * 45)
             ah = author_handle or f"seeker_{(self._rot + i) % 97:02d}"
             aid = author_id or ("mock_user_" + ah)
             tweets.append(TweetData(
                 tweet_id=_next_id(), author_id=aid, author_handle=ah, text=text, lang=lang,
                 created_at=created, is_retweet=False, in_reply_to_tweet_id=None,
+                view_count=_SAMPLE_VIEWS[idx],
             ))
         self._rot = (self._rot + n) % len(_SAMPLE_TWEETS)
         return tweets
@@ -101,8 +107,28 @@ class MockXClient(XClient):
 
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None,
-                      max_results: int = 15) -> FetchResult:
-        return self._result(self._fresh_batch(min(max_results, 6), None, None), since_id)
+                      max_results: int = 15, min_views: int = 0,
+                      scan_limit: int = 0) -> FetchResult:
+        page_size = min(max_results, 6)
+        if not min_views:
+            return self._result(self._fresh_batch(page_size, None, None), since_id)
+        # 模拟翻页：每页 page_size 条，扫到凑够 / 到上限为止
+        kept: list[TweetData] = []
+        scanned = dropped = 0
+        newest = None
+        while True:
+            page = self._fresh_batch(page_size, None, None)
+            for t in page:
+                scanned += 1
+                newest = t.tweet_id if newest is None or int(t.tweet_id) > int(newest) else newest
+                if (t.view_count or 0) < min_views:
+                    dropped += 1
+                else:
+                    kept.append(t)
+            if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
+                break
+        kept.sort(key=lambda t: int(t.tweet_id))
+        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned, scanned=scanned, dropped_low_views=dropped)
 
     # --- 写 ---
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:

@@ -11,7 +11,7 @@ from .. import config
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, run_job_with_progress, shell
+from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell
 from .pickers import reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -26,6 +26,9 @@ HINTS = {
     "max_results": "每次运行最多拉多少条。推荐 15~30；官方 API 按条计费（约 $0.005/条），小号 Cookie 通道建议 ≤50 防风控。",
     "lookback": "首次运行（或重置游标后）往回抓多少小时内的推文；之后每次只抓上次之后的新内容。推荐 24；冷门词可 72~168。"
                 "官方 API 最多只能搜最近 7 天（168 小时），填得再大也按 168 抓。",
+    "min_views": "只要观看量 ≥ 此值的推文，0 = 不限。门槛在抓取端生效：一页不够会继续翻页，直到凑够「每次抓取条数」或扫到上限"
+                 "（每次抓取条数 × 10，最多 500 条，且不超过当日剩余读额度）；低于门槛的当场丢掉、不入库，游标照常推进。"
+                 "官方 API 按扫描到的条数计费。推荐：想找有热度的帖子 1000~5000；冷门领域填 0。",
 }
 
 
@@ -37,14 +40,14 @@ def _save(rid, data: dict):
     with get_conn() as conn:
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
-                         "max_results_per_run=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=? WHERE id=?",
+                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["reply_mode"], data["ai_brief"], data["polish"], rid))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, reply_mode, ai_brief, allow_polish) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["reply_mode"], data["ai_brief"], data["polish"]))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"]))
         conn.commit()
 
 
@@ -125,6 +128,8 @@ def register(jobs) -> None:
                                 ui.badge(f"达标分 ≥{r['min_llm_score']}").classes("bg-blue-600")
                                 ui.badge(f"每次 {r['max_results_per_run']} 条").classes("bg-slate-400")
                                 ui.badge(f"首次回溯 {r['lookback_hours']}h").classes("bg-slate-400")
+                                if r["min_views"]:
+                                    ui.badge(f"观看 ≥ {fmt_views(r['min_views'])}").classes("bg-amber-600")
                                 ui.badge(REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"])).classes(
                                     "bg-purple-600" if r["reply_mode"] == "ai_write" else "bg-teal-600")
                                 if not r["enabled"]:
@@ -181,6 +186,8 @@ def register(jobs) -> None:
                 max_results = ui.number("每次抓取条数（10-100）", value=g("max_results_per_run", 15), min=10, max=100, step=1).classes("flex-1").props("outlined")
                 lookback = ui.number("首次回溯（小时）", value=g("lookback_hours", 24), min=1, max=720, step=1).classes("flex-1").props("outlined")
             _hint("min_score"); _hint("max_results"); _hint("lookback")
+            min_views = ui.number("观看量门槛（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("w-full").props("outlined")
+            _hint("min_views")
             mode, brief, polish = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后")
 
             def do_save():
@@ -194,6 +201,7 @@ def register(jobs) -> None:
                             min_score=max(0, min(10, int(min_score.value or 0))),
                             max_results=max(10, min(100, int(max_results.value or 10))),
                             lookback=max(1, int(lookback.value or 24)),
+                            min_views=max(0, int(min_views.value or 0)),
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0)
                 try:
                     _save(r["id"] if r else None, data)

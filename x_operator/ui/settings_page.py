@@ -11,7 +11,8 @@ from ..adapters import factory
 from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
                              parse_credentials, validate_unofficial_credentials)
 from ..db.database import get_conn, utcnow_iso
-from ..llm.client import LLMClient
+from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
+                          LLMClient)
 from .layout import confirm, shell
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
@@ -89,8 +90,14 @@ def _llm_panel():
     ui.label("LLM 网关（OpenAI 兼容；留空则用启发式兜底，离线可测）").classes("font-semibold")
     base = ui.input("base_url（例：https://api.apimax.jp/v1）", value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
     key = ui.input("api_key", value=config.get("llm_api_key") or "", password=True, password_toggle_button=True).classes("w-full").props("outlined")
-    light = ui.input("轻量模型（打分用）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
-    strong = ui.input("强模型（匹配/润色用）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
+    light = ui.input("轻量模型（便宜、快；量大判断简单的任务）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
+    strong = ui.input("强模型（要写东西、要做取舍的任务）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
+    ui.label("哪些任务用哪档模型（对照表登记在代码 x_operator/llm/client.py 的 SCENE_TIERS；新功能必须先登记才能调用，所以这张表永远是最新的）：").classes("text-xs text-gray-500 mt-2")
+    tier_rows = [{"任务": desc, "模型档": TIER_LABEL[tier],
+                  "当前模型": (config.get(TIER_SETTING_KEY[tier]) or TIER_DEFAULT_MODEL[tier])}
+                 for scene, (tier, desc) in SCENE_TIERS.items()]
+    ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("任务", "模型档", "当前模型")],
+             rows=tier_rows).classes("w-full").props("dense flat bordered wrap-cells")
 
     def save():
         config.set_value("llm_base_url", base.value.strip())

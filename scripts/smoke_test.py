@@ -59,9 +59,9 @@ with get_conn() as conn:
     dry = conn.execute("SELECT value FROM app_settings WHERE key='dry_run'").fetchone()
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
     obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
-assert ver == 5 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 6 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0, (my_min, obsolete)
-print("[1] v2→v5 升级 OK：演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
+print("[1] v2→v6 升级 OK：演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -403,6 +403,35 @@ events = []
 jobs.monitor.run_once(progress=lambda f, t: events.append((f, t)))
 assert events and events[-1][0] == 1.0 and any("@someone" in t for _, t in events), events
 print("[6f3] 进度回调 OK")
+# 观看量门槛在抓取端翻页：凑够条数、低于门槛的不入库、游标推进到扫描过的最新一条
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET min_views=1000, max_results_per_run=15, newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+notes = []
+cands = jobs.search.run_rule(rule, get_primary_account(), notes=notes)
+assert len(cands) >= 15 and all((c.tweet.view_count or 0) >= 1000 for c in cands), [(c.tweet.view_count) for c in cands]
+assert notes and "观看量低于 1000" in notes[-1] and "已跳过" in notes[-1], notes
+with get_conn() as conn:
+    max_id_before = conn.execute("SELECT COALESCE(MAX(id),0) m FROM target_tweets").fetchone()["m"]
+st = jobs.search.run_once(rule_ids=[rule["id"]])
+with get_conn() as conn:
+    low = conn.execute("SELECT COUNT(*) c FROM target_tweets WHERE id>? AND view_count IS NOT NULL AND view_count<1000", (max_id_before,)).fetchone()["c"]
+    stored_views = conn.execute("SELECT COUNT(*) c FROM target_tweets WHERE id>? AND view_count>=1000", (max_id_before,)).fetchone()["c"]
+    cur = conn.execute("SELECT newest_id_cursor FROM search_rules WHERE id=?", (rule["id"],)).fetchone()["newest_id_cursor"]
+assert low == 0 and stored_views >= 15 and cur, (low, stored_views, cur)
+assert any("观看量低于" in n for n in st.notes), st.as_msg()
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET min_views=0 WHERE id=?", (rule["id"],)); conn.commit()
+print("[6f4] 观看量门槛在抓取端翻页 OK")
+# LLM 模型分工登记表：所有场景都登记；未登记场景直接报错
+from x_operator.llm.client import SCENE_TIERS, model_for, LLMError as _LLMError  # noqa: E402
+assert {"ping", "relevance", "match", "write", "rule_gen", "material_gen"} <= set(SCENE_TIERS)
+assert model_for("relevance") == "gpt-4o-mini" and model_for("write") == "gpt-4o"
+try:
+    jobs.llm.chat_json("brand_new_feature", [{"role": "user", "content": "x"}], ["ok"]); raise SystemExit("应报错")
+except _LLMError as e:
+    assert "SCENE_TIERS" in str(e) and "登记" in str(e), str(e)
+print("[6f5] LLM 模型分工登记表 OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:
@@ -468,15 +497,17 @@ class FakeCli:
 orig_httpx_client = lc.httpx.Client; lc.httpx.Client = FakeCli
 config.set_value("llm_base_url", "http://fake"); config.set_value("llm_api_key", "k")
 FakeCli.script = [FakeResp("sorry, no json here"), FakeResp('{"ok": true}')]
-obj = jobs.llm.chat_json("t", [{"role": "user", "content": "hi"}], ["ok"])
+obj = jobs.llm.chat_json("ping", [{"role": "user", "content": "hi"}], ["ok"])
 assert obj == {"ok": True} and len(FakeCli.calls) == 2 and len(FakeCli.calls[1]["messages"]) == 3 and FakeCli.calls[1]["messages"][1]["content"] == "sorry, no json here", FakeCli.calls
+assert FakeCli.calls[0]["model"] == "gpt-4o-mini", FakeCli.calls[0]["model"]   # ping 登记为轻量模型
 FakeCli.calls = []; FakeCli.script = [FakeResp("bad key", status=401)]
 try:
-    jobs.llm.chat_json("t2", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+    jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
 except lc.LLMError as e:
     assert "401" in str(e)
+assert FakeCli.calls[0]["model"] == "gpt-4o", FakeCli.calls[0]["model"]        # write 登记为强模型
 with get_conn() as conn:
-    assert conn.execute("SELECT COUNT(*) c FROM action_log WHERE endpoint='llm.t2' AND success=0").fetchone()["c"] == 1
+    assert conn.execute("SELECT COUNT(*) c FROM action_log WHERE endpoint='llm.write' AND success=0").fetchone()["c"] == 1
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 print("[6j] LLM 纠正重试 / 4xx 记日志 OK")
 
