@@ -306,9 +306,12 @@ class OfficialXClient(XClient):
             params["since_id"] = since_id
         elif start_time:
             params["start_time"] = clamp_recent_window(start_time)
+        if min_views:
+            params["sort_order"] = "relevancy"   # 按相关度/热度排，高观看量的先出来；按时间倒序全是刚发的低观看
         kept: list[TweetData] = []
         scanned = dropped = 0
         newest: str | None = None
+        max_views: int | None = None
         while True:
             resp = self._search_page(query, params, since_id, start_time)
             page = self._to_tweets(resp)
@@ -316,6 +319,8 @@ class OfficialXClient(XClient):
             for t in page:
                 if newest is None or int(t.tweet_id) > int(newest):
                     newest = t.tweet_id
+                if t.view_count is not None and (max_views is None or t.view_count > max_views):
+                    max_views = t.view_count
                 if min_views and (t.view_count or 0) < min_views:
                     dropped += 1
                 else:
@@ -331,7 +336,7 @@ class OfficialXClient(XClient):
             params["next_token"] = next_token
         kept.sort(key=lambda t: int(t.tweet_id))
         return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped)
+                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
 
     # ---- 写 ----
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:
@@ -748,12 +753,16 @@ class UnofficialXClient(XClient):
 
     async def _search_pages(self, query: str, count: int, since_id: str | None, start_time: datetime | None,
                             max_results: int, min_views: int, scan_limit: int):
-        """网页搜索「最新」是按时间倒序翻页的：凑够 / 到上限 / 翻到比游标还旧就停。"""
+        """没有观看量门槛：搜「最新」，按时间倒序翻页，翻到比游标/时间窗还旧就停。
+        有观看量门槛：搜「热门」（Top，X 按热度排，高观看量的先出来），不按时间序所以遇到旧的只跳过不停，
+        直到凑够 / 到扫描上限 / 没有下一页。"""
         since_int = int(since_id) if since_id and since_id.isdigit() else None
+        product = "Top" if min_views else "Latest"
         kept: list[TweetData] = []
         scanned = dropped = 0
         newest: str | None = None
-        res = await self._client.search_tweet(query, "Latest", count=count)
+        max_views: int | None = None
+        res = await self._client.search_tweet(query, product, count=count)
         while True:
             page = [self._to_tweet(t) for t in (res or [])]
             if not page:
@@ -763,6 +772,8 @@ class UnofficialXClient(XClient):
                 scanned += 1
                 if newest is None or int(t.tweet_id) > int(newest):
                     newest = t.tweet_id
+                if t.view_count is not None and (max_views is None or t.view_count > max_views):
+                    max_views = t.view_count
                 if (since_int is not None and int(t.tweet_id) <= since_int) or (start_time and t.created_at < start_time):
                     hit_old = True
                     continue
@@ -770,24 +781,28 @@ class UnofficialXClient(XClient):
                     dropped += 1
                 else:
                     kept.append(t)
-            if not min_views or len(kept) >= max_results or hit_old or (scan_limit and scanned >= scan_limit):
+            if not min_views:
+                if hit_old:
+                    break
+                break   # 无门槛只扫一页
+            if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
                 break
             try:
                 res = await res.next()
             except Exception:
                 break
-        return kept, scanned, dropped, newest
+        return kept, scanned, dropped, newest, max_views
 
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None, max_results: int = 15,
                       min_views: int = 0, scan_limit: int = 0) -> FetchResult:
         count = max(10, min(50, max_results))
-        kept, scanned, dropped, newest = self._call(
+        kept, scanned, dropped, newest, max_views = self._call(
             lambda: self._search_pages(query, count, since_id, start_time, max_results, min_views, scan_limit),
             "搜索推文")
         kept.sort(key=lambda t: int(t.tweet_id))
         return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped)
+                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
 
     # ---- 写 ----
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:

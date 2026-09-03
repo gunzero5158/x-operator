@@ -418,9 +418,14 @@ with get_conn() as conn:
     cur = conn.execute("SELECT newest_id_cursor FROM search_rules WHERE id=?", (rule["id"],)).fetchone()["newest_id_cursor"]
 assert low == 0 and stored_views >= 15 and cur, (low, stored_views, cur)
 assert any("观看量低于" in n for n in st.notes), st.as_msg()
+# 门槛高到一条都没有：提示里给出最高观看量，让人知道该调到多少
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET min_views=10000000 WHERE id=?", (rule["id"],)); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]]); m = st.as_msg()
+assert st.tweets_fetched == 0 and "最高观看量是 25000" in m and "以下才会有结果" in m, m
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET min_views=0 WHERE id=?", (rule["id"],)); conn.commit()
-print("[6f4] 观看量门槛在抓取端翻页 OK")
+print("[6f4] 观看量门槛在抓取端翻页 OK（0 条时提示最高观看量）")
 # LLM 模型分工登记表：所有场景都登记；未登记场景直接报错
 from x_operator.llm.client import SCENE_TIERS, model_for, LLMError as _LLMError  # noqa: E402
 assert {"ping", "relevance", "match", "write", "rule_gen", "material_gen"} <= set(SCENE_TIERS)

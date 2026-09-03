@@ -83,6 +83,7 @@ class FetchResult:
     reads_consumed: int
     scanned: int = 0               # 搜索时实际扫描的条数（翻页累计）
     dropped_low_views: int = 0     # 其中因观看量低于门槛被丢掉的条数
+    max_views_seen: int | None = None   # 扫描到的最高观看量（0 条达标时给用户调门槛用）
 
 
 @dataclass(frozen=True)
@@ -120,8 +121,9 @@ class XClient(ABC):
                       start_time: datetime | None = None,
                       max_results: int = 15, min_views: int = 0,
                       scan_limit: int = 0) -> FetchResult:
-        """min_views>0 时在抓取端做观看量门槛：一页不够就继续翻页，直到凑够 max_results 条达标的，
-        或累计扫描到 scan_limit 条（0 = 只扫一页）。低于门槛的不返回，但计入 newest_id 和 scanned。"""
+        """min_views>0 时在抓取端做观看量门槛：改用「热门/相关度」排序（新发的推文观看量都低，按时间倒序凑不到），
+        一页不够就继续翻页，直到凑够 max_results 条达标的，或累计扫描到 scan_limit 条（0 = 只扫一页）。
+        低于门槛或不在 start_time 窗口内的不返回，但计入 scanned / max_views_seen。"""
 
     def upload_media(self, file_path: str, media_type: str,
                      alt_text: str | None = None) -> str:

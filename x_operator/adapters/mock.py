@@ -116,11 +116,14 @@ class MockXClient(XClient):
         kept: list[TweetData] = []
         scanned = dropped = 0
         newest = None
+        max_views = None
         while True:
             page = self._fresh_batch(page_size, None, None)
             for t in page:
                 scanned += 1
                 newest = t.tweet_id if newest is None or int(t.tweet_id) > int(newest) else newest
+                if t.view_count is not None and (max_views is None or t.view_count > max_views):
+                    max_views = t.view_count
                 if (t.view_count or 0) < min_views:
                     dropped += 1
                 else:
@@ -128,7 +131,8 @@ class MockXClient(XClient):
             if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
                 break
         kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned, scanned=scanned, dropped_low_views=dropped)
+        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned, scanned=scanned,
+                           dropped_low_views=dropped, max_views_seen=max_views)
 
     # --- 写 ---
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:

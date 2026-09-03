@@ -145,12 +145,17 @@ class SearchJob:
             if notes is not None:
                 notes.append(f"规则「{rule['name']}」首次回溯 {lookback_h} 小时超过官方 API 上限，按 {OFFICIAL_SEARCH_MAX_HOURS} 小时（7 天）抓")
             lookback_h = OFFICIAL_SEARCH_MAX_HOURS
-        # 有游标：抓上次之后的全部；没有游标（首次/重置后）：只抓最近 lookback_hours 小时
-        start_time = None
-        if not rule["newest_id_cursor"] and lookback_h:
-            start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
         max_results = int(rule["max_results_per_run"])
         min_views = _row_int(rule, "min_views", 0)
+        # 没有观看量门槛：有游标抓上次之后的全部；没有游标（首次/重置后）只抓最近 lookback_hours 小时。
+        # 有观看量门槛：按热度排序、始终按时间窗搜（热门排序不按时间，游标没意义），已抓过的靠数据库去重。
+        since_id = rule["newest_id_cursor"]
+        start_time = None
+        if min_views:
+            since_id = None
+            start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h or 24)
+        elif not since_id and lookback_h:
+            start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
         scan_limit = 0
         if min_views:
             scan_limit = min(SCAN_CAP, max_results * SCAN_FACTOR)
@@ -158,26 +163,31 @@ class SearchJob:
                 b = budget.current()
                 if b.daily_budget > 0:
                     scan_limit = max(max_results, min(scan_limit, b.remaining))
-        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{'游标之后的新推文' if rule['newest_id_cursor'] else f'最近 {lookback_h} 小时'}"
-                 + (f"，观看量 ≥ {min_views}，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
-        result = client.search_recent(effective_query(rule), since_id=rule["newest_id_cursor"],
+        window = f"最近 {lookback_h} 小时" if start_time else "游标之后的新推文"
+        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{window}"
+                 + (f"，按热度排序找观看量 ≥ {min_views} 的，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
+        result = client.search_recent(effective_query(rule), since_id=since_id,
                                       start_time=start_time, max_results=max_results,
                                       min_views=min_views, scan_limit=scan_limit)
         _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
         tweets = result.tweets
         if min_views and notes is not None and result.scanned:
-            tip = (f"规则「{rule['name']}」：扫描 {result.scanned} 条，观看量低于 {min_views} 的 {result.dropped_low_views} 条已跳过（不入库），"
+            tip = (f"规则「{rule['name']}」：按热度排序扫描 {result.scanned} 条（{window}），观看量低于 {min_views} 的 {result.dropped_low_views} 条已跳过（不入库），"
                    f"达标 {len(tweets)} 条")
+            if result.max_views_seen is not None:
+                tip += f"；这次扫描到的最高观看量是 {result.max_views_seen}"
+                if not tweets:
+                    tip += f"——门槛要调到 {result.max_views_seen} 以下才会有结果"
             if len(tweets) < max_results and scan_limit and result.scanned >= scan_limit:
                 tip += f"；已到本次扫描上限 {scan_limit} 条，想多抓可调低观看量门槛或调大「每次抓取条数」"
-            notes.append(tip)
+            notes.append(("⚠ " if not tweets else "") + tip)
         _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条" + (f"（扫描 {result.scanned} 条）" if min_views else "") + "，正在去重和预检…")
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
         if not tweets and notes is not None:
             if result.scanned and min_views:
-                pass   # 上面已经写了「扫描 N 条、观看量不足的都跳过」
-            elif rule["newest_id_cursor"]:
+                pass   # 上面已经写了「扫描 N 条、观看量不足的都跳过、最高观看量是多少」
+            elif since_id:
                 notes.append(f"规则「{rule['name']}」：游标之后没有新推文（想重新抓最近的，点规则卡片上的「重置游标」）")
             else:
                 channel = "小号通道" if account["access_type"] != "official" else "官方 API"
