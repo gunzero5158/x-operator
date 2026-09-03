@@ -11,7 +11,7 @@ from nicegui import run, ui
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
 from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
-                     shell, tweet_link)
+                     run_job_with_progress, shell, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
 _LIMIT = 150
@@ -106,8 +106,10 @@ def register(jobs) -> None:
                     status_f = ui.select(_status_options(source, rule), value=status).props("dense outlined")
                     source_f = ui.select({"all": "全部来源", "monitor": "监控推主", "search": "语义搜索"}, value=source).props("dense outlined")
                     rule_f = ui.select(_rule_options(), value=rule if rule in _rule_options() else 0).props("dense outlined")
-                    ui.button("运行监控", icon="visibility", on_click=lambda: run_job(jobs.monitor.run_once, "监控", render)).props("outline dense")
-                    ui.button("运行搜索", icon="manage_search", on_click=lambda: run_job(jobs.search.run_once, "搜索", render)).props("outline dense")
+                    ui.button("运行监控", icon="visibility",
+                              on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render)).props("outline dense")
+                    ui.button("运行所有搜索规则", icon="manage_search",
+                              on_click=lambda: run_job_with_progress(lambda progress: jobs.search.run_once(progress=progress), "搜索", render)).props("outline dense")
                     with ui.button(icon="delete_sweep").props("outline color=negative dense"):
                         with ui.menu():
                             ui.menu_item("清理已过滤 / 未匹配 / 已过期", on_click=lambda: clear(["filtered", "no_match", "expired"]))

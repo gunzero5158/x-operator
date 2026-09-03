@@ -11,7 +11,7 @@ from .. import config
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, run_job, shell
+from .layout import confirm, fmt_time, run_job_with_progress, shell
 from .pickers import reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -67,9 +67,10 @@ def register(jobs) -> None:
                 with ui.row().classes("gap-2"):
                     ui.button("AI 生成规则", icon="auto_awesome", on_click=lambda: _ai_generate(jobs, render)).props("outline color=purple")
                     ui.button("新建规则", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-                    ui.button("运行全部规则", icon="play_arrow",
-                              on_click=lambda: run_job(jobs.search.run_once, "搜索", render,
-                                                       result_link=("查看抓取记录", "/targets?source=search"))
+                    ui.button("运行所有规则", icon="play_arrow",
+                              on_click=lambda: run_job_with_progress(
+                                  lambda progress: jobs.search.run_once(progress=progress), "搜索", render,
+                                  result_link=("查看抓取记录", "/targets?source=search"))
                               ).props("outline").tooltip("把所有「启用」的规则各跑一次；只想跑某一条就点该规则卡片上的「运行此规则」")
             ui.label("两级漏斗：关键词查询粗筛（X 搜索语法，自动带上所选语言）→ 按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
@@ -151,8 +152,9 @@ def register(jobs) -> None:
                                           ).props("flat dense color=primary")
                                 ui.button("编辑", on_click=lambda rr=r: _edit(rr, render)).props("flat dense")
                                 ui.button("运行此规则", icon="play_arrow",
-                                          on_click=lambda rid=r["id"]: run_job(lambda: jobs.search.run_once(rule_ids=[rid]), "搜索", render,
-                                                                               result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"))
+                                          on_click=lambda rid=r["id"]: run_job_with_progress(
+                                              lambda progress, rid=rid: jobs.search.run_once(rule_ids=[rid], progress=progress), "搜索", render,
+                                              result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"))
                                           ).props("flat dense").tooltip("只跑这一条规则（停用状态也能跑）；结果进抓取记录、推进游标，和正式运行一样")
                                 ui.button("重置游标", on_click=lambda rid=r["id"]: (_reset_cursor(rid), ui.notify("已重置，下次搜索按「首次回溯」小时数重新抓", type="info"), render())).props("flat dense")
                                 ui.button("删除", icon="delete", on_click=lambda rr=r: delete(rr)).props("flat dense color=negative")

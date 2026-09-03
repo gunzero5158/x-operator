@@ -394,6 +394,15 @@ st = jobs.search.run_once(rule_ids=[999999]); assert st.rules_run == 0 and "不�
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET enabled=1 WHERE id=?", (rule["id"],)); conn.commit()
 print("[6f2] 单条规则运行 OK")
+# 进度回调：单调不减、以 1.0 结尾、文字里带规则名/推主名
+events = []
+jobs.search.run_once(rule_ids=[rule["id"]], progress=lambda f, t: events.append((f, t)))
+assert events and events[-1][0] == 1.0 and all(events[i][0] <= events[i + 1][0] for i in range(len(events) - 1)), events
+assert any("规则「" in t and "抓取" in t for _, t in events) and any("打分" in t for _, t in events), events
+events = []
+jobs.monitor.run_once(progress=lambda f, t: events.append((f, t)))
+assert events and events[-1][0] == 1.0 and any("@someone" in t for _, t in events), events
+print("[6f3] 进度回调 OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

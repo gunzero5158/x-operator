@@ -120,6 +120,58 @@ async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None]
     return res
 
 
+async def run_job_with_progress(fn: Callable[..., Any], label: str, refresh: Callable[[], None] | None = None,
+                                result_link: tuple[str, str] | None = None):
+    """跟 run_job 一样在线程池里跑，但先弹一个进度框：fn 必须接受 progress 参数，
+    在工作线程里调 progress(0~1 的进度, 当前在做什么) 就会实时显示。跑完进度框变成结果框。"""
+    state = {"frac": 0.0, "text": "准备中…"}
+
+    def progress(frac: float, text: str) -> None:
+        state["frac"] = max(0.0, min(1.0, float(frac)))
+        state["text"] = text
+
+    with ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[480px] max-w-[90vw]"):
+        with ui.row().classes("items-center gap-2"):
+            icon = ui.spinner(size="lg")
+            title = ui.label(f"{label}进行中…").classes("text-lg font-bold")
+        bar = ui.linear_progress(0.0, show_value=False, size="12px").classes("w-full")
+        pct = ui.label("0%").classes("text-xs text-gray-400")
+        info = ui.label(state["text"]).classes("text-sm text-gray-600 whitespace-pre-wrap")
+        result_box = ui.column().classes("w-full")
+        btn_row = ui.row().classes("w-full justify-end gap-2")
+    dlg.open()
+
+    def tick():
+        bar.value = state["frac"]
+        pct.text = f"{int(state['frac'] * 100)}%"
+        info.text = state["text"]
+    timer = ui.timer(0.25, tick)
+
+    try:
+        res = await run.io_bound(fn, progress)
+        ok = getattr(res, "ok", True)
+        msg = res.as_msg() if hasattr(res, "as_msg") else f"{label}完成"
+    except Exception as e:
+        res, ok, msg = None, False, f"{label}出错：{e}"
+    timer.cancel()
+    state["frac"], state["text"] = 1.0, "完成"
+    tick()
+    icon.delete()
+    title.text = f"{label}结果"
+    with result_box:
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.icon("check_circle" if ok else "warning").classes("text-2xl " + ("text-green-600" if ok else "text-orange-500"))
+            ui.label(msg).classes("text-sm whitespace-pre-wrap")
+    with btn_row:
+        ui.button("关闭", on_click=dlg.close).props("flat")
+        if result_link:
+            text, href = result_link
+            ui.button(text, icon="arrow_forward", on_click=lambda: ui.navigate.to(href)).props("color=primary")
+    if refresh:
+        refresh()
+    return res
+
+
 def tweet_link(author_handle: str | None, tweet_id: str | None):
     """指向 X 上原推的链接。"""
     if not tweet_id:

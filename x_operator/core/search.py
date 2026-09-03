@@ -128,9 +128,14 @@ class SearchJob:
         self.llm = llm
 
     def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row,
-                 notes: list[str] | None = None) -> list[ScoredCandidate]:
+                 notes: list[str] | None = None, progress=None) -> list[ScoredCandidate]:
         """抓取 + 预过滤 + 打分。返回按推文 id 升序的候选（含被预过滤的，prefiltered 字段说明原因）。
-        notes：可选，运行中的提示（比如回溯被钳到 7 天）追加到这里。"""
+        notes：可选，运行中的提示（比如回溯被钳到 7 天）追加到这里。
+        progress(0~1, 文字)：可选，进度回调（抓取 → 0.3，打分完 → 0.6，剩下留给生成回复）。"""
+        def _p(frac: float, text: str) -> None:
+            if progress:
+                progress(frac, text)
+
         client = factory.get_client(account)
         lookback_h = _row_int(rule, "lookback_hours", 24)
         if account["access_type"] == "official" and lookback_h > OFFICIAL_SEARCH_MAX_HOURS:
@@ -141,10 +146,12 @@ class SearchJob:
         start_time = None
         if not rule["newest_id_cursor"] and lookback_h:
             start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
+        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{'游标之后的新推文' if rule['newest_id_cursor'] else f'最近 {lookback_h} 小时'}）…")
         result = client.search_recent(effective_query(rule), since_id=rule["newest_id_cursor"],
                                       start_time=start_time, max_results=rule["max_results_per_run"])
         _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
         tweets = result.tweets
+        _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条，正在去重和预检…")
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
         if tweets:
@@ -174,6 +181,7 @@ class SearchJob:
 
         scored: list[ScoredCandidate] = []
         if to_score:
+            _p(0.4, f"规则「{rule['name']}」：{len(to_score)} 条送去打分（{'LLM' if self.llm.configured else '关键词粗估'}），预检挡下 {len(pre)} 条…")
             payload = [{"tweet_id": t.tweet_id, "author_handle": t.author_handle, "text": t.text} for t in to_score]
             try:
                 scores = self.llm.score_relevance(rule["semantic_criteria"], payload)
@@ -188,11 +196,13 @@ class SearchJob:
                 scored.append(ScoredCandidate(t, coerce_score(s.get("score", 0)), str(s.get("reason", "") or "")))
         out = pre + scored
         out.sort(key=lambda c: int(c.tweet.tweet_id) if c.tweet.tweet_id.isdigit() else 0)
+        _p(0.6, f"规则「{rule['name']}」：打分完成，正在生成回复草稿…")
         return out
 
-    def run_once(self, auto: bool = False, rule_ids: list[int] | None = None) -> SearchStats:
+    def run_once(self, auto: bool = False, rule_ids: list[int] | None = None, progress=None) -> SearchStats:
         """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。
-        rule_ids：只跑这些规则（停用的也跑——用户明确点了这一条）；None = 全部启用的规则。"""
+        rule_ids：只跑这些规则（停用的也跑——用户明确点了这一条）；None = 全部启用的规则。
+        progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
         stats = SearchStats()
         denied = budget.current().allow(auto)
         if denied:
@@ -215,14 +225,22 @@ class SearchJob:
         llm_ok = self.llm.configured
         below = 0          # 因打分低于达标分而被挡的数量
         min_scores: list[int] = []
-        for rule in rules:
+        total = len(rules)
+
+        def _p(i: int, sub: float, text: str) -> None:
+            if progress:
+                progress((i + sub) / total, f"（{i + 1}/{total}）" + text)
+
+        for i, rule in enumerate(rules):
             stats.rules_run += 1
             min_scores.append(int(rule["min_llm_score"]))
             try:
-                scored = self.run_rule(rule, account, notes=stats.notes)
+                scored = self.run_rule(rule, account, notes=stats.notes,
+                                       progress=lambda sub, text, i=i: _p(i, sub, text))
                 stats.tweets_fetched += len(scored)
                 newest_id = None
-                for cand in scored:
+                for k, cand in enumerate(scored):
+                    _p(i, 0.6 + 0.4 * k / max(1, len(scored)), f"规则「{rule['name']}」：处理第 {k + 1}/{len(scored)} 条…")
                     t = cand.tweet
                     if t.tweet_id.isdigit() and (newest_id is None or int(t.tweet_id) > int(newest_id)):
                         newest_id = t.tweet_id
@@ -277,6 +295,8 @@ class SearchJob:
             stats.notes.append(tip)
         if stats.tweets_fetched:
             stats.notes.append("每条推文的打分和被过滤的原因都在「抓取记录」页")
+        if progress:
+            progress(1.0, "完成")
         return stats
 
 

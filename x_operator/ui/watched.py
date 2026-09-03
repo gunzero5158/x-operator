@@ -11,7 +11,7 @@ from ..adapters.base import XClientError
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.monitor import get_primary_account
 from ..db.database import get_conn, utcnow_iso
-from .layout import confirm, fmt_time, run_job, shell
+from .layout import confirm, fmt_time, run_job_with_progress, shell
 from .pickers import hint, reply_mode_fields, reply_mode_invalid
 
 HINTS = {
@@ -51,8 +51,8 @@ def register(jobs) -> None:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("监控推主").classes("text-2xl font-bold")
                 ui.button("运行一次监控", icon="play_arrow",
-                          on_click=lambda: run_job(jobs.monitor.run_once, "监控", render,
-                                                   result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
+                          on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
+                                                                 result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
             ui.label("添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其新推文 → 预检 → 按该推主的「回复方式」生成草稿 → 进审核队列。"
                      " 抓到的推文（含被过滤的及原因）都在「抓取记录」页。新添加的推主默认：首次回溯 24 小时、不含回复、匹配素材库——点「编辑」可改。"
                      ).classes("text-xs text-gray-400")

@@ -6,7 +6,7 @@ from nicegui import ui
 from .. import config
 from ..core import budget
 from ..db.database import get_conn
-from .layout import fmt_time, run_job, shell
+from .layout import fmt_time, run_job, run_job_with_progress, shell
 
 
 def _stats() -> dict:
@@ -89,8 +89,12 @@ def register(jobs) -> None:
                     with ui.card().classes("w-full"):
                         ui.label("手动运行（测试期用；自动轮询可在设置页打开）").classes("font-semibold")
                         with ui.row().classes("gap-2 flex-wrap"):
-                            ui.button("运行监控轮询", icon="visibility", on_click=lambda: run_job(jobs.monitor.run_once, "监控", render))
-                            ui.button("运行语义搜索", icon="manage_search", on_click=lambda: run_job(jobs.search.run_once, "搜索", render))
+                            ui.button("运行监控轮询", icon="visibility",
+                                      on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
+                                                                             result_link=("查看抓取记录", "/targets?source=monitor")))
+                            ui.button("运行所有搜索规则", icon="manage_search",
+                                      on_click=lambda: run_job_with_progress(lambda progress: jobs.search.run_once(progress=progress), "搜索", render,
+                                                                             result_link=("查看抓取记录", "/targets?source=search")))
                             ui.button("生成到点定时推文", icon="schedule", on_click=lambda: _run_sched(jobs, render))
                             ui.button("触发发送分发", icon="send", on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render))
                         ui.label("运行结果会弹出提示；抓到的推文去「抓取记录」看，生成的回复去「审核队列」看。").classes("text-xs text-gray-400")

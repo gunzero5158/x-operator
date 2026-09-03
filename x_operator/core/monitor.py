@@ -128,8 +128,9 @@ class MonitorJob:
     def __init__(self, match_engine: MatchEngine):
         self.match = match_engine
 
-    def run_once(self, auto: bool = False) -> MonitorStats:
-        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。"""
+    def run_once(self, auto: bool = False, progress=None) -> MonitorStats:
+        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。
+        progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
         stats = MonitorStats()
         denied = budget.current().allow(auto)
         if denied:
@@ -157,16 +158,24 @@ class MonitorJob:
             stats.notes.append("没有启用的监控推主。请到「监控推主」页添加")
             return stats
 
-        for user in users:
+        total = len(users)
+
+        def _p(i: int, sub: float, text: str) -> None:
+            if progress:
+                progress((i + sub) / total, f"（{i + 1}/{total}）" + text)
+
+        for i, user in enumerate(users):
             stats.users_polled += 1
             lookback_h = _row_int(user, "lookback_hours", 24)
             cursor = user["last_seen_tweet_id"]
             start_time = None if (cursor or not lookback_h) else datetime.now(timezone.utc) - timedelta(hours=lookback_h)
             try:
+                _p(i, 0.05, f"@{user['handle']}：正在从 X 拉取（{'游标之后的新推文' if cursor else f'最近 {lookback_h} 小时'}）…")
                 result = client.get_user_tweets(user["x_user_id"], since_id=cursor, max_results=MAX_FETCH,
                                                 include_replies=bool(user["include_replies"]), start_time=start_time)
                 _log_read(account["id"], client.api_kind, "get_user_tweets", result.reads_consumed)
                 tweets = result.tweets
+                _p(i, 0.4, f"@{user['handle']}：拉到 {len(tweets)} 条，正在预检和生成回复…")
                 # 首次抓取（没有游标）只看时间窗内的（适配器已尽量在服务端限定，这里兜底再筛一遍）
                 if start_time:
                     dropped = [t for t in tweets if t.created_at < start_time]
@@ -175,7 +184,8 @@ class MonitorJob:
                         stats.notes.append(f"@{user['handle']} 最近 {lookback_h} 小时内没有新推文（更早的 {len(dropped)} 条按时间窗跳过，可在推主设置里调大「首次回溯」）")
                 stats.tweets_fetched += len(tweets)
                 hit = 0
-                for t in tweets:
+                for k, t in enumerate(tweets):
+                    _p(i, 0.4 + 0.6 * k / max(1, len(tweets)), f"@{user['handle']}：处理第 {k + 1}/{len(tweets)} 条…")
                     reason = precheck(t, account["handle"], max_age_h=None if cursor else lookback_h)
                     if reason:
                         store_target(t, "monitor", user["id"], process_status="filtered",
@@ -210,6 +220,8 @@ class MonitorJob:
                 _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
         if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled:
             stats.notes.append("推主自上次游标之后没有新推文（可在推主卡片上「重置游标」重新抓最近几条）")
+        if progress:
+            progress(1.0, "完成")
         return stats
 
 
