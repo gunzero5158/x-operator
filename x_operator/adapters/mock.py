@@ -16,19 +16,19 @@ from datetime import datetime, timedelta, timezone
 
 from .base import FetchResult, PostResult, TweetData, UserData, XClient
 
-# 一批固定样本：混入正例（正在为 AI API 成本发愁）与噪声（新闻/教程/招聘/营销）。
+# 一批固定样本：混入正例（本人在抱怨 / 求推荐，有上下文）与噪声（新闻/教程/招聘/营销）。内容是通用话题，不绑定任何产品。
 # 每条给定相对「新鲜度」偏移（分钟），tweet_id 单调递增，模拟真实时间线。
 _SAMPLE_TWEETS = [
-    ("正例", "ja", "Stable DiffusionのAPI、個人開発だと従量課金がじわじわ効いてくる…もっと安く複数モデル試せる方法ないかな😭"),
-    ("噪声", "ja", "【ニュース】OpenAIが新モデルを発表。APIの料金体系も改定されるとのこと。"),
-    ("正例", "en", "honestly the LLM api bill this month hurt. anyone found a cheaper multi-model gateway that actually works?"),
-    ("噪声", "ja", "【求人】AIエンジニア募集中！LLM API開発経験者優遇。リモート可。#エンジニア転職"),
-    ("正例", "ja", "画像生成APIのコストが想像以上。個人だと月数万は厳しい。何かいい代替ないですか？"),
-    ("噪声", "en", "Tutorial: how to call the OpenAI API in Python. Full guide with code examples on my blog."),
-    ("正例", "ja", "LLMを複数使い分けたいけど、それぞれ契約するのが面倒でコストも読めない。まとめられたら楽なのに。"),
-    ("噪声", "ja", "弊社の新AIサービスをリリースしました！ぜひお試しください🎉 #PR"),
-    ("正例", "zh", "最近在做个小项目，几个大模型 API 费用加起来顶不住了，有没有按量计费还能统一管理的方案？"),
-    ("噪声", "ja", "AIの倫理について考えるイベントを開催します。参加者募集中。"),
+    ("正例", "ja", "動画編集ソフト、月額がじわじわ効いてくる…個人でも使いやすくて安いやつ、誰か知りませんか😭"),
+    ("噪声", "ja", "【ニュース】大手企業が新しいサブスクプランを発表。料金体系も改定されるとのこと。"),
+    ("正例", "en", "honestly my SaaS subscriptions this month hurt. anyone found a cheaper stack that actually works for a solo dev?"),
+    ("噪声", "ja", "【求人】エンジニア募集中！Web 開発経験者優遇。リモート可。#エンジニア転職"),
+    ("正例", "ja", "クラウドの費用が想像以上。個人だと月数万は厳しい。何かいい代替ないですか？"),
+    ("噪声", "en", "Tutorial: how to set up a personal blog in 10 minutes. Full guide with screenshots on my site."),
+    ("正例", "ja", "ツールを複数使い分けたいけど、それぞれ契約するのが面倒でコストも読めない。まとめられたら楽なのに。"),
+    ("噪声", "ja", "弊社の新サービスをリリースしました！ぜひお試しください🎉 #PR"),
+    ("正例", "zh", "最近在做个小项目，几个工具的订阅费加起来顶不住了，有没有便宜点还能统一管理的方案？"),
+    ("噪声", "ja", "テクノロジーの倫理について考えるイベントを開催します。参加者募集中。"),
 ]
 
 
@@ -58,7 +58,7 @@ class MockXClient(XClient):
 
     api_kind = "x_mock"
 
-    def __init__(self, handle: str = "apimax_jp"):
+    def __init__(self, handle: str = "mock_account"):
         self._handle = handle
         self._rot = 0
 

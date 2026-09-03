@@ -3,7 +3,6 @@
 通用型 X（推特）运营半自动化工具：定时发推、监控推主回复、语义搜索回复、LLM 素材匹配与撰写、多语言+自动翻译、人工审核队列。
 
 - 完整规格：[docs/design.md](docs/design.md)（v1.0）
-- 旧版窄范围草稿（已被取代，仅存档）：docs/archive/twitter-autopost-spec-v0.1.md
 
 ---
 
@@ -121,7 +120,7 @@ uv run python -m x_operator.main
 
 ## LLM
 
-设置 → LLM 填 OpenAI 兼容网关（如 apimax）的 base_url + api_key 后，相关性打分按你写的语义条件来、素材匹配做语义择优；
+设置 → LLM 填任意 OpenAI 兼容端点（官方或中转站）的 base_url + api_key 后，相关性打分按你写的语义条件来、素材匹配做语义择优；
 不填则用上面说的关键词粗打分，能用但分不出"沾边"和"明确符合"。
 
 ### 哪些任务用轻量模型、哪些用强模型

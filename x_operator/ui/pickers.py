@@ -67,7 +67,7 @@ def template_controls(brief) -> None:
         with ui.dialog() as dlg, ui.card().classes("min-w-96"):
             ui.label("存为模板").classes("text-lg font-bold")
             name_in = ui.input("模板名（同名会覆盖）", value=current["name"] if current else text[:20]).classes("w-full").props("outlined dense")
-            ui.label("起个一看就知道用在什么场景的名字，比如「日本独立开发者·成本痛点」").classes("text-xs text-gray-400")
+            ui.label("起个一看就知道用在什么场景的名字，比如「日本独立开发者·抱怨太贵」").classes("text-xs text-gray-400")
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
                 ui.button("保存", on_click=lambda: dlg.submit((name_in.value or "").strip())).props("color=primary")
@@ -96,8 +96,8 @@ LANG_NAME = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "un
 REPLY_HINTS = {
     "reply_mode": "抓到达标推文后怎么生成回复：匹配素材库=从你写好的回复素材里选（可控、省钱）；AI 按要求创作=每条现写（更贴合、需 LLM）；"
                   "只抓取=不自动生成，你在抓取记录里逐条手动选素材或让 AI 写。",
-    "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做按量计费的多模型 API 网关，"
-                "回复要先接对方的话再提一句，像同行聊天，结尾带 @ApiMaxJP。",
+    "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做 XX 产品，"
+                "回复要先接对方的话再提一句，像同行聊天，结尾带 @你的官号。",
     "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
 }
 
@@ -206,7 +206,7 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
             ui.label("目标推文").classes("text-xs text-gray-500")
             ui.label(tweet_text).classes("text-sm whitespace-pre-wrap")
         brief = ui.textarea("创作要求", value=default_brief).classes("w-full").props("outlined autogrow")
-        ui.label("写清楚：① 主题/立场（比如：推荐按量计费的多模型网关）；② 必须带的东西——直接把链接或 @账号写在要求里，"
+        ui.label("写清楚：① 主题/立场（比如：推荐我们的 XX 产品）；② 必须带的东西——直接把链接或 @账号写在要求里，"
                  "AI 会原样放进正文，少了会自动重写；③ 语气（比如：像同行随口聊，不像客服）。"
                  "AI 会先回应对方说的内容，再自然带出你的主题。").classes("text-xs text-gray-400")
         template_controls(brief)

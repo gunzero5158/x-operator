@@ -88,7 +88,7 @@ def _run_panel():
 
 def _llm_panel():
     ui.label("LLM 网关（OpenAI 兼容；留空则用启发式兜底，离线可测）").classes("font-semibold")
-    base = ui.input("base_url（例：https://api.apimax.jp/v1）", value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
+    base = ui.input("base_url（例：https://api.openai.com/v1，或你用的中转站地址）", value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
     key = ui.input("api_key", value=config.get("llm_api_key") or "", password=True, password_toggle_button=True).classes("w-full").props("outlined")
     light = ui.input("轻量模型（便宜、快；量大判断简单的任务）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
     strong = ui.input("强模型（要写东西、要做取舍的任务）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")

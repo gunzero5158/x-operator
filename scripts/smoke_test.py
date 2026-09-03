@@ -32,17 +32,13 @@ old_db = TMP / 'v2.db'
 c = sqlite3.connect(old_db); c.row_factory = sqlite3.Row
 c.executescript(schema.DDL); c.execute("INSERT INTO schema_version(version) VALUES (2)")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('dry_run','1')")
-c.execute("INSERT INTO accounts(handle, display_name, access_type, is_primary, credentials) VALUES ('apimax_jp','ApiMax','official',1,'{}')")
-demo_acc = c.execute("SELECT id FROM accounts WHERE handle='apimax_jp'").fetchone()["id"]
-for t in seed.DEMO_MATERIAL_TEXTS:
-    c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply',?,'ja','active')", (t,))
-c.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('indie_ai_dev','mock_user_indie_ai_dev')")
-c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria) VALUES ('AI API 成本痛点',?, 'x')", (seed.DEMO_RULE_QUERY,))
+c.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES ('my_real','unofficial',?)", (json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32}),))
+acc_id = c.execute("SELECT id FROM accounts").fetchone()["id"]
+c.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('fake_user','mock_user_fake_user')")
 c.execute("INSERT INTO target_tweets(tweet_id,author_id,author_handle,text,tweet_created_at,source,process_status) VALUES ('1','mock_user_a','a','hi','2026-01-01T00:00:00Z','monitor','queued')")
 tt = c.execute("SELECT id FROM target_tweets").fetchone()["id"]
-c.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final_text,status,created_at) VALUES (?,'reply',?,'x','pending',?)", (demo_acc, tt, utcnow_iso()))
-c.execute("INSERT INTO action_log(account_id,api_kind,endpoint,success,created_at) VALUES (?,'x_mock','e',1,?)", (demo_acc, utcnow_iso()))
-c.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES ('my_real','unofficial',?)", (json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32}),))
+c.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final_text,status,created_at) VALUES (?,'reply',?,'x','pending',?)", (acc_id, tt, utcnow_iso()))
+c.execute("INSERT INTO action_log(account_id,api_kind,endpoint,success,created_at) VALUES (?,'x_mock','e',1,?)", (acc_id, utcnow_iso()))
 c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply','我的素材','zh','active')")
 c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score) VALUES ('我的规则','foo bar','找人','ja,en',7)")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('tweet_max_age_hours','48')")
@@ -61,7 +57,7 @@ with get_conn() as conn:
     obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
 assert ver == 6 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0, (my_min, obsolete)
-print("[1] v2→v6 升级 OK：演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
+print("[1] v2→v6 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -84,7 +80,7 @@ print("[3a] 无账号提示 OK:", m0.as_msg()[:40])
 with get_conn() as conn:
     conn.execute("INSERT INTO accounts(handle, access_type, is_primary, credentials, active_hours_start, active_hours_end, min_interval_sec, max_interval_sec) "
                  "VALUES ('tester','official',1,'{}','00:00','00:00',0,0)")
-    for lang, text in (("ja", "画像生成のAPIコストで悩んでいるなら、従量課金の選択肢もありますよ"), ("en", "If API pricing is the blocker, PAYG gateways help."), ("zh", "如果卡在 API 成本上，可以试试按量计费")):
+    for lang, text in (("ja", "月額で悩んでいるなら、買い切りの選択肢もありますよ"), ("en", "If pricing is the blocker, there are cheaper options."), ("zh", "如果卡在价格上，可以试试便宜点的方案")):
         conn.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply',?,?,'active')", (text, lang))
     conn.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('someone','1234567')")
     conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score,max_results_per_run) VALUES ('规则A','(API cost) -is:retweet','找为成本发愁的人','ja,en',6,15)")
@@ -98,7 +94,7 @@ eq = effective_query(rule); assert eq.endswith("(lang:ja OR lang:en)"), eq
 print("[3c] 多语言查询 OK:", eq)
 from x_operator.core.search import normalize_keywords  # noqa: E402
 assert normalize_keywords("adult,nsfw,AI美女，AI成人、AI短剧") == 'adult OR nsfw OR "AI美女" OR "AI成人" OR "AI短剧"', normalize_keywords("adult,nsfw,AI美女，AI成人、AI短剧")
-assert normalize_keywords("(API 料金 OR API コスト) (AI OR LLM)") == "(API 料金 OR API コスト) (AI OR LLM)"
+assert normalize_keywords("(カメラ 高い OR レンズ 高い) (初心者 OR おすすめ)") == "(カメラ 高い OR レンズ 高い) (初心者 OR おすすめ)"
 assert normalize_keywords("single") == "single"
 eq2 = effective_query({"keyword_query": "adult, AI短剧", "lang": "zh,en"})
 assert eq2 == '(adult OR "AI短剧") (lang:zh OR lang:en) -is:retweet', eq2
@@ -145,11 +141,11 @@ assert q["origin"] == "manual" and q["final_text"] == "我手动改过的文案"
 print("[3j] 手动选素材进队列 OK")
 with get_conn() as conn:
     tgt2 = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') LIMIT 1").fetchone()
-out = jobs.match.ai_write(tgt2["id"], "推荐我们的网关 @ApiMaxJP")
+out = jobs.match.ai_write(tgt2["id"], "推荐我们的产品 @ExampleBrand")
 assert out.status == "no_match" and "设置 → LLM" in out.reason, out
 print("[3k] 无 LLM 时 AI 撰写给出明确提示 OK:", out.reason[:40])
 from x_operator.core.matcher import extract_must_include  # noqa: E402
-assert extract_must_include("带上 https://apimax.jp/ 和 @ApiMaxJP，谢谢") == ["https://apimax.jp/", "@ApiMaxJP"]
+assert extract_must_include("带上 https://example.com/ 和 @ExampleBrand，谢谢") == ["https://example.com/", "@ExampleBrand"]
 # reply_mode=manual：达标推文不自动生成
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET reply_mode='manual', newest_id_cursor=NULL WHERE name='规则A'"); conn.commit()
@@ -434,11 +430,11 @@ except _LLMError as e:
 print("[6f5] LLM 模型分工登记表 OK")
 # 创作要求模板：存/覆盖/列出/删
 from x_operator.ui.pickers import load_templates, save_template, delete_template, _bump_template  # noqa: E402
-save_template("日本独立开发者", "推荐我们的网关 @ApiMaxJP，语气像同行")
-save_template("日本独立开发者", "改过的版本 @ApiMaxJP")
-save_template("英文创作者", "Mention https://apimax.jp/")
+save_template("日本独立开发者", "推荐我们的产品 @ExampleBrand，语气像同行")
+save_template("日本独立开发者", "改过的版本 @ExampleBrand")
+save_template("英文创作者", "Mention https://example.com/")
 tpls = load_templates(); assert [t["name"] for t in tpls] == ["日本独立开发者", "英文创作者"] or len(tpls) == 2, [dict(t) for t in tpls]
-assert next(t for t in tpls if t["name"] == "日本独立开发者")["text"] == "改过的版本 @ApiMaxJP"
+assert next(t for t in tpls if t["name"] == "日本独立开发者")["text"] == "改过的版本 @ExampleBrand"
 _bump_template(next(t for t in tpls if t["name"] == "英文创作者")["id"])
 assert load_templates()[0]["name"] == "英文创作者"   # 用得多的排前面
 delete_template(tpls[0]["id"]); assert len(load_templates()) == 1
@@ -519,8 +515,23 @@ except lc.LLMError as e:
 assert FakeCli.calls[0]["model"] == "gpt-4o", FakeCli.calls[0]["model"]        # write 登记为强模型
 with get_conn() as conn:
     assert conn.execute("SELECT COUNT(*) c FROM action_log WHERE endpoint='llm.write' AND success=0").fetchone()["c"] == 1
+# 模型拒绝（回了一段话而不是 JSON）→ 直接给出带原话的说明，不再浪费一次纠正重试
+FakeCli.calls = []; FakeCli.script = [FakeResp("很抱歉，我无法帮助撰写这类内容。")]
+try:
+    jobs.llm.chat_json("material_gen", [{"role": "user", "content": "x"}], ["items"]); raise SystemExit("应报错")
+except lc.LLMFormatError as e:
+    assert "拒绝" in str(e) and "很抱歉，我无法" in str(e) and "换一个" in str(e), str(e)
+assert len(FakeCli.calls) == 1 and FakeCli.calls[0]["max_tokens"] == 4096, FakeCli.calls
+# 输出被截断 → 提示减少条数
+class TruncResp(FakeResp):
+    def json(self): return {"choices": [{"message": {"content": '{"items": [{"text": "半截'}, "finish_reason": "length"}], "usage": {}}
+FakeCli.calls = []; FakeCli.script = [TruncResp("")]
+try:
+    jobs.llm.chat_json("material_gen", [{"role": "user", "content": "x"}], ["items"]); raise SystemExit("应报错")
+except lc.LLMFormatError as e:
+    assert "截断" in str(e) and "生成条数" in str(e), str(e)
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
-print("[6j] LLM 纠正重试 / 4xx 记日志 OK")
+print("[6j] LLM 纠正重试 / 4xx 记日志 / 拒绝与截断识别 OK")
 
 # [6k] twikit 事件循环：超时会把协程取消掉
 state = {"cancelled": False}

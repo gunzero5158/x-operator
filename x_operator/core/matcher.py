@@ -232,11 +232,12 @@ class MatchEngine:
             conn.commit()
 
 
+# 从推文里粗略推断场景标签，用来和素材的 scenario_tags 对上（通用场景，不绑定行业）
 _TAG_KEYWORDS = {
-    "cost": ["コスト", "料金", "高い", "従量", "安く", "成本", "太贵", "顶不住", "cost", "cheaper", "bill"],
-    "api": ["api", "API"],
-    "model": ["モデル", "model", "llm", "LLM", "大模型"],
-    "compare": ["比較", "使い分け", "compare", "统一", "まとめ"],
+    "cost": ["コスト", "料金", "高い", "安く", "成本", "太贵", "顶不住", "cost", "cheaper", "bill", "expensive"],
+    "recommend": ["おすすめ", "探して", "求推荐", "有没有", "recommend", "anyone", "looking for"],
+    "alternative": ["代替", "替代", "乗り換え", "alternative", "switch"],
+    "compare": ["比較", "使い分け", "compare", "统一", "まとめ", "vs"],
 }
 
 

@@ -48,55 +48,22 @@ def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> No
     conn.execute(f"DELETE FROM app_settings WHERE key IN ({marks})", OBSOLETE_SETTINGS)
 
 
-# ---- 历史版本（≤ v2）首启动时写入过的演示数据：升级到 v3 时按这些特征精确清除 ----
-DEMO_ACCOUNT_HANDLE = "apimax_jp"
-DEMO_MATERIAL_TEXTS = (
-    "画像生成のAPIコストで悩んでいるなら、従量課金で複数モデルをまとめて使える選択肢もありますよ。よければ詳細シェアします🙌",
-    "If API pricing is the blocker, there are pay-as-you-go gateways that bundle multiple models under one bill. Happy to share what worked for us.",
-    "如果是卡在 API 成本上，其实有按量计费、多模型统一结算的方案，需要的话可以分享下我们的经验～",
-    "モデル選定は用途次第ですが、複数モデルを一つの窓口で試せると比較が早いです。参考までに。",
-    "複数のLLMを一つのAPIキーで。従量課金で無駄なく使えます。#AI #API",
-)
-DEMO_RULE_QUERY = "(API 料金 OR API コスト OR API高い) (AI OR LLM) -is:retweet lang:ja"
-
-
+# ---- 历史版本（≤ v2）Mock 适配器写入过的演示数据：升级到 v3 时按 mock_ 前缀精确清除 ----
 def purge_demo_data(conn: sqlite3.Connection) -> dict[str, int]:
-    """清除旧版本留下的全部演示数据。返回各类删除数量（供日志）。幂等。"""
+    """清除旧版本 Mock 适配器留下的演示数据（作者 id / 推文 id 带 mock_ 前缀的）。返回各类删除数量（供日志）。幂等。
+    旧版首启动种子过的示例账号/素材/规则没有可靠特征，不再自动删，用户在界面里自己删即可。"""
     n: dict[str, int] = {}
 
     def run(label: str, sql: str, args: tuple = ()) -> None:
         n[label] = n.get(label, 0) + conn.execute(sql, args).rowcount
 
-    # 1) Mock 适配器产生的抓取记录 / 队列 / 账本 / 日志
     run("review_queue", "DELETE FROM review_queue WHERE target_tweet_id IN "
                         "(SELECT id FROM target_tweets WHERE author_id LIKE 'mock_user_%')")
     run("review_queue", "DELETE FROM review_queue WHERE sent_tweet_id LIKE 'mock_%'")
     run("target_tweets", "DELETE FROM target_tweets WHERE author_id LIKE 'mock_user_%'")
     run("interactions", "DELETE FROM interactions WHERE author_id LIKE 'mock_user_%' OR tweet_id LIKE 'mock_%'")
     run("action_log", "DELETE FROM action_log WHERE api_kind='x_mock'")
-    # 2) 演示监控推主 / 演示搜索规则
     run("watched_users", "DELETE FROM watched_users WHERE x_user_id LIKE 'mock_user_%'")
-    run("search_rules", "DELETE FROM search_rules WHERE keyword_query=?", (DEMO_RULE_QUERY,))
-    # 3) 演示账号（没填凭据的 apimax_jp）及其全部关联记录
-    row = conn.execute("SELECT id FROM accounts WHERE handle=? AND (credentials IS NULL OR credentials='{}')",
-                       (DEMO_ACCOUNT_HANDLE,)).fetchone()
-    if row:
-        aid = row["id"]
-        run("review_queue", "DELETE FROM review_queue WHERE account_id=?", (aid,))
-        run("scheduled_posts", "DELETE FROM scheduled_posts WHERE account_id=?", (aid,))
-        run("interactions", "DELETE FROM interactions WHERE account_id=?", (aid,))
-        run("action_log", "DELETE FROM action_log WHERE account_id=?", (aid,))
-        run("accounts", "DELETE FROM accounts WHERE id=?", (aid,))
-    # 4) 演示素材（正文完全一致且从未被用过的才删；被定时计划引用的跳过）
-    marks = ",".join("?" * len(DEMO_MATERIAL_TEXTS))
-    ids = [r["id"] for r in conn.execute(
-        f"SELECT id FROM materials WHERE text IN ({marks}) AND usage_count=0 "
-        "AND id NOT IN (SELECT material_id FROM scheduled_posts)", DEMO_MATERIAL_TEXTS).fetchall()]
-    for mid in ids:
-        conn.execute("UPDATE review_queue SET material_id=NULL WHERE material_id=?", (mid,))
-        conn.execute("UPDATE materials SET translation_group_id=NULL WHERE translation_group_id=?", (mid,))
-        run("materials", "DELETE FROM materials WHERE id=?", (mid,))
-    # 5) 已废弃的设置项
     run("app_settings", "DELETE FROM app_settings WHERE key='dry_run'")
     return {k: v for k, v in n.items() if v}
 

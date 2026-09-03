@@ -20,7 +20,7 @@ _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
 HINTS = {
     "keywords": "最简单：逗号隔开多个词，命中任意一个即可（中文词会自动整词匹配）。高级：直接写 X 语法，空格=同时包含、OR=或、-词=排除。"
                 "语言不用写，下面勾选；转推默认排除。",
-    "semantic": "写给打分 AI 看的：要什么样的人/内容、排除什么。例：作者本人在抱怨 AI 出图太贵或在找替代；排除新闻、教程、招聘、广告。",
+    "semantic": "写给打分 AI 看的：要什么样的人/内容、排除什么。例：作者本人在抱怨某类工具太贵或在找替代；排除新闻、教程、招聘、广告。",
     "langs": "只保留这些语言的推文。推荐按目标人群勾 1~3 个；留空=不限。",
     "min_score": "AI 给每条推文打 0-10 分，≥ 此分才进下一步。原则是默认保留：沾边就 ≥6，新闻/广告 3~5，看不懂 0~2。推荐 5；想更严 7。",
     "max_results": "每次运行最多拉多少条。推荐 15~30；官方 API 按条计费（约 $0.005/条），小号 Cookie 通道建议 ≤50 防风控。",
@@ -220,7 +220,7 @@ def register(jobs) -> None:
         with ui.dialog() as dlg, ui.card().classes("w-[640px] max-w-[95vw]"):
             ui.label("AI 生成搜索规则").classes("text-lg font-bold")
             desc = ui.textarea("用大白话描述你想找什么人 / 什么内容", value="").classes("w-full").props("outlined autogrow")
-            ui.label("例：找在推特上抱怨 AI 出图 API 太贵、或者在问有没有更便宜的多模型 API 的日本独立开发者和小团队；"
+            ui.label("例：找在推特上抱怨某类软件订阅太贵、或者在问有没有更便宜替代品的日本独立开发者和小团队；"
                      "不要新闻和卖课的。AI 会给出关键词列表、语义条件和语言，你可以再改。").classes("text-xs text-gray-400")
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")

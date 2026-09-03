@@ -54,10 +54,10 @@ def model_for(scene: str) -> str:
     return config.get(TIER_SETTING_KEY[tier]) or TIER_DEFAULT_MODEL[tier]
 
 
-# 命中即视为正例线索的关键词（启发式兜底用；覆盖中日英常见「成本痛点」表达）
-_POSITIVE_HINTS = ["高い", "コスト", "料金", "従量", "安く", "厳しい", "代替", "まとめ",
-                   "顶不住", "太贵", "成本", "便宜", "按量", "统一",
-                   "expensive", "cheaper", "bill", "cost", "afford", "gateway"]
+# 命中即视为正例线索的关键词（启发式兜底用；通用的「本人在抱怨 / 在找替代 / 在求推荐」表达，不绑定任何行业）
+_POSITIVE_HINTS = ["高い", "コスト", "料金", "安く", "厳しい", "代替", "おすすめ", "困って", "探して",
+                   "顶不住", "太贵", "成本", "便宜", "求推荐", "有没有", "替代",
+                   "expensive", "cheaper", "bill", "cost", "afford", "anyone", "recommend", "looking for", "alternative"]
 # 命中即判为噪声（降分）
 _NEGATIVE_HINTS = ["ニュース", "求人", "募集", "tutorial", "guide", "リリース", "#pr",
                    "イベント", "开课", "教程", "招聘", "新闻", "发布", "news", "hiring", "job"]
@@ -73,7 +73,7 @@ class LLMClient:
 
     # ---------------- 真实网关调用 ----------------
     def chat_json(self, scene: str, messages: list[dict], required_keys: list[str],
-                  temperature: float = 0.2, timeout_sec: int = 60) -> dict:
+                  temperature: float = 0.2, timeout_sec: int = 60, max_tokens: int = 4096) -> dict:
         """scene 必须是 SCENE_TIERS 里登记过的场景名，用哪个模型由登记表决定。"""
         model = model_for(scene)
         base_url = (config.get("llm_base_url") or "").rstrip("/")
@@ -84,7 +84,7 @@ class LLMClient:
         url = base_url + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "messages": list(messages), "temperature": temperature,
-                   "response_format": {"type": "json_object"}}
+                   "max_tokens": max_tokens, "response_format": {"type": "json_object"}}
 
         started = time.monotonic()
         last_err = ""
@@ -102,10 +102,23 @@ class LLMClient:
                     last_err = f"LLM 网关返回 {resp.status_code}：{resp.text[:200]}"
                     break
                 data = resp.json()
-                content = data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
                 usage = data.get("usage", {}) or {}
                 obj = _extract_json(content)
                 if obj is None or not all(k in obj for k in required_keys):
+                    # 先分辨两种「不是格式问题」的情况，纠正重试对它们没用
+                    if choice.get("finish_reason") == "length":
+                        last_err = ("LLM 输出被截断（超过了输出长度上限），JSON 不完整。"
+                                    "请减少「生成条数」或缩短要求；也可能是网关限制了单次输出长度。")
+                        self._log(scene, False, usage, started, error=last_err)
+                        raise LLMFormatError(last_err)
+                    if obj is None and _looks_like_refusal(content):
+                        last_err = ("模型拒绝了这个请求，没有按要求输出，它的原话：「" + _snippet(content) + "」。"
+                                    "这通常是模型的内容策略在起作用（主题涉及成人/擦边/敏感内容时尤其常见），不是程序故障。"
+                                    "可以：① 到「设置 → LLM」换一个内容限制更宽松的模型；② 把主题和风格的措辞改得含蓄一些再试。")
+                        self._log(scene, False, usage, started, error=last_err)
+                        raise LLMFormatError(last_err)
                     if not corrected:
                         # 把模型的回答和纠正要求一起发回去（必须写进 payload，否则重发的还是原话）
                         payload["messages"] = list(payload["messages"]) + [
@@ -115,7 +128,9 @@ class LLMClient:
                         ]
                         corrected = True
                         continue
-                    last_err = "LLM 输出无法解析为要求的 JSON"
+                    last_err = ("LLM 两次都没按要求输出 JSON。它最后回的是：「" + _snippet(content) + "」。"
+                                "如果这段话像是在拒绝或解释，多半是模型的内容策略在拦，可换模型或改措辞；"
+                                "如果是乱码/半截 JSON，可能是网关不稳定，稍后再试。")
                     self._log(scene, False, usage, started, error=last_err)
                     raise LLMFormatError(last_err)
                 self._log(scene, True, usage, started)
@@ -157,7 +172,7 @@ class LLMClient:
             elif any(h.lower() in text for h in _NEGATIVE_HINTS):
                 score, reason = 3, "命中新闻/招聘/营销/教程类关键词，疑似非本人诉求"
             elif any(h.lower() in text for h in _POSITIVE_HINTS):
-                score, reason = 8, "命中成本/替代方案类关键词，疑似作者本人在表达痛点"
+                score, reason = 8, "命中抱怨/求推荐/找替代类关键词，疑似作者本人在表达需求"
             else:
                 score, reason = 7, "关键词已命中且有完整上下文，默认保留，交给人工审核判断"
             results.append({"tweet_id": t["tweet_id"], "score": score,
@@ -259,6 +274,25 @@ _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
 def _strip_noise(text: str) -> str:
     """去掉链接、@、#话题、表情、空白后剩下的「正文」，用来判断有没有上下文。"""
     return _EMOJI_RE.sub("", _NOISE_RE.sub("", text or ""))
+
+
+_REFUSAL_HINTS = [
+    "i can't", "i cannot", "i'm unable", "i am unable", "can't help", "cannot help", "can't assist", "cannot assist",
+    "not able to", "i won't", "against my", "content policy", "usage policy", "inappropriate", "sexual", "explicit",
+    "抱歉", "很抱歉", "无法", "不能协助", "不能帮", "无法帮助", "违反", "不便", "不适合", "涉及", "敏感",
+    "申し訳", "できません", "お手伝いできません",
+]
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """模型没给 JSON 而是回了一段话：看看像不像在拒绝。"""
+    low = (text or "").strip().lower()
+    return bool(low) and "{" not in low[:20] and any(h in low for h in _REFUSAL_HINTS)
+
+
+def _snippet(text: str, n: int = 200) -> str:
+    s = " ".join((text or "").split())
+    return s if len(s) <= n else s[:n] + "…"
 
 
 def _extract_json(text: str) -> dict | None:

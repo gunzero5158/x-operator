@@ -220,13 +220,13 @@ def register(jobs) -> None:
                 count = ui.number("生成条数", value=5, min=1, max=20, step=1).classes("w-32").props("outlined")
             ui.label("类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。").classes("text-xs text-gray-400 -mt-2 mb-1")
             topic = ui.textarea("主题 / 要传达的信息", value="").classes("w-full").props("outlined autogrow")
-            ui.label("例：我们是按量计费的多模型 AI API 网关，一个 key 用 GPT/Claude/Gemini，比官方直连便宜；面向独立开发者。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            ui.label("例：我们是面向独立开发者的 XX 工具，比同类产品便宜、上手快；主打省钱和省事。").classes("text-xs text-gray-400 -mt-2 mb-1")
             style = ui.input("风格 / 语气", value="").classes("w-full").props("outlined")
             ui.label("例：像同行随口聊天，不像客服；简短；可以带一点自嘲。留空=自然口语。").classes("text-xs text-gray-400 -mt-2 mb-1")
             scenario = ui.input("使用场景（选填）", value="").classes("w-full").props("outlined")
-            ui.label("例：对方在抱怨 API 太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            ui.label("例：对方在抱怨某工具太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。").classes("text-xs text-gray-400 -mt-2 mb-1")
             must = ui.input("必须包含（选填，多个用逗号）", value="").classes("w-full").props("outlined")
-            ui.label("例：@ApiMaxJP, https://apimax.jp 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            ui.label("例：@你的官号, https://你的官网 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。").classes("text-xs text-gray-400 -mt-2 mb-1")
             preview = ui.column().classes("w-full gap-1")
             chosen: dict[int, bool] = {}
             items_holder: dict = {"items": []}
