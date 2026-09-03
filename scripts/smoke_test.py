@@ -380,11 +380,20 @@ orig_score = jobs.llm.score_relevance
 jobs.llm.score_relevance = lambda crit, payload: [{"tweet_id": int(p["tweet_id"]), "score": "9/10", "reason": "r"} for p in payload]
 with get_conn() as conn:
     rule = conn.execute("SELECT * FROM search_rules").fetchone()
-scored = jobs.search.run_rule(rule, get_primary_account(), preview=True)
+scored = jobs.search.run_rule(rule, get_primary_account())
 real_scored = [c for c in scored if not c.prefiltered]
 assert real_scored and all(c.score == 9 for c in real_scored), [(c.score, c.prefiltered) for c in scored]
 jobs.llm.score_relevance = orig_score
 print("[6f] LLM 返回数字 tweet_id / 分数字符串也能对上号 OK")
+# 只跑指定规则（停用的也跑）；不存在的规则给提示
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET enabled=0 WHERE id=?", (rule["id"],)); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]]); assert st.rules_run == 1 and st.tweets_fetched == 6, st.as_msg()
+st = jobs.search.run_once(); assert st.rules_run == 0 and "没有启用的搜索规则" in st.as_msg(), st.as_msg()
+st = jobs.search.run_once(rule_ids=[999999]); assert st.rules_run == 0 and "不存在" in st.as_msg(), st.as_msg()
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET enabled=1 WHERE id=?", (rule["id"],)); conn.commit()
+print("[6f2] 单条规则运行 OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

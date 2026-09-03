@@ -2,7 +2,7 @@
 
 粗筛（关键词 query 抓取，自动带上规则选的语言）→ 去掉已抓过的、语言不符的、预检拦下的（这些不花 LLM）
 → 精筛（LLM 相关性打分，>= 规则达标分者）→ MatchEngine。
-preview=True：拉取 + 打分后直接返回，不写库、不推进游标、不进匹配（UI「试运行」按钮用）。
+run_once(rule_ids=[...]) 只跑指定规则（规则卡片上的「运行此规则」）；不传则跑全部启用的规则。没有只看不存的预览模式。
 
 每一条被挡下的推文都会写进 target_tweets，llm_relevance_reason 里写明「为什么」——
 「抓取记录」页原样展示，用户不用猜过滤条件。
@@ -127,7 +127,7 @@ class SearchJob:
         self.match = match_engine
         self.llm = llm
 
-    def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row, preview: bool = False,
+    def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row,
                  notes: list[str] | None = None) -> list[ScoredCandidate]:
         """抓取 + 预过滤 + 打分。返回按推文 id 升序的候选（含被预过滤的，prefiltered 字段说明原因）。
         notes：可选，运行中的提示（比如回溯被钳到 7 天）追加到这里。"""
@@ -147,7 +147,7 @@ class SearchJob:
         tweets = result.tweets
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
-        if not preview and tweets:
+        if tweets:
             # 已经抓过的（别的规则/上一轮存过）不再打分，省 LLM
             marks = ",".join("?" * len(tweets))
             with get_conn() as conn:
@@ -190,8 +190,9 @@ class SearchJob:
         out.sort(key=lambda c: int(c.tweet.tweet_id) if c.tweet.tweet_id.isdigit() else 0)
         return out
 
-    def run_once(self, auto: bool = False) -> SearchStats:
-        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。"""
+    def run_once(self, auto: bool = False, rule_ids: list[int] | None = None) -> SearchStats:
+        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。
+        rule_ids：只跑这些规则（停用的也跑——用户明确点了这一条）；None = 全部启用的规则。"""
         stats = SearchStats()
         denied = budget.current().allow(auto)
         if denied:
@@ -202,9 +203,13 @@ class SearchJob:
             stats.notes.append("没有状态为「启用」的账号，无法搜索。请到「设置 → 账号」添加并启用一个账号")
             return stats
         with get_conn() as conn:
-            rules = conn.execute("SELECT * FROM search_rules WHERE enabled=1").fetchall()
+            if rule_ids:
+                marks = ",".join("?" * len(rule_ids))
+                rules = conn.execute(f"SELECT * FROM search_rules WHERE id IN ({marks})", list(rule_ids)).fetchall()
+            else:
+                rules = conn.execute("SELECT * FROM search_rules WHERE enabled=1").fetchall()
         if not rules:
-            stats.notes.append("没有启用的搜索规则。请到「搜索规则」页新建或启用")
+            stats.notes.append("没有启用的搜索规则。请到「搜索规则」页新建或启用" if not rule_ids else "规则不存在（可能已被删除）")
             return stats
 
         llm_ok = self.llm.configured
@@ -214,7 +219,7 @@ class SearchJob:
             stats.rules_run += 1
             min_scores.append(int(rule["min_llm_score"]))
             try:
-                scored = self.run_rule(rule, account, preview=False, notes=stats.notes)
+                scored = self.run_rule(rule, account, notes=stats.notes)
                 stats.tweets_fetched += len(scored)
                 newest_id = None
                 for cand in scored:

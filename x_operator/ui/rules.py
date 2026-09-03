@@ -9,7 +9,6 @@ from nicegui import run, ui
 
 from .. import config
 from ..core.matcher import REPLY_MODE_LABEL
-from ..core.monitor import get_primary_account
 from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
 from ..db.database import get_conn
 from .layout import confirm, fmt_time, run_job, shell
@@ -68,9 +67,10 @@ def register(jobs) -> None:
                 with ui.row().classes("gap-2"):
                     ui.button("AI 生成规则", icon="auto_awesome", on_click=lambda: _ai_generate(jobs, render)).props("outline color=purple")
                     ui.button("新建规则", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-                    ui.button("运行一次搜索", icon="play_arrow",
+                    ui.button("运行全部规则", icon="play_arrow",
                               on_click=lambda: run_job(jobs.search.run_once, "搜索", render,
-                                                       result_link=("查看抓取记录", "/targets?source=search"))).props("outline")
+                                                       result_link=("查看抓取记录", "/targets?source=search"))
+                              ).props("outline").tooltip("把所有「启用」的规则各跑一次；只想跑某一条就点该规则卡片上的「运行此规则」")
             ui.label("两级漏斗：关键词查询粗筛（X 搜索语法，自动带上所选语言）→ 按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
                      ).classes("text-xs text-gray-400")
@@ -150,43 +150,14 @@ def register(jobs) -> None:
                                           on_click=lambda rid=r["id"]: ui.navigate.to(f"/targets?source=search&rule={rid}")
                                           ).props("flat dense color=primary")
                                 ui.button("编辑", on_click=lambda rr=r: _edit(rr, render)).props("flat dense")
-                                ui.button("试运行", icon="science", on_click=lambda rr=r: _preview(jobs, rr)).props("flat dense")
+                                ui.button("运行此规则", icon="play_arrow",
+                                          on_click=lambda rid=r["id"]: run_job(lambda: jobs.search.run_once(rule_ids=[rid]), "搜索", render,
+                                                                               result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"))
+                                          ).props("flat dense").tooltip("只跑这一条规则（停用状态也能跑）；结果进抓取记录、推进游标，和正式运行一样")
                                 ui.button("重置游标", on_click=lambda rid=r["id"]: (_reset_cursor(rid), ui.notify("已重置，下次搜索按「首次回溯」小时数重新抓", type="info"), render())).props("flat dense")
                                 ui.button("删除", icon="delete", on_click=lambda rr=r: delete(rr)).props("flat dense color=negative")
 
             render()
-
-    async def _preview(jobs, rule):
-        account = get_primary_account()
-        if account is None:
-            ui.notify("没有状态为「启用」的账号，无法搜索", type="negative"); return
-        with ui.dialog() as dialog, ui.card().classes("min-w-[760px] max-w-[95vw]"):
-            ui.label(f"试运行：{rule['name']}").classes("text-lg font-bold")
-            ui.label("实际查询：" + effective_query(rule)).classes("text-xs font-mono text-gray-500")
-            ui.label("（会消耗读额度；仅打分预览，不写库、不推进游标、不进队列）").classes("text-xs text-gray-400")
-            container = ui.column().classes("w-full")
-            with container:
-                ui.spinner()
-                ui.label("正在抓取并打分…").classes("text-xs text-gray-400")
-            ui.button("关闭", on_click=dialog.close).props("flat")
-        dialog.open()
-        try:
-            scored = await run.io_bound(jobs.search.run_rule, rule, account, True)
-            container.clear()
-            with container:
-                if not scored:
-                    ui.label("没抓到新推文（游标之后没有新内容可先「重置游标」；首次运行受「首次回溯」小时数限制；或者关键词太窄）").classes("text-gray-500")
-                    return
-                rows = [{"作者": "@" + c.tweet.author_handle, "语言": c.tweet.lang or "?", "文本": c.tweet.text[:100],
-                         "分数": "—" if c.prefiltered else c.score, "理由": c.prefiltered or c.reason,
-                         "达标": "✗" if c.prefiltered else ("✓" if c.score >= rule["min_llm_score"] else "✗")} for c in scored]
-                ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("作者", "语言", "文本", "分数", "理由", "达标")],
-                         rows=rows).classes("w-full").props("wrap-cells dense")
-                ui.label(f"共 {len(rows)} 条，达标（≥{rule['min_llm_score']}） {sum(1 for r in rows if r['达标'] == '✓')} 条").classes("text-xs text-gray-400")
-        except Exception as e:
-            container.clear()
-            with container:
-                ui.label(f"试运行出错：{e}").classes("text-red-500 whitespace-pre-wrap")
 
     def _edit(r, refresh, preset: dict | None = None):
         """r=已有规则行；preset=AI 生成的预填值（新建时用）。"""
