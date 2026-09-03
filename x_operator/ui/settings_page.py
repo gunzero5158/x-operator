@@ -10,6 +10,7 @@ from .. import config
 from ..adapters import factory
 from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
                              parse_credentials, validate_unofficial_credentials)
+from ..core.monitor import READ_CHANNEL_LABEL, read_channel
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           LLMClient)
@@ -57,6 +58,8 @@ def register(jobs) -> None:
                          "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。", int, 0, 365),
                     ])
                 with ui.tab_panel(t_budget):
+                    _read_channel_panel()
+                    ui.separator()
                     ui.label("读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。"
                              "怎么数：每次抓取按 X 返回的推文条数记（被过滤掉的也算，开了观看量门槛时按扫描条数记），发送后回查算 1 条，发送本身不占读额度。"
                              "真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。"
@@ -77,6 +80,16 @@ def register(jobs) -> None:
                     _blacklist_panel()
                 with ui.tab_panel(t_data):
                     _data_panel()
+
+
+def _read_channel_panel():
+    ui.label("抓取通道").classes("font-semibold")
+    sel = ui.select(READ_CHANNEL_LABEL, value=read_channel(), label="监控 / 搜索的读取走哪个通道").classes("w-full").props("outlined")
+    ui.label("小号通道（默认）：用启用中的非官方账号去读，X 不计费，下面的读额度限制不生效；有多个小号时轮流用今天读得最少的那个分摊风控。"
+             "官方 API：用主号/官方号去读，按返回条数计费，读额度会拦。所选通道一个账号都没有时自动退回另一个通道，运行结果里会写明这次用的是谁。"
+             ).classes("text-xs text-gray-400 -mt-2 mb-1")
+    sel.on("update:model-value", lambda e: (config.set_value("read_channel", sel.value),
+                                            ui.notify("已切换抓取通道：" + READ_CHANNEL_LABEL[sel.value], type="positive")))
 
 
 def _run_panel():
@@ -230,8 +243,9 @@ def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
     ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
              "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
-    ui.label("多账号分工：「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）负责抓取；回复默认在启用中的小号里自动轮流、"
+    ui.label("多账号分工：抓取（读）默认走小号通道、免费（设置 → 预算「抓取通道」可切到官方 API，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，审核队列里每条也能临时改。"
+             "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
              "发帖的账号在定时计划里选。").classes("text-xs text-gray-400")
     sys_proxy = detect_system_proxy()
     ui.label("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +

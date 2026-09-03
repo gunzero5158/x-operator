@@ -5,6 +5,7 @@ from nicegui import ui
 
 from .. import config
 from ..core import budget
+from ..core.monitor import READ_CHANNEL_LABEL, get_read_account, read_channel, read_is_billed
 from ..db.database import get_conn
 from .layout import fmt_time, run_job, run_job_with_progress, shell
 
@@ -75,20 +76,25 @@ def register(jobs) -> None:
 
                     with ui.card().classes("w-full"):
                         b = budget.current()
-                        ui.label("读额度（只统计官方 API 通道，X 只对它按条计费）").classes("font-semibold")
+                        ra = get_read_account()
+                        billed = ra is not None and read_is_billed(ra)
+                        ui.label("抓取通道与读额度").classes("font-semibold")
+                        ui.label("当前抓取通道：" + READ_CHANNEL_LABEL[read_channel()]
+                                 + (f"，实际会用 @{ra['handle']}（{'官方 API，计费' if billed else '小号通道，不计费'}）" if ra else "，但没有启用的账号")
+                                 + "。设置 → 预算 可切换。").classes("text-sm")
                         pct = min(1.0, b.used_today / b.daily_budget) if b.daily_budget else 0
                         ui.linear_progress(pct, show_value=False).classes("w-full")
                         month_usd = b.used_month * budget.OFFICIAL_READ_USD
                         monthly_budget = config.get_float("monthly_budget_usd", 60)
-                        ui.label(f"今日官方读取 {b.used_today}/{b.daily_budget} 条（熔断保留 {b.reserve}）· "
+                        ui.label(f"今日官方 API 读取 {b.used_today}/{b.daily_budget} 条（熔断保留 {b.reserve}）· "
                                  f"本月累计 {b.used_month} 条，按 ${budget.OFFICIAL_READ_USD}/条估算约 ${month_usd:.2f} / 月预算 ${monthly_budget:.0f}"
-                                 f"（实际单价以开发者后台为准）")
-                        ui.label(f"今日小号 Cookie 通道读取 {b.free_today} 条：不计费、不占额度。"
-                                 "抓取用的是主号/官方号——只要绑了官方账号，监控和搜索的读取就都走它、都计费（被过滤掉的也算）；"
-                                 "不想花读取的钱就只绑小号。").classes("text-xs text-gray-400")
-                        denied = b.allow(auto=True)
-                        if denied:
-                            ui.label(denied).classes("text-xs text-orange-600")
+                                 f"（实际单价以开发者后台为准）· 今日小号通道读取 {b.free_today} 条（免费）").classes("text-xs text-gray-500")
+                        if not billed:
+                            ui.label("抓取走小号通道：读额度限制不生效，只有切到官方 API 时才会拦。").classes("text-xs text-gray-400")
+                        else:
+                            denied = b.allow(auto=True)
+                            if denied:
+                                ui.label(denied).classes("text-xs text-orange-600")
 
                     with ui.card().classes("w-full"):
                         ui.label("手动运行（测试期用；自动轮询可在设置页打开）").classes("font-semibold")

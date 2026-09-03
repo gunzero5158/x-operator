@@ -48,18 +48,40 @@ class MonitorStats:
         return head
 
 
-def get_primary_account() -> sqlite3.Row | None:
-    """抓取（读）用的账号：优先主号/官方号；没有官方号时退而用任一活跃账号（非官方也行，
-    因为读操作走 Cookie 通道不计费）。"""
+READ_CHANNEL_LABEL = {"unofficial": "小号 Cookie 通道（免费，读额度不生效）", "official": "官方 API（按条计费，读额度生效）"}
+
+
+def read_channel() -> str:
+    v = (config.get("read_channel") or "unofficial").strip()
+    return v if v in READ_CHANNEL_LABEL else "unofficial"
+
+
+def get_read_account() -> sqlite3.Row | None:
+    """抓取（监控/搜索的读取）用的账号，按设置里的「抓取通道」选：
+    - 小号通道（默认）：在启用中的非官方账号里挑今天读得最少的（多个小号分摊风控）；一个都没有就退回官方号。
+    - 官方 API：优先主号；没有官方号就退回小号。
+    调用方用 account['access_type'] 判断这次读取是否计费/是否受读额度限制。"""
     with get_conn() as conn:
-        row = conn.execute(
+        official = conn.execute(
             "SELECT * FROM accounts WHERE status='active' AND access_type='official' "
-            "ORDER BY is_primary DESC, id ASC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            row = conn.execute(
-                "SELECT * FROM accounts WHERE status='active' ORDER BY id ASC LIMIT 1").fetchone()
-        return row
+            "ORDER BY is_primary DESC, id ASC LIMIT 1").fetchone()
+        unofficial = conn.execute(
+            "SELECT a.* FROM accounts a LEFT JOIN ("
+            "  SELECT account_id, SUM(reads_consumed) AS r FROM action_log "
+            "  WHERE created_at>=strftime('%Y-%m-%dT00:00:00Z','now') GROUP BY account_id) l ON l.account_id=a.id "
+            "WHERE a.status='active' AND a.access_type='unofficial' "
+            "ORDER BY COALESCE(l.r,0) ASC, a.id ASC LIMIT 1").fetchone()
+    if read_channel() == "official":
+        return official or unofficial
+    return unofficial or official
+
+
+# 旧名字，其他模块还在用
+get_primary_account = get_read_account
+
+
+def read_is_billed(account: sqlite3.Row) -> bool:
+    return account["access_type"] == "official"
 
 
 def _row_int(row: sqlite3.Row, key: str, default: int) -> int:
@@ -132,20 +154,22 @@ class MonitorJob:
         """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。
         progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
         stats = MonitorStats()
-        denied = budget.current().allow(auto)
-        if denied:
-            stats.notes.append(denied)
-            return stats
-        account = get_primary_account()
+        account = get_read_account()
         if account is None:
             stats.notes.append("没有状态为「启用」的账号，无法抓取。请到「设置 → 账号」添加并启用一个账号")
             return stats
+        if read_is_billed(account):
+            denied = budget.current().allow(auto)
+            if denied:
+                stats.notes.append(denied)
+                return stats
         try:
             client = factory.get_client(account)
         except XClientError as e:
             stats.errors += 1
             stats.notes.append(f"账号 @{account['handle']} 无法连接：{e}")
-            _log_read(account["id"], "x_official", "get_user_tweets", 0, success=False, error=str(e))
+            _log_read(account["id"], "x_official" if read_is_billed(account) else "x_unofficial",
+                      "get_user_tweets", 0, success=False, error=str(e))
             return stats
         except ValueError as e:  # 主号误配非官方通道
             stats.errors += 1
@@ -220,6 +244,7 @@ class MonitorJob:
                 _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
         if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled:
             stats.notes.append("推主自上次游标之后没有新推文（可在推主卡片上「重置游标」重新抓最近几条）")
+        stats.notes.append(f"本次用 @{account['handle']} 抓取（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}）")
         if progress:
             progress(1.0, "完成")
         return stats

@@ -19,7 +19,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "reply_ttl_hours": "48",
     "nurture_days": "14",
     "match_confidence_threshold": "0.4",
-    # 预算（读额度由 core/budget.py 实际执行：自动轮询在触及熔断线时停，手动运行在用完时拒绝）
+    # 抓取（监控/搜索的读取）走哪个通道：unofficial=小号 Cookie 通道（免费，读额度不生效）/ official=官方 API（计费，读额度生效）
+    "read_channel": "unofficial",
+    # 预算（读额度由 core/budget.py 实际执行，只在抓取走官方 API 时生效：自动轮询在触及熔断线时停，手动运行在用完时拒绝）
     "monthly_budget_usd": "60",
     "daily_read_budget": "330",
     "budget_reserve_reads": "20",

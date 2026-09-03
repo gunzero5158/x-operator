@@ -501,6 +501,24 @@ with get_conn() as conn:
 chosen, note = choose_reply_account(None, acc_row)
 assert chosen["id"] == ids["tester"] and "没有启用中的小号" in note, note   # 没小号才退回主号
 print("[6f8] 多账号回复分摊（自动轮流 / 指定账号 / 队列改账号 / 无小号退回主号）OK")
+# 抓取通道：默认小号（免费、预算不拦、多个小号轮流读得最少的）；切官方才用主号
+from x_operator.core.monitor import get_read_account, read_is_billed  # noqa: E402
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='active' WHERE handle IN ('small1','small2')"); conn.commit()
+assert get_read_account()["handle"] in ("small1", "small2") and not read_is_billed(get_read_account())
+with get_conn() as conn:
+    conn.execute("INSERT INTO action_log(account_id, api_kind, endpoint, reads_consumed, success, created_at) VALUES (?, 'x_unofficial', 'search_recent', 50, 1, ?)", (ids["small1"], utcnow_iso())); conn.commit()
+assert get_read_account()["handle"] == "small2"   # 读得少的优先
+config.set_value("daily_read_budget", 1)          # 额度只剩 1，走小号照样能抓
+st = jobs.search.run_once(rule_ids=[rule["id"]]); assert st.rules_run == 1 and "小号通道，不计费" in st.as_msg(), st.as_msg()
+config.set_value("read_channel", "official")
+assert get_read_account()["handle"] == "tester" and read_is_billed(get_read_account())
+st = jobs.search.run_once(rule_ids=[rule["id"]]); assert st.rules_run == 0 and "已用完" in st.as_msg(), st.as_msg()
+config.set_value("read_channel", "unofficial"); config.set_value("daily_read_budget", 0)
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='paused' WHERE handle IN ('small1','small2')"); conn.commit()
+assert get_read_account()["handle"] == "tester"   # 没小号退回官方
+print("[6f9] 抓取通道（默认小号免费不拦 / 小号轮流 / 切官方才计费受限）OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

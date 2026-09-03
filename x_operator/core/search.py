@@ -21,8 +21,8 @@ from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import budget
 from .matcher import MatchEngine
-from .monitor import (FILTER_REASONS, _log_read, _row_int, get_primary_account,
-                      precheck, store_target)
+from .monitor import (FILTER_REASONS, _log_read, _row_int, get_read_account,
+                      precheck, read_is_billed, store_target)
 
 LANG_LABEL = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "es": "西班牙语",
               "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
@@ -154,9 +154,10 @@ class SearchJob:
         scan_limit = 0
         if min_views:
             scan_limit = min(SCAN_CAP, max_results * SCAN_FACTOR)
-            b = budget.current()
-            if b.daily_budget > 0:
-                scan_limit = max(max_results, min(scan_limit, b.remaining))
+            if read_is_billed(account):
+                b = budget.current()
+                if b.daily_budget > 0:
+                    scan_limit = max(max_results, min(scan_limit, b.remaining))
         _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{'游标之后的新推文' if rule['newest_id_cursor'] else f'最近 {lookback_h} 小时'}"
                  + (f"，观看量 ≥ {min_views}，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
         result = client.search_recent(effective_query(rule), since_id=rule["newest_id_cursor"],
@@ -223,14 +224,15 @@ class SearchJob:
         rule_ids：只跑这些规则（停用的也跑——用户明确点了这一条）；None = 全部启用的规则。
         progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
         stats = SearchStats()
-        denied = budget.current().allow(auto)
-        if denied:
-            stats.notes.append(denied)
-            return stats
-        account = get_primary_account()
+        account = get_read_account()
         if account is None:
             stats.notes.append("没有状态为「启用」的账号，无法搜索。请到「设置 → 账号」添加并启用一个账号")
             return stats
+        if read_is_billed(account):
+            denied = budget.current().allow(auto)
+            if denied:
+                stats.notes.append(denied)
+                return stats
         with get_conn() as conn:
             if rule_ids:
                 marks = ",".join("?" * len(rule_ids))
@@ -314,6 +316,7 @@ class SearchJob:
             stats.notes.append(tip)
         if stats.tweets_fetched:
             stats.notes.append("每条推文的打分和被过滤的原因都在「抓取记录」页")
+        stats.notes.append(f"本次用 @{account['handle']} 抓取（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}）")
         if progress:
             progress(1.0, "完成")
         return stats
