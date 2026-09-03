@@ -114,7 +114,7 @@ class SearchStats:
         head = (f"搜索完成：运行 {self.rules_run} 条规则，拉取 {self.tweets_fetched} 条，"
                 f"进审核队列 {self.queued}，达标但没配到素材 {self.no_match}，未达标/被过滤 {self.filtered}，错误 {self.errors}")
         if self.notes:
-            head += "。\n" + "\n".join(self.notes[:4])
+            head += "。\n" + "\n".join(self.notes[:12])
         return head
 
 
@@ -174,6 +174,20 @@ class SearchJob:
         _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条" + (f"（扫描 {result.scanned} 条）" if min_views else "") + "，正在去重和预检…")
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
+        if not tweets and notes is not None:
+            if result.scanned and min_views:
+                pass   # 上面已经写了「扫描 N 条、观看量不足的都跳过」
+            elif rule["newest_id_cursor"]:
+                notes.append(f"规则「{rule['name']}」：游标之后没有新推文（想重新抓最近的，点规则卡片上的「重置游标」）")
+            else:
+                channel = "小号通道" if account["access_type"] != "official" else "官方 API"
+                notes.append(
+                    f"⚠ 规则「{rule['name']}」：X 没有返回任何推文（{channel}，首次回溯 {lookback_h} 小时）。实际查询：{effective_query(rule)}\n"
+                    "   可能原因：① 关键词太窄或写法 X 不认——把上面这条查询原样粘到 x.com 的搜索框里看有没有结果；"
+                    "② 这个时间窗内确实没人发，可调大「首次回溯」；"
+                    + ("③ 这个小号的搜索被 X 限制了（新号、受限号常见）——在浏览器里用它搜同样的词试试，不行就换个小号或到「设置 → 预算」切官方 API。"
+                       if account["access_type"] != "official" else
+                       "③ 官方 API 的搜索只认它支持的操作符，带了不支持的写法会返回空或报错。"))
         if tweets:
             # 已经抓过的（别的规则/上一轮存过）不再打分，省 LLM
             marks = ",".join("?" * len(tweets))
@@ -182,6 +196,8 @@ class SearchJob:
                     f"SELECT tweet_id FROM target_tweets WHERE tweet_id IN ({marks})", [t.tweet_id for t in tweets])}
             tweets = [t for t in tweets if t.tweet_id not in known]
         if not tweets:
+            if result.tweets and notes is not None:
+                notes.append(f"规则「{rule['name']}」：抓到的 {len(result.tweets)} 条都是之前已经抓过的，没有新内容")
             return []
 
         langs = rule_langs(rule)
@@ -298,15 +314,13 @@ class SearchJob:
                     conn.commit()
             except (XClientError, ValueError) as e:
                 stats.errors += 1
-                stats.notes.append(f"规则「{rule['name']}」：{e}")
+                stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{e}")
                 _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
             except Exception as e:
                 stats.errors += 1
-                stats.notes.append(f"规则「{rule['name']}」：{e}")
+                stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{type(e).__name__}: {e}")
                 _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
 
-        if stats.tweets_fetched == 0 and stats.errors == 0 and stats.rules_run:
-            stats.notes.append("自上次游标之后没有新推文（可在规则卡片上「重置游标」重新抓最近的）")
         if stats.tweets_fetched and stats.queued == 0 and stats.no_match == 0 and below:
             tip = f"这次抓到的推文全部未达标（相关性打分低于达标分 {min(min_scores)}）。"
             if not llm_ok:

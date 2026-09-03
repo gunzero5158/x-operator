@@ -519,6 +519,24 @@ with get_conn() as conn:
     conn.execute("UPDATE accounts SET status='paused' WHERE handle IN ('small1','small2')"); conn.commit()
 assert get_read_account()["handle"] == "tester"   # 没小号退回官方
 print("[6f9] 抓取通道（默认小号免费不拦 / 小号轮流 / 切官方才计费受限）OK")
+# 搜索 0 条 / 出错时必须有能看懂的提示
+cli0 = factory.get_client(acc_row)
+orig_search = cli0.search_recent
+cli0.search_recent = lambda *a, **k: FetchResult(tweets=[], newest_id=None, reads_consumed=0)
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]]); m = st.as_msg()
+assert "没有返回任何推文" in m and "实际查询" in m and "可能原因" in m, m
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET newest_id_cursor='1' WHERE id=?", (rule["id"],)); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]]); assert "游标之后没有新推文" in st.as_msg(), st.as_msg()
+cli0.search_recent = lambda *a, **k: (_ for _ in ()).throw(XClientError("X 拒绝了搜索请求"))
+st = jobs.search.run_once(rule_ids=[rule["id"]]); m = st.as_msg()
+assert st.errors == 1 and m.split("\n")[1].startswith("❌") and "X 拒绝了搜索请求" in m, m
+cli0.search_recent = orig_search
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+print("[6f10] 搜索 0 条 / 出错的提示 OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

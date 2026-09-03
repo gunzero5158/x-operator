@@ -44,7 +44,7 @@ class MonitorStats:
         head = (f"监控完成：轮询 {self.users_polled} 位推主，拉取 {self.tweets_fetched} 条，"
                 f"入队 {self.queued}，未匹配 {self.no_match}，过滤 {self.filtered}，错误 {self.errors}")
         if self.notes:
-            head += "。" + "；".join(self.notes[:3])
+            head += "。\n" + "\n".join(self.notes[:12])
         return head
 
 
@@ -236,14 +236,14 @@ class MonitorJob:
                         conn.commit()
             except XClientError as e:
                 stats.errors += 1
-                stats.notes.append(f"@{user['handle']}：{e}")
+                stats.notes.insert(0, f"❌ @{user['handle']} 出错：{e}")
                 _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
             except Exception as e:  # 单推主隔离
                 stats.errors += 1
-                stats.notes.append(f"@{user['handle']}：{e}")
+                stats.notes.insert(0, f"❌ @{user['handle']} 出错：{type(e).__name__}: {e}")
                 _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
         if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled:
-            stats.notes.append("推主自上次游标之后没有新推文（可在推主卡片上「重置游标」重新抓最近几条）")
+            stats.notes.append("所有推主都没有新推文（有游标的只看游标之后的，可在推主卡片上「重置游标」；首次抓取只看「首次回溯」小时数内的）")
         stats.notes.append(f"本次用 @{account['handle']} 抓取（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}）")
         if progress:
             progress(1.0, "完成")
