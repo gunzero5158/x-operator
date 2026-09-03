@@ -530,6 +530,9 @@ print("[6h] 过期清扫同步抓取记录 OK")
 
 # [6i] 读额度真的会拦：自动轮询触熔断线就停，手动用完才拒
 used = budget.current().used_today; assert used > 0
+with get_conn() as conn:   # 小号通道的读取不占额度
+    conn.execute("INSERT INTO action_log(account_id, api_kind, endpoint, reads_consumed, success, created_at) VALUES (?, 'x_unofficial', 'search_recent', 999, 1, ?)", (acc["id"], utcnow_iso())); conn.commit()
+b = budget.current(); assert b.used_today == used and b.free_today >= 999, (b.used_today, used, b.free_today)
 config.set_value("daily_read_budget", used + 5); config.set_value("budget_reserve_reads", 20)
 st = jobs.monitor.run_once(auto=True); assert st.users_polled == 0 and "自动轮询已暂停" in st.as_msg(), st.as_msg()
 st = jobs.search.run_once(auto=False); assert st.rules_run == 1, st.as_msg()   # 手动还能跑

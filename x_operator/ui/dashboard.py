@@ -75,13 +75,17 @@ def register(jobs) -> None:
 
                     with ui.card().classes("w-full"):
                         b = budget.current()
-                        ui.label("读额度").classes("font-semibold")
+                        ui.label("读额度（只统计官方 API 通道，X 只对它按条计费）").classes("font-semibold")
                         pct = min(1.0, b.used_today / b.daily_budget) if b.daily_budget else 0
                         ui.linear_progress(pct, show_value=False).classes("w-full")
-                        month_usd = b.used_month * 0.005
+                        month_usd = b.used_month * budget.OFFICIAL_READ_USD
                         monthly_budget = config.get_float("monthly_budget_usd", 60)
-                        ui.label(f"今日 {b.used_today}/{b.daily_budget} 条读取（熔断保留 {b.reserve}）· "
-                                 f"本月累计 {b.used_month} 条，官方 API 读费用约 ${month_usd:.2f} / 月预算 ${monthly_budget:.0f}")
+                        ui.label(f"今日官方读取 {b.used_today}/{b.daily_budget} 条（熔断保留 {b.reserve}）· "
+                                 f"本月累计 {b.used_month} 条，按 ${budget.OFFICIAL_READ_USD}/条估算约 ${month_usd:.2f} / 月预算 ${monthly_budget:.0f}"
+                                 f"（实际单价以开发者后台为准）")
+                        ui.label(f"今日小号 Cookie 通道读取 {b.free_today} 条：不计费、不占额度。"
+                                 "抓取用的是主号/官方号——只要绑了官方账号，监控和搜索的读取就都走它、都计费（被过滤掉的也算）；"
+                                 "不想花读取的钱就只绑小号。").classes("text-xs text-gray-400")
                         denied = b.allow(auto=True)
                         if denied:
                             ui.label(denied).classes("text-xs text-orange-600")
