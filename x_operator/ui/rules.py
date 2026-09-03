@@ -13,6 +13,7 @@ from ..core.monitor import get_primary_account
 from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
 from ..db.database import get_conn
 from .layout import confirm, fmt_time, run_job, shell
+from .pickers import reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
 
@@ -24,12 +25,8 @@ HINTS = {
     "langs": "只保留这些语言的推文。推荐按目标人群勾 1~3 个；留空=不限。",
     "min_score": "AI 给每条推文打 0-10 分，≥ 此分才进下一步。原则是默认保留：沾边就 ≥6，新闻/广告 3~5，看不懂 0~2。推荐 5；想更严 7。",
     "max_results": "每次运行最多拉多少条。推荐 15~30；官方 API 按条计费（约 $0.005/条），小号 Cookie 通道建议 ≤50 防风控。",
-    "lookback": "首次运行（或重置游标后）往回抓多少小时内的推文；之后每次只抓上次之后的新内容。推荐 24；冷门词可 72~168。",
-    "reply_mode": "抓到达标推文后怎么生成回复：匹配素材库=从你写好的回复素材里选（可控、省钱）；AI 按要求创作=每条现写（更贴合、需 LLM）；"
-                  "只抓取=不自动生成，你在抓取记录里逐条手动选素材或让 AI 写。",
-    "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做按量计费的多模型 API 网关，"
-                "回复要先接对方的话再提一句，像同行聊天，结尾带 @ApiMaxJP。",
-    "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
+    "lookback": "首次运行（或重置游标后）往回抓多少小时内的推文；之后每次只抓上次之后的新内容。推荐 24；冷门词可 72~168。"
+                "官方 API 最多只能搜最近 7 天（168 小时），填得再大也按 168 抓。",
 }
 
 
@@ -77,7 +74,7 @@ def register(jobs) -> None:
             ui.label("两级漏斗：关键词查询粗筛（X 搜索语法，自动带上所选语言）→ 按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
                      ).classes("text-xs text-gray-400")
-            llm_on = bool(config.get("llm_base_url") and config.get("llm_api_key"))
+            llm_on = jobs.llm.configured
             if not llm_on:
                 with ui.row().classes("items-center gap-1 text-xs text-orange-600"):
                     ui.icon("info")
@@ -88,16 +85,16 @@ def register(jobs) -> None:
                 cd = config.get_int("cooldown_days", 7)
                 ui.markdown(
                     "抓到的每条推文按顺序过以下几关，**任何一关没过都会写进「抓取记录」并注明原因**，不会悄悄丢掉：\n\n"
-                    "1. **时间窗**：首次运行只看规则「首次回溯」小时数内的推文；之后只抓上次游标之后的新内容。\n"
+                    "1. **时间窗**：首次运行只看规则「首次回溯」小时数内的推文（官方 API 最多 7 天）；之后只抓上次游标之后的新内容。\n"
                     "2. **语言**：推文语言必须在规则勾选的语言内（留空 = 不限）。语言不明（und）的一律放行。\n"
-                    "3. **相关性打分 ≥ 达标分**（每条规则可改）。打分原则是「默认保留」：\n"
+                    "3. **预检**：转推 / 自己账号发的 / 作者在黑名单 / 这条已回复过（去重账本）"
+                    f" / 同一作者 **{cd} 天**内互动过（设置 → 合规参数「作者冷却天数」）→ 跳过。前三关不花 LLM。\n"
+                    "4. **相关性打分 ≥ 达标分**（每条规则可改）。打分原则是「默认保留」：\n"
                     + ("   - 已配置 LLM：按你写的语义条件打分——本人明确符合 8~10；沾边但拿不准 6~7；"
                        "新闻/教程/招聘/纯广告 3~5；无关或看不出意思 0~2。\n" if llm_on else
                        "   - 未配置 LLM（当前）：关键词已命中且有完整上下文 → 7；命中「新闻/招聘/募集/教程/リリース/hiring…」→ 3；"
                        "去掉链接、@、#、表情后不足 12 个字 → 2。\n")
-                    + "4. **预检**：转推 / 自己账号发的 / 作者在黑名单 / 这条已回复过（去重账本）"
-                    f" / 同一作者 **{cd} 天**内互动过（设置 → 合规参数「作者冷却天数」）→ 跳过\n"
-                    "5. **生成回复**（按规则的「回复方式」）：匹配素材库需要有同语言、启用中的回复素材；AI 创作需要 LLM 和创作要求；"
+                    + "5. **生成回复**（按规则的「回复方式」）：匹配素材库需要有同语言、启用中的回复素材；AI 创作需要 LLM 和创作要求；"
                     "「只抓取」则等你手动处理。没生成成功的标为「达标但未生成回复」，可在抓取记录里手动「选素材」或「AI 撰写」。\n\n"
                     "过关的才生成回复草稿进「审核队列」，最后由你决定发不发。"
                 ).classes("text-xs text-gray-600")
@@ -181,8 +178,8 @@ def register(jobs) -> None:
                     ui.label("没抓到新推文（游标之后没有新内容可先「重置游标」；首次运行受「首次回溯」小时数限制；或者关键词太窄）").classes("text-gray-500")
                     return
                 rows = [{"作者": "@" + c.tweet.author_handle, "语言": c.tweet.lang or "?", "文本": c.tweet.text[:100],
-                         "分数": c.score, "理由": c.reason,
-                         "达标": "✓" if c.score >= rule["min_llm_score"] else "✗"} for c in scored]
+                         "分数": "—" if c.prefiltered else c.score, "理由": c.prefiltered or c.reason,
+                         "达标": "✗" if c.prefiltered else ("✓" if c.score >= rule["min_llm_score"] else "✗")} for c in scored]
                 ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("作者", "语言", "文本", "分数", "理由", "达标")],
                          rows=rows).classes("w-full").props("wrap-cells dense")
                 ui.label(f"共 {len(rows)} 条，达标（≥{rule['min_llm_score']}） {sum(1 for r in rows if r['达标'] == '✓')} 条").classes("text-xs text-gray-400")
@@ -211,29 +208,19 @@ def register(jobs) -> None:
                 max_results = ui.number("每次抓取条数（10-100）", value=g("max_results_per_run", 15), min=10, max=100, step=1).classes("flex-1").props("outlined")
                 lookback = ui.number("首次回溯（小时）", value=g("lookback_hours", 24), min=1, max=720, step=1).classes("flex-1").props("outlined")
             _hint("min_score"); _hint("max_results"); _hint("lookback")
-            ui.separator()
-            ui.label("回复方式").classes("font-semibold text-sm")
-            mode = ui.select(REPLY_MODE_LABEL, value=g("reply_mode", "material"), label="抓到达标推文后").classes("w-full").props("outlined")
-            _hint("reply_mode")
-            brief = ui.textarea("AI 创作要求", value=g("ai_brief", "")).classes("w-full").props("outlined autogrow")
-            brief_hint = ui.label(HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
-            polish = ui.switch("允许 AI 轻微润色素材", value=bool(g("allow_polish", 0)))
-            polish_hint = ui.label(HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
-
-            def sync():
-                is_ai = mode.value == "ai_write"
-                brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai)
-                polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
-            mode.on("update:model-value", lambda e: sync()); sync()
+            mode, brief, polish = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后")
 
             def do_save():
                 if not (name.value or "").strip() or not (kq.value or "").strip() or not (sc.value or "").strip():
                     ui.notify("规则名 / 关键词 / 语义条件都不能为空", type="negative"); return
-                if mode.value == "ai_write" and not (brief.value or "").strip():
-                    ui.notify("选了「AI 按要求创作」就必须填创作要求", type="negative"); return
+                problem = reply_mode_invalid(mode, brief)
+                if problem:
+                    ui.notify(problem, type="negative"); return
                 data = dict(name=name.value.strip(), kq=kq.value.strip(), sc=sc.value.strip(),
-                            lang=",".join(x for x in (lang.value or []) if x), min_score=int(min_score.value or 0),
-                            max_results=int(max_results.value or 10), lookback=int(lookback.value or 24),
+                            lang=",".join(x for x in (lang.value or []) if x),
+                            min_score=max(0, min(10, int(min_score.value or 0))),
+                            max_results=max(10, min(100, int(max_results.value or 10))),
+                            lookback=max(1, int(lookback.value or 24)),
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0)
                 try:
                     _save(r["id"] if r else None, data)

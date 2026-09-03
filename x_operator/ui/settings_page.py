@@ -44,28 +44,30 @@ def register(jobs) -> None:
                     ui.label("这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。").classes("text-xs text-gray-400")
                     _numeric_panel([
                         ("cooldown_days", "作者冷却天数",
-                         "对同一个作者两次互动之间至少隔几天，避免被对方和 X 当成骚扰。推荐 7；养号期小号 14。"),
+                         "对同一个作者两次互动之间至少隔几天，避免被对方和 X 当成骚扰。推荐 7；养号期小号 14。", int, 0, 365),
                         ("reply_ttl_hours", "回复条目时效（小时）",
-                         "待审核条目超过这个时长自动过期——回复太旧的推文没意义还显得像机器人。推荐 48；热点类 24。"),
+                         "待审核条目超过这个时长自动过期——回复太旧的推文没意义还显得像机器人。推荐 48；热点类 24。", int, 1, 720),
                         ("match_confidence_threshold", "素材匹配置信度阈值（0-1）",
-                         "AI 匹配素材时对「这条素材合适」的信心低于此值就不生成、标为未生成回复。推荐 0.7；想多出草稿自己筛就 0.5。"),
+                         "AI 匹配素材时对「这条素材合适」的信心低于此值就不生成、标为未生成回复。推荐 0.7；想多出草稿自己筛就 0.5。", float, 0, 1),
                         ("grace_period_hours", "定时补发宽限（小时）",
-                         "程序没开着导致定时计划错过了，重启后在多少小时内还补发。推荐 2；超过就标为错过、不补。"),
+                         "程序没开着导致定时计划错过了，重启后如果错过还不到这么多小时就照常补发；超过就标为「错过」不补（周期计划跳到下一次）。推荐 2。", int, 0, 168),
                         ("nurture_days", "养号期天数",
-                         "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。"),
+                         "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。", int, 0, 365),
                     ])
                 with ui.tab_panel(t_budget):
+                    ui.label("读额度是真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。"
+                             "发送不占读额度；发送后回查一次算 1 条。").classes("text-xs text-gray-400")
                     _numeric_panel([
                         ("daily_read_budget", "每日读额度（条）",
-                         "每天最多从 X 读多少条推文（监控+搜索合计），防止官方 API 账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。"),
+                         "每天最多从 X 读多少条推文（监控+搜索合计），防止官方 API 账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。填 0 = 不限。", int, 0, 1000000),
                         ("budget_reserve_reads", "熔断保留读额度",
-                         "读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。"),
+                         "读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。", int, 0, 100000),
                         ("monthly_budget_usd", "月预算（USD）",
-                         "仅用于仪表盘参考显示。"),
+                         "仪表盘按本月读取量估算官方 API 读费用并与它对照（约 $0.005/条；发推另计）。", float, 0, 1000000),
                         ("monitor_interval_minutes", "自动监控间隔（分钟）",
-                         "开了后台自动轮询时，多久跑一次监控。推荐 50~120；改后需重启生效。"),
+                         "开了后台自动轮询时，多久跑一次监控。推荐 50~120；改后需重启生效。", int, 1, 1440),
                         ("search_runs_per_day", "每日自动搜索次数",
-                         "开了后台自动轮询时，一天跑几次搜索。推荐 2~4。"),
+                         "开了后台自动轮询时，一天跑几次搜索（间隔 = 24 小时 ÷ 次数，最短 30 分钟）。推荐 2~4；改后需重启生效。", int, 1, 48),
                     ])
                 with ui.tab_panel(t_bl):
                     _blacklist_panel()
@@ -116,14 +118,27 @@ def _llm_panel():
 
 
 def _numeric_panel(fields):
+    """fields：(key, 标签, 说明, 类型 int/float, 最小, 最大)。保存前逐项校验，填错哪个就提示哪个，全部合格才写库。"""
     inputs = {}
-    for key, label, hint in fields:
+    for key, label, hint, _kind, lo, hi in fields:
         inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
-        ui.label(hint).classes("text-xs text-gray-400 -mt-2 mb-2")
+        ui.label(hint + f"（允许范围 {lo:g}~{hi:g}）").classes("text-xs text-gray-400 -mt-2 mb-2")
 
     def save():
-        for key, inp in inputs.items():
-            config.set_value(key, inp.value.strip())
+        parsed = {}
+        for key, label, _hint, kind, lo, hi in fields:
+            raw = (inputs[key].value or "").strip()
+            try:
+                val = kind(float(raw)) if kind is int else kind(raw)
+                if kind is int and float(raw) != val:
+                    raise ValueError
+            except (TypeError, ValueError):
+                ui.notify(f"「{label}」要填{'整数' if kind is int else '数字'}，现在填的是「{raw}」", type="negative"); return
+            if not (lo <= val <= hi):
+                ui.notify(f"「{label}」要在 {lo:g}~{hi:g} 之间，现在填的是 {val:g}", type="negative"); return
+            parsed[key] = val
+        for key, val in parsed.items():
+            config.set_value(key, val)
         ui.notify("已保存", type="positive")
     ui.button("保存", on_click=save).props("color=primary")
 
@@ -468,23 +483,47 @@ def _set_acc_status(aid, status):
 # ====================================================================================
 # 黑名单
 # ====================================================================================
+def _resolve_blacklist_entry(raw: str) -> tuple[str, str, str]:
+    """把用户输入变成 (x_user_id, handle, 备注)。填 @handle 时通过账号去 X 查数字 id（拦截时两者都会比对；
+    查不到也照样按 handle 存，只是提示一下）。阻塞：在线程池里跑。"""
+    from ..core.monitor import get_primary_account
+    v = raw.strip().lstrip("@")
+    if v.isdigit():
+        return v, "", ""
+    account = get_primary_account()
+    if account is None:
+        return v, v, "（没有启用的账号，无法查数字 id；按 @handle 拦截）"
+    try:
+        user = factory.get_client(account).get_user_by_handle(v)
+        return user.user_id, user.handle, ""
+    except Exception as e:
+        return v, v, f"（查数字 id 失败：{str(e)[:60]}；按 @handle 拦截）"
+
+
 def _blacklist_panel():
-    ui.label("黑名单里的作者不会被回复；可填 @handle 或 X 的数字 user_id。").classes("text-xs text-gray-400")
+    ui.label("黑名单里的作者不会被回复（监控/搜索预检和发送前都会拦）；可填 @handle 或 X 的数字 user_id，两者都能匹配。").classes("text-xs text-gray-400")
     with ui.row().classes("items-end gap-2"):
         inp = ui.input("@handle 或 user_id").props("outlined dense")
         reason_in = ui.input("原因（选填）").props("outlined dense")
         add_btn = ui.button("添加", icon="add").props("color=primary")
     body = ui.column().classes("w-full gap-1")
 
-    def add():
+    async def add():
         v = (inp.value or "").strip().lstrip("@")
         if not v:
             return
+        add_btn.disable()
+        try:
+            uid, handle, note = await run.io_bound(_resolve_blacklist_entry, v)
+        finally:
+            add_btn.enable()
         with get_conn() as conn:
             conn.execute("INSERT INTO blacklist(x_user_id, handle, reason, created_at) VALUES (?,?,?,?) "
-                         "ON CONFLICT(x_user_id) DO NOTHING", (v, v, (reason_in.value or "手动添加").strip(), utcnow_iso()))
+                         "ON CONFLICT(x_user_id) DO UPDATE SET handle=CASE WHEN excluded.handle<>'' THEN excluded.handle ELSE handle END",
+                         (uid, handle, (reason_in.value or "手动添加").strip(), utcnow_iso()))
             conn.commit()
-        inp.value = ""; reason_in.value = ""; render(); ui.notify("已添加", type="positive")
+        inp.value = ""; reason_in.value = ""; render()
+        ui.notify("已添加" + note, type="positive" if not note else "warning", multi_line=True)
     add_btn.on_click(add)
 
     def render():

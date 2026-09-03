@@ -4,6 +4,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from .. import config
+from ..core import budget
 from ..db.database import get_conn
 from .layout import fmt_time, run_job, shell
 
@@ -22,9 +23,6 @@ def _stats() -> dict:
         fails = conn.execute(
             "SELECT COUNT(*) AS c FROM action_log WHERE success=0 AND created_at>=strftime('%Y-%m-%dT%H:%M:%SZ','now','-1 day')"
         ).fetchone()["c"]
-        reads_today = conn.execute(
-            "SELECT COALESCE(SUM(reads_consumed),0) AS c FROM action_log WHERE created_at>=strftime('%Y-%m-%dT00:00:00Z','now')"
-        ).fetchone()["c"]
         recent_fail = conn.execute(
             "SELECT created_at, endpoint, error FROM action_log WHERE success=0 ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
@@ -33,7 +31,7 @@ def _stats() -> dict:
         rules = conn.execute("SELECT COUNT(*) AS c FROM search_rules WHERE enabled=1").fetchone()["c"]
         materials = conn.execute("SELECT COUNT(*) AS c FROM materials WHERE status='active' AND deleted_at IS NULL").fetchone()["c"]
     return dict(sent_today=sent_today, pending=pending, approved=approved, no_match=no_match,
-                total_targets=total_targets, targets_today=targets_today, fails=fails, reads_today=reads_today,
+                total_targets=total_targets, targets_today=targets_today, fails=fails,
                 recent_fail=recent_fail, accounts=accounts, watched=watched, rules=rules, materials=materials)
 
 
@@ -72,15 +70,21 @@ def register(jobs) -> None:
                         _check(s["watched"] > 0 or s["rules"] > 0, f"监控推主 {s['watched']} 个 · 搜索规则 {s['rules']} 条",
                                "没有监控推主也没有搜索规则 → 没有抓取来源", "/watched")
                         _check(s["materials"] > 0, f"启用的素材 {s['materials']} 条", "没有启用的素材 → 抓到推文也匹配不到回复", "/materials")
-                        llm_ok = bool(config.get("llm_base_url") and config.get("llm_api_key"))
+                        llm_ok = jobs.llm.configured
                         _check(True, "LLM：" + ("已配置网关（真实 LLM 打分/匹配）" if llm_ok else "未配置，用关键词启发式兜底（可用但粗糙）"), "", "/settings")
 
                     with ui.card().classes("w-full"):
-                        daily_budget = config.get_int("daily_read_budget", 330)
+                        b = budget.current()
                         ui.label("读额度").classes("font-semibold")
-                        pct = min(1.0, s["reads_today"] / daily_budget) if daily_budget else 0
+                        pct = min(1.0, b.used_today / b.daily_budget) if b.daily_budget else 0
                         ui.linear_progress(pct, show_value=False).classes("w-full")
-                        ui.label(f'今日 {s["reads_today"]}/{daily_budget} 次读取 · 计费模式 {config.get("billing_mode")}')
+                        month_usd = b.used_month * 0.005
+                        monthly_budget = config.get_float("monthly_budget_usd", 60)
+                        ui.label(f"今日 {b.used_today}/{b.daily_budget} 条读取（熔断保留 {b.reserve}）· "
+                                 f"本月累计 {b.used_month} 条，官方 API 读费用约 ${month_usd:.2f} / 月预算 ${monthly_budget:.0f}")
+                        denied = b.allow(auto=True)
+                        if denied:
+                            ui.label(denied).classes("text-xs text-orange-600")
 
                     with ui.card().classes("w-full"):
                         ui.label("手动运行（测试期用；自动轮询可在设置页打开）").classes("font-semibold")

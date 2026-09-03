@@ -25,7 +25,8 @@ class RateLimited(XClientError):
 
 
 class AuthExpired(XClientError):
-    """401/凭据失效/cookies 过期。捕获方必须将账号置 auth_error，绝不自动重试登录。"""
+    """401/凭据失效/cookies 过期。非官方通道填了账号密码时适配器内部会重新登录一次；
+    仍失败才抛出，捕获方将账号置 auth_error，不再重试。"""
 
 
 class DuplicateContent(XClientError):
@@ -106,7 +107,10 @@ class XClient(ABC):
 
     @abstractmethod
     def get_user_tweets(self, user_id: str, since_id: str | None = None,
-                        max_results: int = 5, include_replies: bool = False) -> FetchResult: ...
+                        max_results: int = 5, include_replies: bool = False,
+                        start_time: datetime | None = None) -> FetchResult:
+        """since_id 优先；没有游标时用 start_time 限定「首次回溯」窗口（官方 API 按返回条数计费，
+        所以要把窗口交给服务端，而不是拉一堆再本地丢）。"""
 
     @abstractmethod
     def search_recent(self, query: str, since_id: str | None = None,

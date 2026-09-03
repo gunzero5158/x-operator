@@ -58,19 +58,21 @@ with get_conn() as conn:
     rq_n = conn.execute("SELECT COUNT(*) c FROM review_queue").fetchone()["c"]
     dry = conn.execute("SELECT value FROM app_settings WHERE key='dry_run'").fetchone()
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
-    age = conn.execute("SELECT value FROM app_settings WHERE key='tweet_max_age_hours'").fetchone()["value"]
+    obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
 assert ver == 5 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
-assert my_min == 5 and age == "168", (my_min, age)
-print("[1] v2→v5 升级 OK：演示数据全部清除、用户数据保留；旧默认阈值放宽（达标分 7→5，最大年龄 48→168h）")
+assert my_min == 5 and obsolete == 0, (my_min, obsolete)
+print("[1] v2→v5 升级 OK：演示数据全部清除、用户数据保留；旧默认达标分 7→5；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
-init_db(TMP / 'new.db')
+init_db(TMP / 'new.db', setting_overrides={"cooldown_days": 3, "not_a_key": 1})
 with get_conn() as conn:
     for tbl in ("accounts", "materials", "watched_users", "search_rules", "target_tweets"):
         assert conn.execute(f"SELECT COUNT(*) c FROM {tbl}").fetchone()["c"] == 0, tbl
     assert conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key='dry_run'").fetchone()["c"] == 0
-print("[2] 新库无任何演示数据 OK")
+    assert conn.execute("SELECT value FROM app_settings WHERE key='cooldown_days'").fetchone()["value"] == "3"
+    assert conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key='not_a_key'").fetchone()["c"] == 0
+print("[2] 新库无任何演示数据 OK；settings.toml [defaults] 首启动生效")
 
 # ---------- 3. 全链路（X_OPERATOR_MOCK=1 走 Mock 适配器，仅测试） ----------
 from x_operator.core.scheduler import Jobs  # noqa: E402
@@ -252,11 +254,13 @@ except AuthExpired as e:
     assert "Cookie" in str(e); print("[4g] 无 Cookie 下发提示 OK")
 
 # ---------- 5. 代理与格式校验 ----------
-os.environ["HTTPS_PROXY"] = "https://127.0.0.1:7890"; os.environ.pop("HTTP_PROXY", None); os.environ.pop("ALL_PROXY", None)
+os.environ["HTTPS_PROXY"] = "127.0.0.1:7890"; os.environ.pop("HTTP_PROXY", None); os.environ.pop("ALL_PROXY", None)
 assert detect_system_proxy() == "http://127.0.0.1:7890", detect_system_proxy()
 assert resolve_proxy({}) == "http://127.0.0.1:7890" and resolve_proxy({"proxy": "direct"}) is None and resolve_proxy({"proxy": "10.0.0.1:1080"}) == "http://10.0.0.1:1080"
+os.environ["HTTPS_PROXY"] = "https://proxy.local:443"
+assert detect_system_proxy() == ("http://proxy.local:443" if sys.platform == "win32" else "https://proxy.local:443"), detect_system_proxy()
 os.environ.pop("HTTPS_PROXY"); assert detect_system_proxy() is None
-print("[5a] 系统代理检测/直连/自定义 OK")
+print("[5a] 系统代理检测/直连/自定义 OK（https 前缀只在 Windows 改写）")
 assert validate_unofficial_credentials({"auth_token": "abc", "ct0": "d" * 32}).startswith("auth_token 格式不对")
 assert validate_unofficial_credentials({"auth_token": "a" * 40, "ct0": "zz"}).startswith("ct0 格式不对")
 assert validate_unofficial_credentials({"auth_token": "a" * 40}).startswith("auth_token 和 ct0 要一起填")
@@ -266,5 +270,258 @@ print("[5b] 凭据格式校验 OK")
 oc = OfficialXClient(credentials={"consumer_key": "k", "consumer_secret": "s", "access_token": "t", "access_token_secret": "ts", "proxy": "127.0.0.1:9999"})
 assert oc._client.session.proxies["https"] == "http://127.0.0.1:9999" and oc.proxy_used == "http://127.0.0.1:9999"
 print("[5c] 官方 API 客户端代理注入 OK")
+
+# ---------- 6. 审查后修复的回归用例 ----------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from x_operator import config  # noqa: E402
+from x_operator.adapters.base import NetworkError, RateLimited, TweetData, XClientError, FetchResult  # noqa: E402
+from x_operator.adapters.real import _LoopThread, clamp_recent_window  # noqa: E402
+from x_operator.core import budget  # noqa: E402
+from x_operator.core.compliance import is_blacklisted  # noqa: E402
+from x_operator.core.monitor import get_primary_account, precheck  # noqa: E402
+from x_operator.core.scheduler import expire_stale, run_startup_recovery  # noqa: E402
+from x_operator.core.search import coerce_score  # noqa: E402
+from x_operator.db.database import parse_iso, to_iso  # noqa: E402
+
+fresh_conn_state()
+init_db(TMP / 'new.db')
+with get_conn() as conn:
+    acc = conn.execute("SELECT * FROM accounts WHERE handle='tester'").fetchone()
+    conn.execute("UPDATE review_queue SET status='skipped' WHERE status IN ('approved','pending')")
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL"); conn.commit()
+
+
+def _fresh_pending_item():
+    """挑一条没进过队列的抓取记录，手动选素材 → 批准，返回 (queue_id, target_tweet_id 字符串)。"""
+    with get_conn() as conn:
+        t = conn.execute("SELECT id, tweet_id, lang FROM target_tweets WHERE process_status IN ('filtered','no_match') "
+                         "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
+                         "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
+        m = conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' LIMIT 1").fetchone()
+    out = jobs.match.manual_match(t["id"], m["id"], "回归测试文案 " + t["tweet_id"])
+    assert out.status == "queued", out
+    with get_conn() as conn:
+        conn.execute("UPDATE review_queue SET status='approved', decided_at=? WHERE id=?", (utcnow_iso(), out.queue_id)); conn.commit()
+    return out.queue_id, t["tweet_id"]
+
+
+# [6a] 启动恢复：发送中断 → 有 X id 的标已发送，没有的标失败（不再盲目回置待发送）
+with get_conn() as conn:
+    conn.execute("INSERT INTO review_queue(account_id, action_type, final_text, status, sent_tweet_id, created_at) VALUES (?,'post','a','sending','999',?)", (acc["id"], utcnow_iso()))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, final_text, status, created_at) VALUES (?,'post','b','sending',?)", (acc["id"], utcnow_iso()))
+    conn.commit()
+msgs = run_startup_recovery(jobs)
+with get_conn() as conn:
+    a_st = conn.execute("SELECT status FROM review_queue WHERE final_text='a'").fetchone()["status"]
+    b = conn.execute("SELECT status, error_msg FROM review_queue WHERE final_text='b'").fetchone()
+assert a_st == "sent" and b["status"] == "failed" and "无法确认" in b["error_msg"], (a_st, dict(b), msgs)
+print("[6a] 启动恢复不再重发结果未知的条目 OK")
+
+# [6b] 429 限流：条目回置待发送、不消耗重试次数，账号 next_allowed_at 推到重置时间
+client = factory.get_client(acc)
+qid, tid_str = _fresh_pending_item()
+reset_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+orig_reply = client.reply
+client.reply = lambda text, rid, media_ids=None: (_ for _ in ()).throw(RateLimited("429", reset_at=reset_at))
+r = jobs.dispatcher.tick()
+with get_conn() as conn:
+    row = conn.execute("SELECT status, retry_count, error_msg FROM review_queue WHERE id=?", (qid,)).fetchone()
+    na = parse_iso(conn.execute("SELECT next_allowed_at FROM accounts WHERE id=?", (acc["id"],)).fetchone()["next_allowed_at"])
+assert row["status"] == "approved" and row["retry_count"] == 0 and "限流" in row["error_msg"], dict(row)
+assert na is not None and abs((na - reset_at).total_seconds()) < 2, (na, reset_at)
+assert r.sent == 0 and "限流" in r.as_msg(), r.as_msg()
+print("[6b] 限流按 X 给的重置时间暂停、不烧重试次数 OK")
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+
+# [6c] 发送超时但其实发出去了：到自己时间线上找回，按已发送处理，不重发
+client.reply = lambda text, rid, media_ids=None: (_ for _ in ()).throw(NetworkError("timeout"))
+me = client.get_me()
+found = TweetData(tweet_id="777000111", author_id=me.user_id, author_handle=me.handle, text="回归测试文案", lang="zh",
+                  created_at=datetime.now(timezone.utc), is_retweet=False, in_reply_to_tweet_id=tid_str)
+orig_gut = client.get_user_tweets
+client.get_user_tweets = lambda *a, **k: FetchResult(tweets=[found], newest_id="777000111", reads_consumed=1)
+r = jobs.dispatcher.tick()
+with get_conn() as conn:
+    row = conn.execute("SELECT status, sent_tweet_id, retry_count FROM review_queue WHERE id=?", (qid,)).fetchone()
+    ledger = conn.execute("SELECT 1 FROM interactions WHERE tweet_id=?", (tid_str,)).fetchone()
+assert row["status"] == "sent" and row["sent_tweet_id"] == "777000111" and ledger is not None, dict(row)
+assert r.sent == 1 and "777000111" in r.as_msg(), r.as_msg()
+print("[6c] 超时后找回已发推文、不重发 OK")
+client.reply = orig_reply; client.get_user_tweets = orig_gut
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+
+# [6d] 同一账号并发发送：锁住时另一线程直接跳过
+qid2, _ = _fresh_pending_item()
+lock = jobs.dispatcher._account_lock(acc["id"]); lock.acquire()
+try:
+    r = jobs.dispatcher.tick()
+finally:
+    lock.release()
+assert r.sent == 0 and "另一次发送" in r.as_msg(), r.as_msg()
+r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
+print("[6d] 账号级发送锁 OK")
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+
+# [6e] 黑名单按 @handle 也能拦
+with get_conn() as conn:
+    conn.execute("INSERT INTO blacklist(x_user_id, handle, reason, created_at) VALUES ('spammer','spammer','test',?)", (utcnow_iso(),)); conn.commit()
+    assert is_blacklisted(conn, "123456789", "Spammer") and not is_blacklisted(conn, "123456789", "goodguy")
+tw = TweetData(tweet_id="5", author_id="123456789", author_handle="spammer", text="hi", lang="en",
+               created_at=datetime.now(timezone.utc), is_retweet=False, in_reply_to_tweet_id=None)
+assert precheck(tw, "tester") == "blacklisted"
+print("[6e] 黑名单 @handle 匹配 OK")
+
+# [6f] LLM 打分容错：tweet_id 数字、分数 "8/10"
+assert coerce_score("8/10") == 8 and coerce_score(7.6) == 8 and coerce_score(None) == 0 and coerce_score(15) == 10 and coerce_score(True) == 0
+orig_score = jobs.llm.score_relevance
+jobs.llm.score_relevance = lambda crit, payload: [{"tweet_id": int(p["tweet_id"]), "score": "9/10", "reason": "r"} for p in payload]
+with get_conn() as conn:
+    rule = conn.execute("SELECT * FROM search_rules").fetchone()
+scored = jobs.search.run_rule(rule, get_primary_account(), preview=True)
+real_scored = [c for c in scored if not c.prefiltered]
+assert real_scored and all(c.score == 9 for c in real_scored), [(c.score, c.prefiltered) for c in scored]
+jobs.llm.score_relevance = orig_score
+print("[6f] LLM 返回数字 tweet_id / 分数字符串也能对上号 OK")
+
+# [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
+with get_conn() as conn:
+    conn.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('post','定时发帖素材','ja','active')")
+    pm = conn.execute("SELECT id FROM materials WHERE text='定时发帖素材'").fetchone()["id"]
+    conn.execute("INSERT INTO scheduled_posts(account_id, material_id, schedule_type, schedule_expr, next_run_at, status) VALUES (?,?,'daily','21:00',?,'active')",
+                 (acc["id"], pm, to_iso(datetime.now(timezone.utc) - timedelta(minutes=1))))
+    conn.commit()
+results = []
+ths = [threading.Thread(target=lambda: results.append(jobs.run_scheduled_posts())) for _ in range(2)]
+[t.start() for t in ths]; [t.join() for t in ths]
+with get_conn() as conn:
+    n_sched = conn.execute("SELECT COUNT(*) c, MIN(origin) o FROM review_queue WHERE scheduled_post_id IS NOT NULL").fetchone()
+assert sum(results) == 1 and n_sched["c"] == 1 and n_sched["o"] == "scheduled", (results, dict(n_sched))
+print("[6g] 定时计划原子认领、来源标记 OK")
+
+# [6h] 过期清扫：待审核超时 → 过期，抓取记录同步标过期
+with get_conn() as conn:
+    t = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) LIMIT 1").fetchone()
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, expires_at, created_at) VALUES (?,'reply',?,'x','pending',?,?)",
+                 (acc["id"], t["id"], to_iso(datetime.now(timezone.utc) - timedelta(hours=1)), utcnow_iso()))
+    conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=?", (t["id"],)); conn.commit()
+assert expire_stale() == 1
+with get_conn() as conn:
+    assert conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (t["id"],)).fetchone()["process_status"] == "expired"
+print("[6h] 过期清扫同步抓取记录 OK")
+
+# [6i] 读额度真的会拦：自动轮询触熔断线就停，手动用完才拒
+used = budget.current().used_today; assert used > 0
+config.set_value("daily_read_budget", used + 5); config.set_value("budget_reserve_reads", 20)
+st = jobs.monitor.run_once(auto=True); assert st.users_polled == 0 and "自动轮询已暂停" in st.as_msg(), st.as_msg()
+st = jobs.search.run_once(auto=False); assert st.rules_run == 1, st.as_msg()   # 手动还能跑
+config.set_value("daily_read_budget", budget.current().used_today)
+st = jobs.monitor.run_once(auto=False); assert st.users_polled == 0 and "已用完" in st.as_msg(), st.as_msg()
+config.set_value("daily_read_budget", 0)
+st = jobs.monitor.run_once(auto=True); assert st.users_polled == 1, st.as_msg()   # 0 = 不限
+print("[6i] 读额度熔断 OK")
+
+# [6j] LLM 纠正重试真的把纠正消息发出去了；网关 4xx 走 LLMError 且有日志
+import x_operator.llm.client as lc  # noqa: E402
+
+
+class FakeResp:
+    def __init__(self, content, status=200): self.status_code = status; self._c = content; self.text = content
+
+    def json(self): return {"choices": [{"message": {"content": self._c}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+class FakeCli:
+    calls: list = []
+    script: list = []
+
+    def __init__(self, timeout=None): pass
+
+    def __enter__(self): return self
+
+    def __exit__(self, *a): pass
+
+    def post(self, url, headers=None, json=None):
+        FakeCli.calls.append(json); return FakeCli.script.pop(0)
+
+
+orig_httpx_client = lc.httpx.Client; lc.httpx.Client = FakeCli
+config.set_value("llm_base_url", "http://fake"); config.set_value("llm_api_key", "k")
+FakeCli.script = [FakeResp("sorry, no json here"), FakeResp('{"ok": true}')]
+obj = jobs.llm.chat_json("t", [{"role": "user", "content": "hi"}], ["ok"])
+assert obj == {"ok": True} and len(FakeCli.calls) == 2 and len(FakeCli.calls[1]["messages"]) == 3 and FakeCli.calls[1]["messages"][1]["content"] == "sorry, no json here", FakeCli.calls
+FakeCli.calls = []; FakeCli.script = [FakeResp("bad key", status=401)]
+try:
+    jobs.llm.chat_json("t2", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+except lc.LLMError as e:
+    assert "401" in str(e)
+with get_conn() as conn:
+    assert conn.execute("SELECT COUNT(*) c FROM action_log WHERE endpoint='llm.t2' AND success=0").fetchone()["c"] == 1
+lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
+print("[6j] LLM 纠正重试 / 4xx 记日志 OK")
+
+# [6k] twikit 事件循环：超时会把协程取消掉
+state = {"cancelled": False}
+
+
+async def slow():
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        state["cancelled"] = True; raise
+
+
+try:
+    _LoopThread.get().run(slow(), timeout=0.2); raise SystemExit("应超时")
+except TimeoutError as e:
+    assert "取消" in str(e)
+import time as _time  # noqa: E402
+_time.sleep(0.2); assert state["cancelled"]
+print("[6k] 超时取消协程 OK")
+
+# [6l] 解析失败不再一律当成 Cookie 失效：先探登录态
+import twikit.errors as terr  # noqa: E402
+
+
+class ProbeClient:
+    def __init__(self, ok): self.ok = ok
+
+    def set_cookies(self, *a, **k): pass
+
+    async def user(self):
+        if self.ok:
+            return type("U", (), {"id": "1"})()
+        raise terr.Unauthorized("401")
+
+
+async def boom():
+    raise KeyError("data")
+
+
+ucli = UnofficialXClient(credentials={"auth_token": "a" * 40, "ct0": "b" * 32})
+ucli._client = ProbeClient(True)
+try:
+    ucli._call(lambda: boom(), "读推文"); raise SystemExit("应报错")
+except AuthExpired:
+    raise SystemExit("不该判成 Cookie 失效")
+except XClientError as e:
+    assert "登录态正常" in str(e), str(e)
+ucli = UnofficialXClient(credentials={"auth_token": "a" * 40, "ct0": "b" * 32})
+ucli._client = ProbeClient(False)
+try:
+    ucli._call(lambda: boom(), "读推文"); raise SystemExit("应报错")
+except AuthExpired as e:
+    assert "失效" in str(e)
+print("[6l] 解析失败先探登录态再定性 OK")
+
+# [6m] 官方搜索时间窗钳到 7 天
+old = datetime.now(timezone.utc) - timedelta(days=30)
+assert clamp_recent_window(old) > old and clamp_recent_window(None) is None
+recent = datetime.now(timezone.utc) - timedelta(hours=3)
+assert clamp_recent_window(recent) == recent
+print("[6m] 搜索时间窗钳到 X 允许范围 OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

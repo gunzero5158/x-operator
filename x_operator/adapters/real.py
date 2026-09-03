@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -87,7 +89,7 @@ def detect_system_proxy() -> str | None:
     HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量。没有代理返回 None。
 
     注意 Windows 注册表里同一个代理会被 Python 拼成 https://host:port，那样会误以为要和代理
-    做 TLS 握手而连不上；这里统一改成 http:// 前缀。"""
+    做 TLS 握手而连不上；Windows 上统一改成 http:// 前缀（其他平台的 https:// 代理是真 TLS 代理，原样保留）。"""
     try:
         import urllib.request
         proxies = urllib.request.getproxies()
@@ -97,12 +99,24 @@ def detect_system_proxy() -> str | None:
         v = (proxies.get(key) or "").strip()
         if not v:
             continue
-        if v.startswith("https://"):
+        if v.startswith("https://") and sys.platform == "win32":
             v = "http://" + v[len("https://"):]
         elif "://" not in v:
             v = "http://" + v
         return v
     return None
+
+
+# X「最近搜索」接口只能查最近 7 天；留 5 分钟余量防止边界被拒
+RECENT_SEARCH_MAX = timedelta(days=7) - timedelta(minutes=5)
+
+
+def clamp_recent_window(start_time: datetime | None) -> datetime | None:
+    """把 start_time 钳到 X 允许的最早时间；None 原样返回。"""
+    if start_time is None:
+        return None
+    floor = datetime.now(timezone.utc) - RECENT_SEARCH_MAX
+    return start_time if start_time > floor else floor
 
 
 def resolve_proxy(creds: dict) -> str | None:
@@ -238,7 +252,8 @@ class OfficialXClient(XClient):
         return out
 
     def get_user_tweets(self, user_id: str, since_id: str | None = None,
-                        max_results: int = 5, include_replies: bool = False) -> FetchResult:
+                        max_results: int = 5, include_replies: bool = False,
+                        start_time: datetime | None = None) -> FetchResult:
         exclude = ["retweets"] + ([] if include_replies else ["replies"])
         params: dict[str, Any] = dict(
             max_results=max(5, min(100, max_results)), exclude=exclude,
@@ -247,6 +262,8 @@ class OfficialXClient(XClient):
         )
         if since_id:
             params["since_id"] = since_id
+        elif start_time:
+            params["start_time"] = start_time
         try:
             resp = self._client.get_users_tweets(user_id, **params)
         except Exception as e:
@@ -265,14 +282,14 @@ class OfficialXClient(XClient):
         if since_id:
             params["since_id"] = since_id
         elif start_time:
-            params["start_time"] = start_time
+            params["start_time"] = clamp_recent_window(start_time)
         try:
             resp = self._client.search_recent_tweets(query, **params)
         except self._tweepy.BadRequest as e:
-            # since_id 超过 7 天会被 X 拒绝：退化为按时间窗口重查
+            # since_id 超过 7 天会被 X 拒绝：退化为按 X 允许的最大窗口重查
             if since_id and "since_id" in str(e):
                 params.pop("since_id", None)
-                params["start_time"] = datetime.now(timezone.utc) - timedelta(hours=48)
+                params["start_time"] = clamp_recent_window(start_time or datetime.min.replace(tzinfo=timezone.utc))
                 try:
                     resp = self._client.search_recent_tweets(query, **params)
                 except Exception as e2:
@@ -360,7 +377,12 @@ class _LoopThread:
 
     def run(self, coro, timeout: float = 90.0):
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # 必须把还在跑的协程取消掉：否则调用方以为失败去重试，原请求却在后台悄悄完成——发推就会重复
+            fut.cancel()
+            raise TimeoutError(f"操作超过 {int(timeout)} 秒未完成，已取消")
 
 
 class UnofficialXClient(XClient):
@@ -551,6 +573,8 @@ class UnofficialXClient(XClient):
             return self._loop.run(coro_factory())
         except Exception as e:
             err = self._wrap(e, what)
+            if isinstance(err, _UnexpectedResponse):
+                err = self._diagnose_unexpected(err, what)
             # Cookie 失效但有账号密码：自动重新登录一次再试
             if isinstance(err, AuthExpired) and self._has_password_login() and not self._relogin_tried:
                 self._relogin_tried = True
@@ -562,8 +586,29 @@ class UnofficialXClient(XClient):
                 try:
                     return self._loop.run(coro_factory())
                 except Exception as e2:
-                    raise self._wrap(e2, what)
+                    err2 = self._wrap(e2, what)
+                    if isinstance(err2, _UnexpectedResponse):
+                        err2 = self._diagnose_unexpected(err2, what)
+                    raise err2
             raise err
+
+    def _diagnose_unexpected(self, err: "_UnexpectedResponse", what: str) -> XClientError:
+        """twikit 解析不了返回内容，有两种可能：Cookie 失效（X 回了登录页）或对方账号/推文不可用、X 改版。
+        不能一律当成 Cookie 失效——那会清 Cookie、重登录、把账号标成凭据失效。这里用「读本账号信息」探一下：
+        探得到说明 Cookie 好好的。"""
+        try:
+            me = self._loop.run(self._client.user(), timeout=30)
+            ok = me is not None and getattr(me, "id", None)
+        except Exception as probe_err:
+            probe = self._wrap(probe_err, "核对登录态")
+            if isinstance(probe, (AuthExpired, _UnexpectedResponse)):
+                return AuthExpired(f"X 返回了非预期内容（{what}），核对登录态也失败——Cookie 多半已失效：请在浏览器重新登录该账号，"
+                                   f"重新复制 auth_token 与 ct0。技术信息：{err.detail}", raw=err.raw)
+            ok = False
+        if ok:
+            return XClientError(f"X 返回了非预期内容（{what}）。登录态正常（能读到本账号信息），多半是对方账号/推文不可用、"
+                                f"被限制，或 X 接口改版。技术信息：{err.detail}", raw=err.raw)
+        return XClientError(f"X 返回了非预期内容（{what}），且暂时无法核对登录态。技术信息：{err.detail}", raw=err.raw)
 
     # ---- 异常映射 ----
     def _wrap(self, e: Exception, what: str) -> XClientError:
@@ -592,9 +637,8 @@ class UnofficialXClient(XClient):
         if isinstance(e, (asyncio.TimeoutError, TimeoutError, OSError)):
             return NetworkError(f"网络超时/连接失败（{what}）：{msg}", raw=e)
         if isinstance(e, (KeyError, IndexError, TypeError, AttributeError, ValueError)):
-            # twikit 拿到非预期响应（多半是 Cookie 无效/过期，X 返回了登录页）
-            return AuthExpired(f"X 返回了非预期内容（{what}），多半是 Cookie 无效或已过期：请在浏览器重新登录该账号，"
-                               f"重新复制 auth_token 与 ct0。技术信息：{msg}", raw=e)
+            # twikit 拿到非预期响应：可能是 Cookie 失效（X 返回了登录页），也可能只是对方不可用；由 _diagnose_unexpected 分辨
+            return _UnexpectedResponse(f"X 返回了非预期内容（{what}）：{msg}", detail=msg, raw=e)
         return NetworkError(f"无法完成请求（{what}）。可能原因：① Cookie 无效或已过期（重新登录后复制 auth_token/ct0）；"
                             f"② 本机访问不了 x.com（需要在账号里填代理）。技术信息：{msg}", raw=e)
 
@@ -654,12 +698,15 @@ class UnofficialXClient(XClient):
         return tw is not None
 
     def get_user_tweets(self, user_id: str, since_id: str | None = None,
-                        max_results: int = 5, include_replies: bool = False) -> FetchResult:
+                        max_results: int = 5, include_replies: bool = False,
+                        start_time: datetime | None = None) -> FetchResult:
         kind = "Replies" if include_replies else "Tweets"
         res = self._call(lambda: self._client.get_user_tweets(user_id, kind, count=max(5, min(40, max_results))),
                          "拉取推主时间线")
         tweets = [self._to_tweet(t) for t in (res or [])]
         tweets = [t for t in tweets if not t.is_retweet]
+        if start_time and not since_id:
+            tweets = [t for t in tweets if t.created_at >= start_time]
         return self._since_filter(tweets, since_id)
 
     def search_recent(self, query: str, since_id: str | None = None,
@@ -687,6 +734,14 @@ class UnofficialXClient(XClient):
             return str(self._call(lambda: self._client.upload_media(file_path, wait_for_completion=True), "上传媒体"))
         except XClientError as e:
             raise MediaError(f"媒体上传失败：{e}", raw=e)
+
+
+class _UnexpectedResponse(XClientError):
+    """twikit 解析响应失败——只在适配器内部流转，_call 会把它诊断成 AuthExpired 或普通 XClientError 再抛出。"""
+
+    def __init__(self, message: str, *, detail: str = "", raw: Exception | None = None):
+        super().__init__(message, raw=raw)
+        self.detail = detail
 
 
 def _short(s: str, n: int = 160) -> str:

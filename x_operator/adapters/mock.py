@@ -94,7 +94,8 @@ class MockXClient(XClient):
         return FetchResult(tweets=tweets, newest_id=newest, reads_consumed=len(tweets))
 
     def get_user_tweets(self, user_id: str, since_id: str | None = None,
-                        max_results: int = 5, include_replies: bool = False) -> FetchResult:
+                        max_results: int = 5, include_replies: bool = False,
+                        start_time: datetime | None = None) -> FetchResult:
         handle = user_id.replace("mock_user_", "") or "mock_user"
         return self._result(self._fresh_batch(3, handle, user_id), since_id)
 

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from .. import config
-from ..db.database import get_conn, utcnow_iso
+from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
@@ -122,7 +122,10 @@ class MatchEngine:
             self._mark_no_match(target["id"], reason)
             return MatchOutcome("no_match", None, reason)
 
-        material_id = decision.get("material_id")
+        try:
+            material_id = int(decision.get("material_id"))   # LLM 可能返回字符串 "12"
+        except (TypeError, ValueError):
+            material_id = None
         chosen = next((c for c in candidates if c["id"] == material_id), None)
         if chosen is None:
             chosen = candidates[0]; material_id = chosen["id"]
@@ -206,7 +209,7 @@ class MatchEngine:
     def _enqueue(self, account_id: int, target_id: int, material_id: int | None, text: str,
                  reason: str, confidence: float, origin: str) -> int:
         ttl_hours = config.get_int("reply_ttl_hours", 48)
-        expires_at = (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        expires_at = to_iso(datetime.now(timezone.utc) + timedelta(hours=ttl_hours))
         with get_conn() as conn:
             cur = conn.execute(
                 "INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, "

@@ -55,38 +55,45 @@ class LLMClient:
 
         url = base_url + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages, "temperature": temperature,
+        payload = {"model": model, "messages": list(messages), "temperature": temperature,
                    "response_format": {"type": "json_object"}}
 
         started = time.monotonic()
         last_err = ""
-        for attempt in range(2):
+        corrected = False      # 已追加过一次「请只输出 JSON」的纠正
+        downgraded = False     # 已去掉 response_format 重发过
+        for _ in range(4):     # 最多：首发 + 降级重发 + 纠正重发 + 一次网络重试
             try:
                 with httpx.Client(timeout=timeout_sec) as cli:
                     resp = cli.post(url, headers=headers, json=payload)
-                if resp.status_code == 400 and "response_format" in payload:
+                if resp.status_code == 400 and "response_format" in payload and not downgraded:
                     payload.pop("response_format", None)  # 网关不支持则降级重发
+                    downgraded = True
                     continue
                 if resp.status_code >= 400:
-                    raise LLMError(f"LLM 网关返回 {resp.status_code}：{resp.text[:200]}")
+                    last_err = f"LLM 网关返回 {resp.status_code}：{resp.text[:200]}"
+                    break
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage", {})
+                usage = data.get("usage", {}) or {}
                 obj = _extract_json(content)
                 if obj is None or not all(k in obj for k in required_keys):
-                    # 追加纠正消息重试 1 次
-                    if attempt == 0:
-                        messages = messages + [
-                            {"role": "assistant", "content": content},
+                    if not corrected:
+                        # 把模型的回答和纠正要求一起发回去（必须写进 payload，否则重发的还是原话）
+                        payload["messages"] = list(payload["messages"]) + [
+                            {"role": "assistant", "content": str(content)},
                             {"role": "user", "content": "你上一次的输出不是合法 JSON 或缺少必需字段。"
                                                         "请只输出符合要求格式的 JSON，不要包含任何解释、markdown 代码块或多余文字。"},
                         ]
+                        corrected = True
                         continue
-                    raise LLMFormatError("LLM 输出无法解析为要求的 JSON")
+                    last_err = "LLM 输出无法解析为要求的 JSON"
+                    self._log(scene, False, usage, started, error=last_err)
+                    raise LLMFormatError(last_err)
                 self._log(scene, True, usage, started)
                 return obj
-            except (httpx.HTTPError, KeyError, json.JSONDecodeError) as e:
-                last_err = str(e)
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+                last_err = f"{type(e).__name__}: {e}"
         self._log(scene, False, {}, started, error=last_err)
         raise LLMError(f"LLM 调用失败：{last_err}")
 

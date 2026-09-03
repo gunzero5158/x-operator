@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from nicegui import ui
 
 from ..core.schedule_calc import compute_next_run
-from ..db.database import get_conn, utcnow_iso
+from ..core.scheduler import enqueue_scheduled_post
+from ..db.database import get_conn, to_iso, utcnow_iso
 from .layout import confirm, fmt_time, shell
 
 _TYPE_LABEL = {"once": "一次", "daily": "每天", "weekly": "每周", "cron": "cron"}
@@ -73,7 +74,8 @@ def register(jobs) -> None:
         with get_conn() as conn:
             accounts = conn.execute("SELECT id, handle FROM accounts ORDER BY id").fetchall()
             mats = conn.execute("SELECT id, text FROM materials WHERE kind='post' AND status='active' AND deleted_at IS NULL ORDER BY id").fetchall()
-        if not accounts or not mats:
+            cur_mat = conn.execute("SELECT id, text, status, deleted_at FROM materials WHERE id=?", (sp["material_id"],)).fetchone() if sp else None
+        if not accounts or not (mats or cur_mat):
             ui.notify("需要至少一个账号和一条「启用」状态的发帖素材（素材库 → 新建 → 类型选发帖）", type="negative"); return
 
         with ui.dialog() as dialog, ui.card().classes("min-w-[520px]"):
@@ -81,7 +83,11 @@ def register(jobs) -> None:
             acc = ui.select({a["id"]: a["handle"] for a in accounts},
                             value=sp["account_id"] if sp else accounts[0]["id"], label="账号").classes("w-full").props("outlined")
             mat_opts = {m["id"]: m["text"][:40] for m in mats}
-            mat_val = sp["material_id"] if sp and sp["material_id"] in mat_opts else mats[0]["id"]
+            if cur_mat is not None and cur_mat["id"] not in mat_opts:
+                # 计划当前用的素材已归档/进回收站：仍然列出来并标明，不能悄悄换成别的
+                tag = "已在回收站" if cur_mat["deleted_at"] else f"状态：{cur_mat['status']}"
+                mat_opts = {cur_mat["id"]: f"⚠ {tag}｜{cur_mat['text'][:36]}", **mat_opts}
+            mat_val = sp["material_id"] if sp else mats[0]["id"]
             mat = ui.select(mat_opts, value=mat_val, label="发帖素材").classes("w-full").props("outlined")
             stype = ui.select({"once": "一次性", "daily": "每天", "weekly": "每周", "cron": "cron(M H * * *)"},
                               value=sp["schedule_type"] if sp else "daily", label="类型").classes("w-full").props("outlined")
@@ -98,8 +104,11 @@ def register(jobs) -> None:
                     ui.notify(str(e), type="negative"); return
                 if nxt is None:
                     ui.notify("这个时间已经过去了，请填一个将来的时间", type="negative"); return
-                nxt_s = nxt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                nxt_s = to_iso(nxt)
                 with get_conn() as conn:
+                    m = conn.execute("SELECT 1 FROM materials WHERE id=? AND status='active' AND deleted_at IS NULL", (mat.value,)).fetchone()
+                    if m is None:
+                        ui.notify("所选素材不是「启用」状态或已在回收站，请换一条（或先到素材库恢复/启用它）", type="negative"); return
                     if sp:
                         conn.execute(
                             "UPDATE scheduled_posts SET account_id=?, material_id=?, schedule_type=?, schedule_expr=?, "
@@ -136,23 +145,18 @@ def _reactivate(sp) -> None:
     if nxt is None:
         ui.notify("一次性计划的时间已过去，请「编辑」改成将来的时间", type="warning"); return
     with get_conn() as conn:
-        conn.execute("UPDATE scheduled_posts SET status='active', next_run_at=? WHERE id=?",
-                     (nxt.strftime("%Y-%m-%dT%H:%M:%SZ"), sp["id"]))
+        conn.execute("UPDATE scheduled_posts SET status='active', next_run_at=? WHERE id=?", (to_iso(nxt), sp["id"]))
         conn.commit()
-    ui.notify("已恢复，下次运行 " + fmt_time(nxt.strftime("%Y-%m-%dT%H:%M:%SZ")), type="positive")
+    ui.notify("已恢复，下次运行 " + fmt_time(to_iso(nxt)), type="positive")
 
 
 def _fire_now(sid: int) -> int:
+    """不等到点，现在就按计划生成一条（不改下次运行时间）。"""
     with get_conn() as conn:
         sp = conn.execute("SELECT * FROM scheduled_posts WHERE id=?", (sid,)).fetchone()
-        mat = conn.execute("SELECT * FROM materials WHERE id=? AND deleted_at IS NULL", (sp["material_id"],)).fetchone() if sp else None
-        if not sp or not mat:
+        if sp is None or not enqueue_scheduled_post(conn, sp):
+            conn.rollback()
             return 0
-        status = "approved" if sp["auto_approve"] else "pending"
-        conn.execute(
-            "INSERT INTO review_queue(account_id, action_type, material_id, scheduled_post_id, "
-            "final_text, auto_approve, status, created_at) VALUES (?,'post',?,?,?,?,?,?)",
-            (sp["account_id"], sp["material_id"], sp["id"], mat["text"], sp["auto_approve"], status, utcnow_iso()))
         conn.execute("UPDATE scheduled_posts SET last_run_at=? WHERE id=?", (utcnow_iso(), sid))
         conn.commit()
     return 1

@@ -4,10 +4,50 @@ from __future__ import annotations
 from nicegui import run, ui
 
 from ..db.database import get_conn
-from ..core.matcher import extract_must_include
+from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
 from .layout import notify_long
 
 LANG_NAME = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "und": "未知"}
+
+# 搜索规则 / 监控推主共用的「回复方式」三个字段及其说明
+REPLY_HINTS = {
+    "reply_mode": "抓到达标推文后怎么生成回复：匹配素材库=从你写好的回复素材里选（可控、省钱）；AI 按要求创作=每条现写（更贴合、需 LLM）；"
+                  "只抓取=不自动生成，你在抓取记录里逐条手动选素材或让 AI 写。",
+    "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做按量计费的多模型 API 网关，"
+                "回复要先接对方的话再提一句，像同行聊天，结尾带 @ApiMaxJP。",
+    "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
+}
+
+
+def hint(text: str):
+    ui.label(text).classes("text-xs text-gray-400 -mt-2 mb-1")
+
+
+def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str):
+    """画出「回复方式 / AI 创作要求 / 允许润色」三个控件（带说明、按模式显隐），返回 (mode, brief, polish)。"""
+    ui.separator()
+    ui.label("回复方式").classes("font-semibold text-sm")
+    mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
+                     label=mode_label).classes("w-full").props("outlined")
+    hint(REPLY_HINTS["reply_mode"])
+    brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
+    brief_hint = ui.label(REPLY_HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+    polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
+    polish_hint = ui.label(REPLY_HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+
+    def sync():
+        is_ai = mode.value == "ai_write"
+        brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai)
+        polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
+    mode.on("update:model-value", lambda e: sync()); sync()
+    return mode, brief, polish
+
+
+def reply_mode_invalid(mode, brief) -> str:
+    """保存前校验，返回中文错误（空串 = 没问题）。"""
+    if mode.value == "ai_write" and not (brief.value or "").strip():
+        return "选了「AI 按要求创作」就必须填创作要求"
+    return ""
 
 
 def _load_materials(lang: str | None, all_langs: bool):

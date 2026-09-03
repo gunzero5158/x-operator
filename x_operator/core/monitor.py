@@ -3,6 +3,9 @@
 流程：对每个 enabled 推主，用官方账号 get_user_tweets(since_id=游标) 拉新推 →
 预检过滤（转推/黑名单/已回复/冷却/太旧/自有账号）→ 存 target_tweets →
 通过预检的交给 MatchEngine → 推进游标。单推主异常不影响其余。
+
+时间窗：没有游标（首次/重置后）时把「首次回溯」交给适配器的 start_time（官方 API 按返回条数计费，
+窗口交给服务端才不会白花钱）；有游标后只拉游标之后的。每次最多拉 MAX_FETCH 条。
 """
 from __future__ import annotations
 
@@ -13,8 +16,14 @@ from datetime import datetime, timedelta, timezone
 from .. import config
 from ..adapters import factory
 from ..adapters.base import TweetData, XClientError
-from ..db.database import get_conn, utcnow_iso
+from ..db.database import get_conn, to_iso, utcnow_iso
+from . import budget
+from .compliance import is_blacklisted
 from .matcher import MatchEngine
+
+# 单个推主一次最多拉多少条（官方 API 单页上限 100，非官方 40）。高产推主一天几十条也够；
+# 更早的会在下一轮凭游标继续，不会丢
+MAX_FETCH = 100
 
 
 @dataclass
@@ -64,15 +73,10 @@ def _row_int(row: sqlite3.Row, key: str, default: int) -> int:
         return default
 
 
-def is_demo_id(x_user_id: str | None) -> bool:
-    """旧版本演示数据里的假用户 id（mock_user_ 开头）；必须跳过，否则 X API 会报错。"""
-    return bool(x_user_id) and str(x_user_id).startswith("mock_user_")
-
-
 FILTER_REASONS = {
     "retweet": "转推，跳过",
     "own_account": "自己账号的推文，跳过",
-    "too_old": "推文太旧（超过设置的最大年龄）",
+    "too_old": "推文早于「首次回溯」时间窗",
     "blacklisted": "作者在黑名单",
     "already_replied": "该推文已回复过（去重账本）",
     "author_cooldown": "作者处于冷却期（近期已互动过）",
@@ -80,22 +84,20 @@ FILTER_REASONS = {
 
 
 def precheck(t: TweetData, account_handle: str, max_age_h: int | None = None) -> str | None:
-    """返回过滤原因码或 None。max_age_h = 该规则/推主自己的时间窗（小时）。"""
+    """返回过滤原因码或 None。max_age_h = 该规则/推主自己的时间窗（小时）；None = 不按年龄卡（有游标时）。"""
     if t.is_retweet:
         return "retweet"
-    if t.author_handle == account_handle:
+    if t.author_handle and t.author_handle.lower() == (account_handle or "").lower():
         return "own_account"
-    if max_age_h is None:
-        max_age_h = config.get_int("tweet_max_age_hours", 168)
     if max_age_h and t.created_at < datetime.now(timezone.utc) - timedelta(hours=max_age_h):
         return "too_old"
     with get_conn() as conn:
-        if conn.execute("SELECT 1 FROM blacklist WHERE x_user_id=?", (t.author_id,)).fetchone():
+        if is_blacklisted(conn, t.author_id, t.author_handle):
             return "blacklisted"
         if conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?", (t.tweet_id,)).fetchone():
             return "already_replied"
         cooldown_days = config.get_int("cooldown_days", 7)
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=cooldown_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = to_iso(datetime.now(timezone.utc) - timedelta(days=cooldown_days))
         if conn.execute("SELECT 1 FROM interactions WHERE author_id=? AND sent_at>=? LIMIT 1",
                         (t.author_id, cutoff)).fetchone():
             return "author_cooldown"
@@ -113,7 +115,7 @@ def store_target(t: TweetData, source: str, source_rule_id: int | None,
                 "tweet_created_at, source, source_rule_id, llm_relevance_score, llm_relevance_reason, "
                 "process_status, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (t.tweet_id, t.author_id, t.author_handle, t.text, t.lang,
-                 t.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"), source, source_rule_id,
+                 to_iso(t.created_at), source, source_rule_id,
                  score, reason, process_status, utcnow_iso()),
             )
             conn.commit()
@@ -126,8 +128,13 @@ class MonitorJob:
     def __init__(self, match_engine: MatchEngine):
         self.match = match_engine
 
-    def run_once(self) -> MonitorStats:
+    def run_once(self, auto: bool = False) -> MonitorStats:
+        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。"""
         stats = MonitorStats()
+        denied = budget.current().allow(auto)
+        if denied:
+            stats.notes.append(denied)
+            return stats
         account = get_primary_account()
         if account is None:
             stats.notes.append("没有状态为「启用」的账号，无法抓取。请到「设置 → 账号」添加并启用一个账号")
@@ -151,27 +158,25 @@ class MonitorJob:
             return stats
 
         for user in users:
-            if is_demo_id(user["x_user_id"]):
-                stats.notes.append(f"@{user['handle']} 是旧版演示数据（假推主），已跳过，请删掉后重新添加")
-                continue
             stats.users_polled += 1
             lookback_h = _row_int(user, "lookback_hours", 24)
+            cursor = user["last_seen_tweet_id"]
+            start_time = None if (cursor or not lookback_h) else datetime.now(timezone.utc) - timedelta(hours=lookback_h)
             try:
-                result = client.get_user_tweets(user["x_user_id"], since_id=user["last_seen_tweet_id"],
-                                                max_results=5, include_replies=bool(user["include_replies"]))
+                result = client.get_user_tweets(user["x_user_id"], since_id=cursor, max_results=MAX_FETCH,
+                                                include_replies=bool(user["include_replies"]), start_time=start_time)
                 _log_read(account["id"], client.api_kind, "get_user_tweets", result.reads_consumed)
                 tweets = result.tweets
-                # 首次抓取（没有游标）只看时间窗内的；之后按游标「上次之后的全部」
-                if not user["last_seen_tweet_id"] and lookback_h:
-                    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
-                    dropped = [t for t in tweets if t.created_at < cutoff]
-                    tweets = [t for t in tweets if t.created_at >= cutoff]
+                # 首次抓取（没有游标）只看时间窗内的（适配器已尽量在服务端限定，这里兜底再筛一遍）
+                if start_time:
+                    dropped = [t for t in tweets if t.created_at < start_time]
+                    tweets = [t for t in tweets if t.created_at >= start_time]
                     if dropped and not tweets:
                         stats.notes.append(f"@{user['handle']} 最近 {lookback_h} 小时内没有新推文（更早的 {len(dropped)} 条按时间窗跳过，可在推主设置里调大「首次回溯」）")
                 stats.tweets_fetched += len(tweets)
                 hit = 0
                 for t in tweets:
-                    reason = precheck(t, account["handle"], max_age_h=None if user["last_seen_tweet_id"] else lookback_h)
+                    reason = precheck(t, account["handle"], max_age_h=None if cursor else lookback_h)
                     if reason:
                         store_target(t, "monitor", user["id"], process_status="filtered",
                                      reason="预检拦下：" + FILTER_REASONS.get(reason, reason))

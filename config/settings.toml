@@ -1,17 +1,22 @@
 [app]
 port = 8080
+# 只监听本机。页面没有登录保护（设置页能看到所有账号的密码/Cookie），
+# 除非你明确知道后果，否则不要改成 0.0.0.0。
+host = "127.0.0.1"
 language = "zh-CN"
 
 [data]
+# 相对路径以项目根目录为准
 dir = "data"
 
-# 运行参数首启动时种子写入 app_settings 表，之后以表（设置页）为准。
+# 首启动时写入 app_settings 表的初始值（只在键还不存在时生效），之后以「设置」页为准。
 [defaults]
 cooldown_days = 7
 grace_period_hours = 2
 reply_ttl_hours = 48
-billing_mode = "payg"
 monthly_budget_usd = 60
+daily_read_budget = 330
+budget_reserve_reads = 20
 monitor_interval_minutes = 50
 search_runs_per_day = 2
 match_confidence_threshold = 0.7

@@ -1,6 +1,7 @@
 """SearchJob（design-v1.1 §7.4 / v1.0 §8.2）：语义搜索两级漏斗。
 
-粗筛（关键词 query 抓取，自动带上规则选的语言）→ 精筛（LLM 相关性打分，>= 规则达标分者）→ MatchEngine。
+粗筛（关键词 query 抓取，自动带上规则选的语言）→ 去掉已抓过的、语言不符的、预检拦下的（这些不花 LLM）
+→ 精筛（LLM 相关性打分，>= 规则达标分者）→ MatchEngine。
 preview=True：拉取 + 打分后直接返回，不写库、不推进游标、不进匹配（UI「试运行」按钮用）。
 
 每一条被挡下的推文都会写进 target_tweets，llm_relevance_reason 里写明「为什么」——
@@ -18,12 +19,16 @@ from ..adapters import factory
 from ..adapters.base import TweetData, XClientError
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient, LLMError
+from . import budget
 from .matcher import MatchEngine
 from .monitor import (FILTER_REASONS, _log_read, _row_int, get_primary_account,
                       precheck, store_target)
 
 LANG_LABEL = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "es": "西班牙语",
               "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
+
+# X 官方「最近搜索」只能查 7 天；规则里填得再大也只能抓到这么多
+OFFICIAL_SEARCH_MAX_HOURS = 168
 
 
 def rule_langs(rule: sqlite3.Row | dict) -> list[str]:
@@ -76,6 +81,18 @@ def effective_query(rule: sqlite3.Row | dict) -> str:
     return q
 
 
+def coerce_score(v) -> int:
+    """LLM 返回的分数可能是 8、8.0、"8"、"8/10"、"八"……只认得出数字的，认不出记 0，钳到 0-10。"""
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        n = int(round(v))
+    else:
+        m = re.search(r"\d+(?:\.\d+)?", str(v or ""))
+        n = int(round(float(m.group(0)))) if m else 0
+    return max(0, min(10, n))
+
+
 @dataclass
 class SearchStats:
     rules_run: int = 0
@@ -102,6 +119,7 @@ class ScoredCandidate(NamedTuple):
     tweet: TweetData
     score: int
     reason: str
+    prefiltered: str | None = None   # 不为空 = 没送去打分就被挡下了（语言不符 / 预检），值是中文原因
 
 
 class SearchJob:
@@ -109,9 +127,16 @@ class SearchJob:
         self.match = match_engine
         self.llm = llm
 
-    def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row, preview: bool = False) -> list[ScoredCandidate]:
+    def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row, preview: bool = False,
+                 notes: list[str] | None = None) -> list[ScoredCandidate]:
+        """抓取 + 预过滤 + 打分。返回按推文 id 升序的候选（含被预过滤的，prefiltered 字段说明原因）。
+        notes：可选，运行中的提示（比如回溯被钳到 7 天）追加到这里。"""
         client = factory.get_client(account)
         lookback_h = _row_int(rule, "lookback_hours", 24)
+        if account["access_type"] == "official" and lookback_h > OFFICIAL_SEARCH_MAX_HOURS:
+            if notes is not None:
+                notes.append(f"规则「{rule['name']}」首次回溯 {lookback_h} 小时超过官方 API 上限，按 {OFFICIAL_SEARCH_MAX_HOURS} 小时（7 天）抓")
+            lookback_h = OFFICIAL_SEARCH_MAX_HOURS
         # 有游标：抓上次之后的全部；没有游标（首次/重置后）：只抓最近 lookback_hours 小时
         start_time = None
         if not rule["newest_id_cursor"] and lookback_h:
@@ -122,25 +147,56 @@ class SearchJob:
         tweets = result.tweets
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
+        if not preview and tweets:
+            # 已经抓过的（别的规则/上一轮存过）不再打分，省 LLM
+            marks = ",".join("?" * len(tweets))
+            with get_conn() as conn:
+                known = {r["tweet_id"] for r in conn.execute(
+                    f"SELECT tweet_id FROM target_tweets WHERE tweet_id IN ({marks})", [t.tweet_id for t in tweets])}
+            tweets = [t for t in tweets if t.tweet_id not in known]
         if not tweets:
             return []
-        payload = [{"tweet_id": t.tweet_id, "author_handle": t.author_handle, "text": t.text}
-                   for t in tweets]
-        try:
-            scores = self.llm.score_relevance(rule["semantic_criteria"], payload)
-        except LLMError as e:
-            scores = self.llm.score_relevance_heuristic(payload)
-            for s in scores:
-                s["reason"] = f"LLM 调用失败（{str(e)[:60]}），改用关键词粗略打分：" + s.get("reason", "")
-        score_map = {s["tweet_id"]: s for s in scores}
-        scored = []
-        for t in tweets:
-            s = score_map.get(t.tweet_id, {"score": 0, "reason": "LLM 没有返回这条的打分"})
-            scored.append(ScoredCandidate(t, int(s.get("score", 0)), s.get("reason", "")))
-        return scored
 
-    def run_once(self) -> SearchStats:
+        langs = rule_langs(rule)
+        max_age = None if rule["newest_id_cursor"] else lookback_h
+        pre: list[ScoredCandidate] = []
+        to_score: list[TweetData] = []
+        for t in tweets:
+            # 语言不符（X 偶尔会返回别的语言）—— 不花 LLM
+            if langs and t.lang and t.lang not in ("und", "qme", "zxx") and t.lang not in langs:
+                pre.append(ScoredCandidate(t, 0, "", f"推文语言是 {LANG_LABEL.get(t.lang, t.lang)}，不在规则选的语言（{langs_label(langs)}）内"))
+                continue
+            code = precheck(t, account["handle"], max_age_h=max_age)
+            if code:
+                pre.append(ScoredCandidate(t, 0, "", "预检拦下：" + FILTER_REASONS.get(code, code)))
+                continue
+            to_score.append(t)
+
+        scored: list[ScoredCandidate] = []
+        if to_score:
+            payload = [{"tweet_id": t.tweet_id, "author_handle": t.author_handle, "text": t.text} for t in to_score]
+            try:
+                scores = self.llm.score_relevance(rule["semantic_criteria"], payload)
+            except LLMError as e:
+                scores = self.llm.score_relevance_heuristic(payload)
+                for s in scores:
+                    s["reason"] = f"LLM 调用失败（{str(e)[:60]}），改用关键词粗略打分：" + s.get("reason", "")
+            # LLM 可能把 tweet_id 当成数字返回；分数也可能是 "8/10" 之类
+            score_map = {str(s.get("tweet_id", "")).strip(): s for s in (scores or []) if isinstance(s, dict)}
+            for t in to_score:
+                s = score_map.get(t.tweet_id, {"score": 0, "reason": "LLM 没有返回这条的打分"})
+                scored.append(ScoredCandidate(t, coerce_score(s.get("score", 0)), str(s.get("reason", "") or "")))
+        out = pre + scored
+        out.sort(key=lambda c: int(c.tweet.tweet_id) if c.tweet.tweet_id.isdigit() else 0)
+        return out
+
+    def run_once(self, auto: bool = False) -> SearchStats:
+        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。"""
         stats = SearchStats()
+        denied = budget.current().allow(auto)
+        if denied:
+            stats.notes.append(denied)
+            return stats
         account = get_primary_account()
         if account is None:
             stats.notes.append("没有状态为「启用」的账号，无法搜索。请到「设置 → 账号」添加并启用一个账号")
@@ -157,19 +213,16 @@ class SearchJob:
         for rule in rules:
             stats.rules_run += 1
             min_scores.append(int(rule["min_llm_score"]))
-            langs = rule_langs(rule)
             try:
-                scored = self.run_rule(rule, account, preview=False)
+                scored = self.run_rule(rule, account, preview=False, notes=stats.notes)
                 stats.tweets_fetched += len(scored)
                 newest_id = None
                 for cand in scored:
                     t = cand.tweet
-                    if newest_id is None or int(t.tweet_id) > int(newest_id):
+                    if t.tweet_id.isdigit() and (newest_id is None or int(t.tweet_id) > int(newest_id)):
                         newest_id = t.tweet_id
-                    # 语言不符（X 偶尔会返回别的语言）
-                    if langs and t.lang and t.lang not in ("und", "qme", "zxx") and t.lang not in langs:
-                        store_target(t, "search", rule["id"], process_status="filtered", score=cand.score,
-                                     reason=f"推文语言是 {LANG_LABEL.get(t.lang, t.lang)}，不在规则选的语言（{langs_label(langs)}）内")
+                    if cand.prefiltered:
+                        store_target(t, "search", rule["id"], process_status="filtered", reason=cand.prefiltered)
                         stats.filtered += 1
                         continue
                     # 达标判断
@@ -179,14 +232,6 @@ class SearchJob:
                                             f"打分理由：{cand.reason}")
                         stats.filtered += 1
                         below += 1
-                        continue
-                    # 预检（时间窗用规则自己的 lookback_hours；有游标时不再按年龄卡）
-                    pre = precheck(t, account["handle"],
-                                   max_age_h=None if rule["newest_id_cursor"] else _row_int(rule, "lookback_hours", 24))
-                    if pre:
-                        store_target(t, "search", rule["id"], process_status="filtered", score=cand.score,
-                                     reason="预检拦下：" + FILTER_REASONS.get(pre, pre) + f"。打分理由：{cand.reason}")
-                        stats.filtered += 1
                         continue
                     tid = store_target(t, "search", rule["id"], process_status="new",
                                        score=cand.score, reason=cand.reason)
@@ -200,15 +245,13 @@ class SearchJob:
                     else:
                         stats.no_match += 1
                 # 推进游标
-                if newest_id:
-                    with get_conn() as conn:
+                with get_conn() as conn:
+                    if newest_id:
                         conn.execute("UPDATE search_rules SET newest_id_cursor=?, last_run_at=? WHERE id=?",
                                      (newest_id, utcnow_iso(), rule["id"]))
-                        conn.commit()
-                else:
-                    with get_conn() as conn:
+                    else:
                         conn.execute("UPDATE search_rules SET last_run_at=? WHERE id=?", (utcnow_iso(), rule["id"]))
-                        conn.commit()
+                    conn.commit()
             except (XClientError, ValueError) as e:
                 stats.errors += 1
                 stats.notes.append(f"规则「{rule['name']}」：{e}")

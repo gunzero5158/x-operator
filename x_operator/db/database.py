@@ -21,8 +21,10 @@ _DB_PATH: Path | None = None
 _local = threading.local()
 
 
-def init_db(db_path: str | Path) -> None:
-    """设置全局库路径并执行迁移 + 种子。幂等。"""
+def init_db(db_path: str | Path, setting_overrides: dict | None = None) -> None:
+    """设置全局库路径并执行迁移 + 种子。幂等。
+
+    setting_overrides：config/settings.toml [defaults] 里的值，只在键还不存在时写入（首启动生效，之后以设置页为准）。"""
     global _DB_PATH
     _DB_PATH = Path(db_path)
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -33,7 +35,7 @@ def init_db(db_path: str | Path) -> None:
             conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
         else:
             _migrate(conn, int(row["version"]))
-        seed.seed_settings(conn)
+        seed.seed_settings(conn, setting_overrides)
         conn.commit()
 
 
@@ -99,15 +101,25 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         raise
 
 
+ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def to_iso(dt: datetime) -> str:
+    """库里统一的 UTC 时间格式（秒精度、Z 结尾）。"""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime(ISO_FMT)
+
+
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return to_iso(datetime.now(timezone.utc))
 
 
 def parse_iso(s: str | None) -> datetime | None:
     if not s:
         return None
     try:
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(s, ISO_FMT).replace(tzinfo=timezone.utc)
     except ValueError:
         try:
             return datetime.fromisoformat(s).astimezone(timezone.utc)

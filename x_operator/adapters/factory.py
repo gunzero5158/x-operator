@@ -4,7 +4,8 @@
 - official   → OfficialXClient（tweepy，X API v2）
 - unofficial → UnofficialXClient（twifork/twikit，Cookie 或 密码+TOTP 登录）
 
-get_client() 带缓存（同一账号复用连接/登录态）；get_real_client() 不走缓存，给「测试连接」用。
+get_client() 带缓存（同一账号复用连接/登录态），同一账号的首次创建加锁——密码登录要十几秒，
+UI 线程和调度线程同时来的话不会各登一次；get_real_client() 不走缓存，给「测试连接」用。
 主号禁 unofficial 的三重保险之一在此：is_primary 且 unofficial 直接 ValueError。
 
 仅供自动化测试：环境变量 X_OPERATOR_MOCK=1 时返回 MockXClient（UI 里没有任何开关）。
@@ -14,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 
 from ..db.database import get_conn
 from .base import XClient
@@ -21,6 +23,8 @@ from .real import (OfficialXClient, UnofficialXClient, credentials_ready,
                    parse_credentials)
 
 _cache: dict[int, XClient] = {}
+_cache_lock = threading.Lock()
+_create_locks: dict[int, threading.Lock] = {}
 
 
 def _row_get(account: sqlite3.Row, key: str, default=None):
@@ -70,16 +74,26 @@ def get_real_client(account: sqlite3.Row) -> XClient:
 
 def get_client(account: sqlite3.Row) -> XClient:
     aid = account["id"]
-    if aid in _cache:
-        return _cache[aid]
-    client = get_real_client(account)
-    _cache[aid] = client
-    return client
+    with _cache_lock:
+        client = _cache.get(aid)
+        if client is not None:
+            return client
+        lock = _create_locks.setdefault(aid, threading.Lock())
+    with lock:
+        with _cache_lock:
+            client = _cache.get(aid)
+            if client is not None:
+                return client
+        client = get_real_client(account)
+        with _cache_lock:
+            _cache[aid] = client
+        return client
 
 
 def invalidate(account_id: int | None = None) -> None:
     """凭据更新/停用时清缓存。account_id=None 清全部。"""
-    if account_id is None:
-        _cache.clear()
-    else:
-        _cache.pop(account_id, None)
+    with _cache_lock:
+        if account_id is None:
+            _cache.clear()
+        else:
+            _cache.pop(account_id, None)

@@ -9,21 +9,16 @@ from nicegui import run, ui
 from ..adapters import factory
 from ..adapters.base import XClientError
 from ..core.matcher import REPLY_MODE_LABEL
-from ..core.monitor import get_primary_account, is_demo_id
+from ..core.monitor import get_primary_account
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, run_job, shell
+from .pickers import hint, reply_mode_fields, reply_mode_invalid
 
 HINTS = {
-    "lookback": "第一次监控（或重置游标后）往回看多少小时内的推文；之后每次只看上次之后的新推文。推荐 24；发帖少的博主可 72~168。",
+    "lookback": "第一次监控（或重置游标后）往回看多少小时内的推文；之后每次只看上次之后的新推文。推荐 24；发帖少的博主可 72~168。"
+                "每次最多拉 100 条，更早的下一轮凭游标继续。",
     "include": "开=连他回复别人的推文也监控；关=只看他自己发的主推。推荐关（回复通常没上下文，不适合再回复）。",
-    "reply_mode": "抓到新推文后怎么生成回复：匹配素材库=从你的回复素材里选；AI 按要求创作=每条现写（需 LLM）；只抓取=你手动处理。",
-    "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（写在这里会强制原样出现）、语气。",
-    "polish": "开=允许 AI 轻微改写素材以衔接对方的话；关=素材原文一字不改。推荐关。",
 }
-
-
-def _hint(key: str):
-    ui.label(HINTS[key]).classes("text-xs text-gray-400 -mt-2 mb-1")
 
 
 def _resolve_and_add(handle: str, note: str) -> str:
@@ -100,8 +95,6 @@ def register(jobs) -> None:
                                 with ui.column().classes("gap-0"):
                                     with ui.row().classes("items-center gap-2"):
                                         ui.label(f"@{u['handle']}").classes("font-semibold")
-                                        if is_demo_id(u["x_user_id"]):
-                                            ui.badge("旧版演示数据").classes("bg-amber-500").tooltip("旧版本留下的假推主，监控会跳过；请删掉后重新添加")
                                         if u["include_replies"]:
                                             ui.badge("含回复").classes("bg-slate-500")
                                         ui.badge(f"首次回溯 {u['lookback_hours']}h").classes("bg-slate-400")
@@ -131,30 +124,18 @@ def register(jobs) -> None:
             ui.label(f"编辑 @{u['handle']}").classes("text-lg font-bold")
             note = ui.input("备注", value=u["note"] or "").classes("w-full").props("outlined")
             lookback = ui.number("首次回溯（小时）", value=u["lookback_hours"], min=1, max=720, step=1).classes("w-full").props("outlined")
-            _hint("lookback")
+            hint(HINTS["lookback"])
             incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
-            _hint("include")
-            ui.separator()
-            ui.label("回复方式").classes("font-semibold text-sm")
-            mode = ui.select(REPLY_MODE_LABEL, value=u["reply_mode"], label="抓到新推文后").classes("w-full").props("outlined")
-            _hint("reply_mode")
-            brief = ui.textarea("AI 创作要求", value=u["ai_brief"] or "").classes("w-full").props("outlined autogrow")
-            brief_hint = ui.label(HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
-            polish = ui.switch("允许 AI 轻微润色素材", value=bool(u["allow_polish"]))
-            polish_hint = ui.label(HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
-
-            def sync():
-                is_ai = mode.value == "ai_write"
-                brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai)
-                polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
-            mode.on("update:model-value", lambda e: sync()); sync()
+            hint(HINTS["include"])
+            mode, brief, polish = reply_mode_fields(u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后")
 
             def save():
-                if mode.value == "ai_write" and not (brief.value or "").strip():
-                    ui.notify("选了「AI 按要求创作」就必须填创作要求", type="negative"); return
+                problem = reply_mode_invalid(mode, brief)
+                if problem:
+                    ui.notify(problem, type="negative"); return
                 with get_conn() as conn:
                     conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=? WHERE id=?",
-                                 ((note.value or "").strip(), 1 if incl.value else 0, int(lookback.value or 24), mode.value,
+                                 ((note.value or "").strip(), 1 if incl.value else 0, max(1, int(lookback.value or 24)), mode.value,
                                   (brief.value or "").strip(), 1 if polish.value else 0, u["id"]))
                     conn.commit()
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")

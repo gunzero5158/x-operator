@@ -18,6 +18,9 @@ VERIFY_LABEL = {"ok": ("已回查：X 上能查到 ✅", "text-green-600"),
                 "unknown": ("未能回查（网络/权限问题），请点链接确认", "text-gray-500")}
 
 
+_LIMIT = 200
+
+
 def _load(status: str):
     with get_conn() as conn:
         items = conn.execute(
@@ -25,7 +28,7 @@ def _load(status: str):
             "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang "
             "FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
-            "WHERE rq.status=? ORDER BY rq.created_at ASC", (status,)).fetchall()
+            f"WHERE rq.status=? ORDER BY rq.created_at ASC LIMIT {_LIMIT}", (status,)).fetchall()
     return items
 
 
@@ -118,7 +121,10 @@ def register(jobs) -> None:
             ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
                      ).classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-3")
-            state = {"sig": None}
+            # dirty：正在改文案的条目 id；busy：有弹窗开着。两者任一非空时自动刷新只更新计数、不重绘卡片，
+            # 免得把用户改到一半的文案或开着的弹窗冲掉
+            state = {"sig": None, "dirty": set(), "busy": 0}
+            paused_hint = ui.label("").classes("text-xs text-orange-500")
 
             def signature(items) -> tuple:
                 return tuple((it["id"], it["status"], it["verify_status"]) for it in items)
@@ -126,29 +132,46 @@ def register(jobs) -> None:
             def render(force: bool = True):
                 items = _load(status_sel.value)
                 sig = signature(items)
-                if not force and sig == state["sig"]:
-                    return
+                if not force:
+                    if sig == state["sig"]:
+                        return
+                    if state["dirty"] or state["busy"]:
+                        paused_hint.text = "列表有更新，但你正在编辑/操作，暂不刷新（改完点批准或跳过后会自动刷新）"
+                        return
+                paused_hint.text = ""
                 state["sig"] = sig
+                state["dirty"].clear()
                 status_sel.set_options(_status_options(), value=status_sel.value)
                 body.clear()
                 with body:
                     if not items:
                         ui.label("此状态下暂无条目 🎉").classes("text-gray-400")
                         return
+                    if len(items) >= _LIMIT:
+                        ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb)
+                        _card(it, render, delete_cb, swap_cb, verify_cb, state["dirty"])
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
-                    if not await confirm("删除这条待处理的条目？",
-                                         "对应的抓取记录会退回「达标但未生成回复」，之后可在抓取记录页重新处理。"):
+                    state["busy"] += 1
+                    try:
+                        ok = await confirm("删除这条待处理的条目？",
+                                           "对应的抓取记录会退回「达标但未生成回复」，之后可在抓取记录页重新处理。")
+                    finally:
+                        state["busy"] -= 1
+                    if not ok:
                         return
                 _delete(it["id"])
                 ui.notify("已删除", type="positive")
                 render()
 
             async def swap_cb(it):
-                res = await pick_material_dialog(it["tgt_text"] or "", it["tgt_lang"], title="换一条素材")
+                state["busy"] += 1
+                try:
+                    res = await pick_material_dialog(it["tgt_text"] or "", it["tgt_lang"], title="换一条素材")
+                finally:
+                    state["busy"] -= 1
                 if res is None:
                     return
                 mid, text = res
@@ -167,8 +190,13 @@ def register(jobs) -> None:
                 n = _counts().get(st, 0)
                 if not n:
                     ui.notify("没有可删除的条目", type="info"); return
-                if await confirm(f"删除全部 {n} 条「{QUEUE_STATUS_LABEL.get(st, st)}」条目？",
-                                 "已发送记录删除后不影响去重账本（不会重复回复同一推文）。", ok_label="全部删除"):
+                state["busy"] += 1
+                try:
+                    ok = await confirm(f"删除全部 {n} 条「{QUEUE_STATUS_LABEL.get(st, st)}」条目？",
+                                       "已发送记录删除后不影响去重账本（不会重复回复同一推文）。", ok_label="全部删除")
+                finally:
+                    state["busy"] -= 1
+                if ok:
                     _delete_all(st)
                     ui.notify(f"已删除 {n} 条", type="positive")
                     render()
@@ -192,7 +220,7 @@ def _weighted_len(text: str) -> int:
     return n
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb):
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, dirty: set):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
             ui.badge(f"@{it['acc_handle']}").classes("bg-slate-600")
@@ -231,6 +259,11 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb):
             wl = _weighted_len(ta.value or "")
             wl_label.text = f"约 {wl}/280 字符"
             wl_label.classes(replace="text-xs " + ("text-red-500" if wl > 280 else "text-gray-400"))
+            if editable:
+                if (ta.value or "") != (it["final_text"] or ""):
+                    dirty.add(it["id"])
+                else:
+                    dirty.discard(it["id"])
         ta.on("update:model-value", lambda e: update_len())
         update_len()
 

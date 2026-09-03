@@ -17,13 +17,10 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "cooldown_days": "7",
     "grace_period_hours": "2",
     "reply_ttl_hours": "48",
-    "tweet_max_age_hours": "168",
     "nurture_days": "14",
     "match_confidence_threshold": "0.7",
-    # 预算
-    "billing_mode": "payg",
+    # 预算（读额度由 core/budget.py 实际执行：自动轮询在触及熔断线时停，手动运行在用完时拒绝）
     "monthly_budget_usd": "60",
-    "monthly_read_quota": "10000",
     "daily_read_budget": "330",
     "budget_reserve_reads": "20",
     "monitor_interval_minutes": "50",
@@ -32,14 +29,23 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "auto_jobs_enabled": "0",
 }
 
+# 已废弃、任何代码都不再读取的设置键：每次启动顺手删掉，免得设置页/导出里误导人
+OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota")
 
-def seed_settings(conn: sqlite3.Connection) -> None:
-    for key, value in DEFAULT_SETTINGS.items():
+
+def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> None:
+    values = dict(DEFAULT_SETTINGS)
+    for key, val in (overrides or {}).items():
+        if key in values:
+            values[key] = "1" if val is True else ("0" if val is False else str(val))
+    for key, value in values.items():
         conn.execute(
             "INSERT INTO app_settings(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO NOTHING",
             (key, value),
         )
+    marks = ",".join("?" * len(OBSOLETE_SETTINGS))
+    conn.execute(f"DELETE FROM app_settings WHERE key IN ({marks})", OBSOLETE_SETTINGS)
 
 
 # ---- 历史版本（≤ v2）首启动时写入过的演示数据：升级到 v3 时按这些特征精确清除 ----
@@ -97,9 +103,8 @@ def purge_demo_data(conn: sqlite3.Connection) -> dict[str, int]:
 
 def loosen_filters(conn: sqlite3.Connection) -> dict[str, int]:
     """v4：过滤策略从「宁缺毋滥」改为「默认保留」——把还停留在旧默认值上的阈值放宽。
-    只动等于旧默认值的（说明用户没自己调过）：达标分 7/6 → 5；推文最大年龄 48h → 168h。"""
+    只动等于旧默认值的（说明用户没自己调过）：达标分 7/6 → 5。（全局「推文最大年龄」已在 v5 之后废弃，
+    时间窗改为每条规则/推主自己的「首次回溯」。）"""
     n: dict[str, int] = {}
     n["search_rules"] = conn.execute("UPDATE search_rules SET min_llm_score=5 WHERE min_llm_score IN (6, 7)").rowcount
-    n["tweet_max_age_hours"] = conn.execute(
-        "UPDATE app_settings SET value='168' WHERE key='tweet_max_age_hours' AND value='48'").rowcount
     return {k: v for k, v in n.items() if v}

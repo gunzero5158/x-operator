@@ -12,7 +12,7 @@ from enum import Enum
 from zoneinfo import ZoneInfo
 
 from .. import config
-from ..db.database import get_conn, parse_iso
+from ..db.database import get_conn, parse_iso, to_iso
 
 
 class GuardCode(str, Enum):
@@ -45,6 +45,15 @@ def _tz(name: str) -> ZoneInfo:
         return ZoneInfo("Asia/Tokyo")
 
 
+def is_blacklisted(conn: sqlite3.Connection, author_id: str | None, author_handle: str | None) -> bool:
+    """黑名单同时按数字 user_id 和 @handle 匹配——设置页手填的多半是 handle。"""
+    h = (author_handle or "").lstrip("@").strip().lower()
+    row = conn.execute(
+        "SELECT 1 FROM blacklist WHERE x_user_id=? OR (?<>'' AND (lower(handle)=? OR lower(x_user_id)=?)) LIMIT 1",
+        (author_id or "", h, h, h)).fetchone()
+    return row is not None
+
+
 class ComplianceGuard:
     def is_in_active_hours(self, account: sqlite3.Row, now: datetime) -> bool:
         tz = _tz(account["timezone"])
@@ -62,7 +71,7 @@ class ComplianceGuard:
         tz = _tz(tz_name)
         local = now.astimezone(tz)
         day_start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_start_utc = day_start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        day_start_utc = to_iso(day_start_local)
         with get_conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS c FROM interactions WHERE account_id=? AND action=? AND sent_at>=?",
@@ -110,8 +119,7 @@ class ComplianceGuard:
                 tgt = conn.execute("SELECT * FROM target_tweets WHERE id=?", (item["target_tweet_id"],)).fetchone()
                 if tgt is not None:
                     # 黑名单
-                    bl = conn.execute("SELECT 1 FROM blacklist WHERE x_user_id=?", (tgt["author_id"],)).fetchone()
-                    if bl:
+                    if is_blacklisted(conn, tgt["author_id"], tgt["author_handle"]):
                         return GuardResult(False, GuardCode.BLACKLISTED, True, "目标作者在黑名单中")
                     # 去重账本：该目标推文是否已被任一自有账号回过
                     dup = conn.execute(
@@ -121,7 +129,7 @@ class ComplianceGuard:
                         return GuardResult(False, GuardCode.ALREADY_REPLIED, True, "该推文已回复过（去重账本）")
                     # 作者冷却
                     cooldown_days = config.get_int("cooldown_days", 7)
-                    cutoff = (now - timedelta(days=cooldown_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    cutoff = to_iso(now - timedelta(days=cooldown_days))
                     cd = conn.execute(
                         "SELECT 1 FROM interactions WHERE author_id=? AND sent_at>=? LIMIT 1",
                         (tgt["author_id"], cutoff)).fetchone()
