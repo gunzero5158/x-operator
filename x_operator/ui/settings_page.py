@@ -39,7 +39,7 @@ def register(jobs) -> None:
                 with ui.tab_panel(t_acc):
                     _accounts_panel()
                 with ui.tab_panel(t_run):
-                    _run_panel()
+                    _run_panel(jobs)
                 with ui.tab_panel(t_llm):
                     _llm_panel()
                 with ui.tab_panel(t_comp):
@@ -71,11 +71,8 @@ def register(jobs) -> None:
                          "读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。", int, 0, 100000),
                         ("monthly_budget_usd", "月预算（USD）",
                          "仪表盘按本月读取量估算官方 API 读费用并与它对照（约 $0.005/条；发推另计）。", float, 0, 1000000),
-                        ("monitor_interval_minutes", "自动监控间隔（分钟）",
-                         "开了后台自动轮询时，多久跑一次监控。推荐 50~120；改后需重启生效。", int, 1, 1440),
-                        ("search_runs_per_day", "每日自动搜索次数",
-                         "开了后台自动轮询时，一天跑几次搜索（间隔 = 24 小时 ÷ 次数，最短 30 分钟）。推荐 2~4；改后需重启生效。", int, 1, 48),
                     ])
+                    ui.label("自动搜索/自动监控的节奏在「自动运行」标签页里设。").classes("text-xs text-gray-400")
                 with ui.tab_panel(t_bl):
                     _blacklist_panel()
                 with ui.tab_panel(t_data):
@@ -92,14 +89,101 @@ def _read_channel_panel():
                                             ui.notify("已切换抓取通道：" + READ_CHANNEL_LABEL[sel.value], type="positive")))
 
 
-def _run_panel():
+_TZ_CHOICES = ["Asia/Shanghai", "Asia/Tokyo", "Asia/Taipei", "Asia/Singapore", "UTC",
+               "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin"]
+
+
+def _run_panel(jobs):
+    from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, describe_schedule, job_enabled, next_runs,
+                                  parse_daily_times, reschedule_auto_jobs)
     ui.label("自动运行").classes("font-semibold")
-    ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。").classes("text-xs text-gray-400")
-    auto = ui.switch("启用后台自动轮询（监控/搜索按间隔自动跑）", value=config.get_bool("auto_jobs_enabled", False))
-    auto.on("update:model-value", lambda e: (config.set_value("auto_jobs_enabled", bool(e.args)),
-                                             ui.notify("已更新自动轮询开关", type="positive")))
-    ui.label("测试期建议保持关闭，用各页面的「运行一次」按钮手动触发，便于观察每一步。"
-             "无论开关如何，「定时计划到点检查」和「发送分发」每分钟都会自动跑。").classes("text-xs text-gray-400")
+    ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
+             "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。").classes("text-xs text-gray-400")
+
+    status_box = ui.column().classes("w-full gap-0")
+
+    def fmt_next(dt):
+        return dt.strftime("%m-%d %H:%M") if dt else "—"
+
+    def render_status():
+        status_box.clear()
+        nr = next_runs(jobs.scheduler)
+        with status_box:
+            rows = []
+            for jid, (name, desc, _key, _dm, _dt) in AUTO_JOBS.items():
+                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关", "节奏": describe_schedule(jid),
+                             "下次运行": fmt_next(nr.get(jid)), "说明": desc})
+            for jid, (name, desc, _key) in ALWAYS_JOBS.items():
+                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关", "节奏": "每分钟",
+                             "下次运行": fmt_next(nr.get(jid)), "说明": desc})
+            ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("功能", "状态", "节奏", "下次运行", "说明")],
+                     rows=rows).classes("w-full").props("dense flat bordered wrap-cells")
+    render_status()
+
+    ui.separator()
+    master = ui.switch("总开关：启用后台自动轮询（自动搜索 + 自动监控）", value=config.get_bool("auto_jobs_enabled", False))
+
+    def on_master(e):
+        config.set_value("auto_jobs_enabled", bool(master.value))
+        ui.notify("已" + ("开启" if master.value else "关闭") + "后台自动轮询", type="positive"); render_status()
+    master.on("update:model-value", on_master)
+    ui.label("测试期建议关着，用各页面的「运行一次」按钮手动触发。").classes("text-xs text-gray-400 -mt-2 mb-1")
+
+    tz = ui.select(_TZ_CHOICES if config.get("auto_jobs_timezone", "Asia/Shanghai") in _TZ_CHOICES
+                   else [config.get("auto_jobs_timezone")] + _TZ_CHOICES,
+                   value=config.get("auto_jobs_timezone") or "Asia/Shanghai", label="固定时间点按哪个时区").classes("w-72").props("outlined dense")
+
+    controls: dict[str, dict] = {}
+    for jid, (name, desc, key, default_min, default_times) in AUTO_JOBS.items():
+        with ui.card().classes("w-full"):
+            with ui.row().classes("items-center gap-3"):
+                sw = ui.switch(name, value=config.get_bool(key, True))
+                ui.label(desc).classes("text-xs text-gray-400")
+            mode = ui.select({"interval": "每隔一段时间", "daily": "每天固定时间点"},
+                             value=config.get(f"{jid}_schedule_mode") or "interval", label="节奏").classes("w-60").props("outlined dense")
+            with ui.row().classes("items-center gap-3 w-full"):
+                minutes = ui.number("每隔多少分钟", value=config.get_int(f"{jid}_interval_minutes", default_min), min=5, max=10080, step=5) \
+                    .classes("w-48").props("outlined dense")
+                times = ui.input("固定时间点（可多个，逗号隔开）", value=config.get(f"{jid}_daily_times") or default_times) \
+                    .classes("w-80").props("outlined dense")
+            ui.label(("推荐：搜索每隔 360~720 分钟或每天 2 个时间点；监控每隔 50~120 分钟或每天 3 个时间点。"
+                      "「每隔」是从程序启动 / 改设置那一刻起算；「固定时间点」按上面选的时区，写法 08:00, 20:30。")
+                     ).classes("text-xs text-gray-400")
+
+            def sync(mode=mode, minutes=minutes, times=times):
+                minutes.set_visibility(mode.value == "interval"); times.set_visibility(mode.value == "daily")
+            mode.on("update:model-value", lambda e, f=sync: f()); sync()
+            controls[jid] = {"sw": sw, "mode": mode, "minutes": minutes, "times": times, "key": key}
+
+    with ui.card().classes("w-full"):
+        name, desc, key = ALWAYS_JOBS["dispatcher"]
+        with ui.row().classes("items-center gap-3"):
+            dsw = ui.switch(name, value=config.get_bool(key, True))
+            ui.label(desc).classes("text-xs text-gray-400")
+        dsw.on("update:model-value", lambda e: (config.set_value(key, bool(dsw.value)),
+                                                ui.notify("发送分发已" + ("开启" if dsw.value else "关闭"), type="positive"), render_status()))
+        name2, desc2, _ = ALWAYS_JOBS["scheduled_check"]
+        ui.label(f"{name2}：{desc2}").classes("text-xs text-gray-400")
+
+    def save():
+        for jid, c in controls.items():
+            if c["mode"].value == "daily" and not parse_daily_times(c["times"].value or ""):
+                ui.notify(f"「{AUTO_JOBS[jid][0]}」选了固定时间点，但没填出有效的时间（写法 08:00, 20:30）", type="negative"); return
+            if c["mode"].value == "interval" and int(c["minutes"].value or 0) < 5:
+                ui.notify(f"「{AUTO_JOBS[jid][0]}」间隔至少 5 分钟", type="negative"); return
+        config.set_value("auto_jobs_timezone", tz.value or "Asia/Shanghai")
+        for jid, c in controls.items():
+            config.set_value(c["key"], bool(c["sw"].value))
+            config.set_value(f"{jid}_schedule_mode", c["mode"].value)
+            config.set_value(f"{jid}_interval_minutes", int(c["minutes"].value or 5))
+            config.set_value(f"{jid}_daily_times", ", ".join(f"{h:02d}:{m:02d}" for h, m in parse_daily_times(c["times"].value or "")))
+        try:
+            reschedule_auto_jobs(jobs.scheduler)
+        except Exception as e:
+            ui.notify(f"已保存，但重排调度失败：{e}（重启后生效）", type="warning", multi_line=True); render_status(); return
+        ui.notify("已保存并立即生效", type="positive"); render_status()
+
+    ui.button("保存节奏设置", on_click=save).props("color=primary")
 
 
 def _llm_panel():

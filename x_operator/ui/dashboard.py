@@ -6,6 +6,7 @@ from nicegui import ui
 from .. import config
 from ..core import budget
 from ..core.monitor import READ_CHANNEL_LABEL, get_read_account, read_channel, read_is_billed
+from ..core.scheduler import AUTO_JOBS, describe_schedule, job_enabled, next_runs
 from ..db.database import get_conn
 from .layout import fmt_time, run_job, run_job_with_progress, shell
 
@@ -97,7 +98,13 @@ def register(jobs) -> None:
                                 ui.label(denied).classes("text-xs text-orange-600")
 
                     with ui.card().classes("w-full"):
-                        ui.label("手动运行（测试期用；自动轮询可在设置页打开）").classes("font-semibold")
+                        ui.label("手动运行（测试期用；自动轮询可在设置 → 自动运行 打开）").classes("font-semibold")
+                        nr = next_runs(jobs.scheduler)
+                        parts = []
+                        for jid, (jname, _d, _k, _dm, _dt) in AUTO_JOBS.items():
+                            parts.append(f"{jname}：" + (("开，下次 " + nr[jid].strftime("%m-%d %H:%M") + "，" + describe_schedule(jid)) if nr.get(jid) else "关"))
+                        parts.append("发送分发：" + ("开（每分钟）" if job_enabled("dispatcher") else "关"))
+                        ui.label("自动运行状态 · " + "；".join(parts)).classes("text-xs text-gray-500")
                         with ui.row().classes("gap-2 flex-wrap"):
                             ui.button("运行监控轮询", icon="visibility",
                                       on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,

@@ -25,17 +25,33 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "monthly_budget_usd": "60",
     "daily_read_budget": "330",
     "budget_reserve_reads": "20",
-    "monitor_interval_minutes": "50",
-    "search_runs_per_day": "2",
-    # 调度开关（默认关闭自动轮询，用 UI 上的「运行一次」按钮手动触发；设置页可打开）
+    # 自动轮询（总开关默认关；每个 job 有单独开关，节奏可选 interval=每隔 N 分钟 / daily=每天固定时间点）
     "auto_jobs_enabled": "0",
+    "auto_jobs_timezone": "Asia/Shanghai",
+    "search_auto_enabled": "1",
+    "search_schedule_mode": "interval",
+    "search_interval_minutes": "720",
+    "search_daily_times": "08:00, 20:00",
+    "monitor_auto_enabled": "1",
+    "monitor_schedule_mode": "interval",
+    "monitor_interval_minutes": "50",
+    "monitor_daily_times": "09:00, 13:00, 18:00",
+    "dispatch_auto_enabled": "1",
 }
 
 # 已废弃、任何代码都不再读取的设置键：每次启动顺手删掉，免得设置页/导出里误导人
-OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota")
+OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota", "search_runs_per_day")
 
 
 def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> None:
+    # 旧键 search_runs_per_day（每天几次）→ 新键 search_interval_minutes（每隔多少分钟），只在新键还没有时换算一次
+    old = conn.execute("SELECT value FROM app_settings WHERE key='search_runs_per_day'").fetchone()
+    if old is not None and conn.execute("SELECT 1 FROM app_settings WHERE key='search_interval_minutes'").fetchone() is None:
+        try:
+            runs = max(1, int(old["value"]))
+            conn.execute("INSERT INTO app_settings(key, value) VALUES ('search_interval_minutes', ?)", (str(max(30, 1440 // runs)),))
+        except (TypeError, ValueError):
+            pass
     values = dict(DEFAULT_SETTINGS)
     for key, val in (overrides or {}).items():
         if key in values:

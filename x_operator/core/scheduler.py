@@ -1,18 +1,23 @@
 """调度与启动（design-v1.1 §7.6）。
 
 后台 job（monitor / search / scheduled_check / dispatcher_tick），均整体 try/except 隔离。
-默认关闭自动轮询（app_settings.auto_jobs_enabled=0），改由 UI 手动按钮触发，便于测试期精确控制；
-打开后按各自间隔自动运行。scheduled_check 与 dispatcher_tick 始终运行（发送不耗读额度）。
+自动搜索/自动监控受总开关 auto_jobs_enabled（默认关）+ 各自的单独开关控制，节奏可选「每隔 N 分钟」或
+「每天固定时间点」（AUTO_JOBS / build_trigger）；发送分发有自己的开关（默认开）；定时计划检查始终运行。
 scheduled_check 顺带做「过期清扫」：待审核超时的条目标过期，对应抓取记录也标过期。
 """
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .. import config
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
@@ -50,6 +55,7 @@ class Jobs:
         self.search = SearchJob(self.match, self.llm)
         self.guard = ComplianceGuard()
         self.dispatcher = Dispatcher(self.guard)
+        self.scheduler: BackgroundScheduler | None = None   # build_scheduler 里赋值，设置页改节奏时用
         self._sched_lock = threading.Lock()
 
     def run_scheduled_posts(self) -> int:
@@ -123,18 +129,104 @@ def _safe(fn):
     return wrapper
 
 
+# ---------------------------------------------------------------------------------
+# 自动轮询的节奏：每个 job 可选「每隔 N 分钟」或「每天固定时间点」，按设置里的时区算；改设置后立即重排，不用重启
+# ---------------------------------------------------------------------------------
+AUTO_JOBS = {
+    # id: (名称, 说明, 单独开关键, 默认间隔分钟, 默认固定时间)
+    "search":  ("自动搜索", "把所有启用的搜索规则各跑一次（受总开关 + 读额度熔断）", "search_auto_enabled", 720, "08:00, 20:00"),
+    "monitor": ("自动监控", "把所有启用的监控推主各拉一次（受总开关 + 读额度熔断）", "monitor_auto_enabled", 50, "09:00, 13:00, 18:00"),
+}
+ALWAYS_JOBS = {
+    "dispatcher": ("发送分发", "每分钟检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
+    "scheduled_check": ("定时计划 + 过期清扫", "每分钟检查到点的定时发帖计划，生成到审核队列；顺带把超时的待审核条目标过期。始终开启", None),
+}
+
+
+def parse_daily_times(raw: str) -> list[tuple[int, int]]:
+    """"08:00, 20:30" → [(8,0),(20,30)]；写错的项跳过；去重排序。"""
+    out = set()
+    for part in re.split(r"[,，、;\s]+", raw or ""):
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", part.strip())
+        if m and 0 <= int(m.group(1)) < 24 and 0 <= int(m.group(2)) < 60:
+            out.add((int(m.group(1)), int(m.group(2))))
+    return sorted(out)
+
+
+def auto_timezone() -> str:
+    tz = (config.get("auto_jobs_timezone") or "Asia/Shanghai").strip()
+    try:
+        ZoneInfo(tz)
+        return tz
+    except Exception:
+        return "Asia/Shanghai"
+
+
+def build_trigger(job: str):
+    name, _desc, _key, default_min, default_times = AUTO_JOBS[job]
+    mode = (config.get(f"{job}_schedule_mode") or "interval").strip()
+    if mode == "daily":
+        times = parse_daily_times(config.get(f"{job}_daily_times") or default_times)
+        if times:
+            tz = auto_timezone()
+            crons = [CronTrigger(hour=h, minute=m, timezone=tz) for h, m in times]
+            return crons[0] if len(crons) == 1 else OrTrigger(crons)
+    minutes = max(5, config.get_int(f"{job}_interval_minutes", default_min))
+    return IntervalTrigger(minutes=minutes)
+
+
+def describe_schedule(job: str) -> str:
+    _name, _desc, _key, default_min, default_times = AUTO_JOBS[job]
+    mode = (config.get(f"{job}_schedule_mode") or "interval").strip()
+    if mode == "daily":
+        times = parse_daily_times(config.get(f"{job}_daily_times") or default_times)
+        if times:
+            return "每天 " + "、".join(f"{h:02d}:{m:02d}" for h, m in times) + f"（{auto_timezone()}）"
+        return "每天固定时间（没填有效时间，暂按间隔跑）"
+    minutes = max(5, config.get_int(f"{job}_interval_minutes", default_min))
+    return f"每隔 {minutes} 分钟（从程序启动/改设置那一刻起算）"
+
+
+def job_enabled(job: str) -> bool:
+    if job in AUTO_JOBS:
+        return config.get_bool("auto_jobs_enabled", False) and config.get_bool(AUTO_JOBS[job][2], True)
+    key = ALWAYS_JOBS[job][2]
+    return True if key is None else config.get_bool(key, True)
+
+
+def reschedule_auto_jobs(sched: BackgroundScheduler | None) -> None:
+    if sched is None:
+        return
+    for job in AUTO_JOBS:
+        sched.reschedule_job(job, trigger=build_trigger(job))
+
+
+def next_runs(sched: BackgroundScheduler | None) -> dict[str, datetime | None]:
+    """各 job 的下次运行时间（已转成设置里的时区）；未启用的返回 None。"""
+    out: dict[str, datetime | None] = {}
+    tz = ZoneInfo(auto_timezone())
+    for job in list(AUTO_JOBS) + list(ALWAYS_JOBS):
+        nxt = None
+        if sched is not None and job_enabled(job):
+            j = sched.get_job(job)
+            if j is not None and j.next_run_time:
+                nxt = j.next_run_time.astimezone(tz)
+        out[job] = nxt
+    return out
+
+
 def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="UTC")
 
     @_safe
     def monitor_job():
-        if config.get_bool("auto_jobs_enabled", False):
+        if job_enabled("monitor"):
             st = jobs.monitor.run_once(auto=True)
             log.info("自动监控：%s", st.as_msg())
 
     @_safe
     def search_job():
-        if config.get_bool("auto_jobs_enabled", False):
+        if job_enabled("search"):
             st = jobs.search.run_once(auto=True)
             log.info("自动搜索：%s", st.as_msg())
 
@@ -147,19 +239,18 @@ def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
 
     @_safe
     def dispatcher_tick():
-        jobs.dispatcher.tick()
+        if job_enabled("dispatcher"):
+            jobs.dispatcher.tick()
 
-    interval_min = max(1, config.get_int("monitor_interval_minutes", 50))
-    runs_per_day = max(1, config.get_int("search_runs_per_day", 2))
-    search_min = max(30, 1440 // runs_per_day)
-    sched.add_job(monitor_job, "interval", minutes=interval_min, id="monitor",
-                  max_instances=1, coalesce=True, misfire_grace_time=60)
-    sched.add_job(search_job, "interval", minutes=search_min, id="search",
-                  max_instances=1, coalesce=True, misfire_grace_time=60)
+    sched.add_job(monitor_job, build_trigger("monitor"), id="monitor",
+                  max_instances=1, coalesce=True, misfire_grace_time=300)
+    sched.add_job(search_job, build_trigger("search"), id="search",
+                  max_instances=1, coalesce=True, misfire_grace_time=300)
     sched.add_job(scheduled_check, "interval", seconds=60, id="scheduled_check",
                   max_instances=1, coalesce=True, misfire_grace_time=60)
     sched.add_job(dispatcher_tick, "interval", seconds=60, id="dispatcher",
                   max_instances=1, coalesce=True, misfire_grace_time=60)
+    jobs.scheduler = sched
     return sched
 
 

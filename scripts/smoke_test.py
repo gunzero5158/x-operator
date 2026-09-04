@@ -43,6 +43,7 @@ c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply','我的�
 c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score) VALUES ('我的规则','foo bar','找人','ja,en',7)")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('tweet_max_age_hours','48')")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('match_confidence_threshold','0.7')")
+c.execute("INSERT INTO app_settings(key,value) VALUES ('search_runs_per_day','4')")
 c.commit(); c.close()
 init_db(old_db)
 with get_conn() as conn:
@@ -57,6 +58,8 @@ with get_conn() as conn:
     my_min = conn.execute("SELECT min_llm_score FROM search_rules WHERE name='我的规则'").fetchone()["min_llm_score"]
     obsolete = conn.execute("SELECT COUNT(*) c FROM app_settings WHERE key IN ('tweet_max_age_hours','billing_mode','monthly_read_quota')").fetchone()["c"]
     thr = conn.execute("SELECT value FROM app_settings WHERE key='match_confidence_threshold'").fetchone()["value"]
+    s_int = conn.execute("SELECT value FROM app_settings WHERE key='search_interval_minutes'").fetchone()["value"]
+    assert s_int == "360" and conn.execute("SELECT 1 FROM app_settings WHERE key='search_runs_per_day'").fetchone() is None, s_int
 assert ver == 8 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v8 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
@@ -542,6 +545,37 @@ cli0.search_recent = orig_search
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
 print("[6f10] 搜索 0 条 / 出错的提示 OK")
+# 自动轮询：节奏可选每隔 N 分钟 / 每天固定时间点；总开关 + 单独开关；改设置立即重排
+from x_operator.core.scheduler import (build_scheduler, build_trigger, describe_schedule, job_enabled,  # noqa: E402
+                                       next_runs, parse_daily_times, reschedule_auto_jobs)
+from apscheduler.triggers.combining import OrTrigger  # noqa: E402
+from apscheduler.triggers.cron import CronTrigger  # noqa: E402
+from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
+assert parse_daily_times("08:00, 20:30，9:05 x 25:00 08:00 9:5") == [(8, 0), (9, 5), (20, 30)]
+assert isinstance(build_trigger("search"), IntervalTrigger) and "每隔 720 分钟" in describe_schedule("search")
+config.set_value("search_schedule_mode", "daily"); config.set_value("search_daily_times", "08:00, 20:00"); config.set_value("auto_jobs_timezone", "Asia/Shanghai")
+assert isinstance(build_trigger("search"), OrTrigger) and describe_schedule("search") == "每天 08:00、20:00（Asia/Shanghai）"
+config.set_value("search_daily_times", "21:00"); assert isinstance(build_trigger("search"), CronTrigger)
+config.set_value("search_daily_times", "abc"); assert isinstance(build_trigger("search"), IntervalTrigger)   # 没填对退回间隔
+config.set_value("auto_jobs_enabled", "0"); config.set_value("search_auto_enabled", "1")
+assert not job_enabled("search") and job_enabled("dispatcher") and job_enabled("scheduled_check")
+config.set_value("auto_jobs_enabled", "1"); config.set_value("monitor_auto_enabled", "0")
+assert job_enabled("search") and not job_enabled("monitor")
+config.set_value("dispatch_auto_enabled", "0"); assert not job_enabled("dispatcher"); config.set_value("dispatch_auto_enabled", "1")
+config.set_value("search_daily_times", "08:00, 20:00")
+sched = build_scheduler(jobs); sched.start(paused=True)
+try:
+    nr = next_runs(sched)
+    assert nr["search"] is not None and nr["search"].hour in (8, 20) and nr["search"].minute == 0 and nr["monitor"] is None, nr
+    config.set_value("search_schedule_mode", "interval"); config.set_value("search_interval_minutes", "30")
+    reschedule_auto_jobs(sched)
+    from datetime import datetime as _dt2, timezone as _tz2
+    nr2 = next_runs(sched); delta = (nr2["search"].astimezone(_tz2.utc) - _dt2.now(_tz2.utc)).total_seconds()
+    assert 25 * 60 < delta <= 30 * 60 + 5, delta
+finally:
+    sched.shutdown(wait=False)
+config.set_value("auto_jobs_enabled", "0"); config.set_value("monitor_auto_enabled", "1"); config.set_value("search_interval_minutes", "720")
+print("[6f11] 自动轮询节奏（间隔 / 每天固定时间 / 总开关+单独开关 / 立即重排）OK")
 
 # [6g] 定时计划并发：两个线程同时扫同一个到点计划只生成 1 条；origin=scheduled
 with get_conn() as conn:

@@ -18,5 +18,5 @@ monthly_budget_usd = 60
 daily_read_budget = 330
 budget_reserve_reads = 20
 monitor_interval_minutes = 50
-search_runs_per_day = 2
+search_interval_minutes = 720
 match_confidence_threshold = 0.4
