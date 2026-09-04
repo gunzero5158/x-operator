@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from .schema import DDL, SCHEMA_VERSION
+from .schema import DDL, SCHEDULED_POSTS_TABLE, SCHEMA_VERSION
 from . import seed
 
 _DB_PATH: Path | None = None
@@ -81,8 +81,36 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
         changed = seed.loosen_match(conn)
         if changed:
             logging.getLogger("x_operator.db").info("已放宽旧默认素材匹配门槛：%s", changed)
+    if current < 9:
+        _rebuild_scheduled_posts(conn)
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
+
+
+def _rebuild_scheduled_posts(conn: sqlite3.Connection) -> None:
+    """v9：material_id 改可空 + 新增内容来源字段。SQLite 不能改列约束，只能建新表搬数据。
+    review_queue 里有指向 scheduled_posts(id) 的外键：关掉外键检查、用 legacy 改名方式，别的表里的引用文本不会被改写。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(scheduled_posts)").fetchall()}
+    if "content_mode" in cols:
+        return
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute(SCHEDULED_POSTS_TABLE.replace("IF NOT EXISTS scheduled_posts", "scheduled_posts_new"))
+        keep = ["id", "account_id", "material_id", "schedule_type", "schedule_expr", "next_run_at",
+                "auto_approve", "status", "last_run_at", "created_at"]
+        keep = [c for c in keep if c in cols]
+        cl = ", ".join(keep)
+        conn.execute(f"INSERT INTO scheduled_posts_new ({cl}) SELECT {cl} FROM scheduled_posts")
+        conn.execute("DROP TABLE scheduled_posts")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        conn.execute("ALTER TABLE scheduled_posts_new RENAME TO scheduled_posts")
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_sched_due ON scheduled_posts(status, next_run_at)")
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+    logging.getLogger("x_operator.db").info("已重建 scheduled_posts 表（v9：内容来源可选素材池 / AI 主题）")
 
 
 def _connect() -> sqlite3.Connection:

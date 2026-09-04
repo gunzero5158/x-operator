@@ -5,7 +5,30 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+# 定时计划表单独拎出来：v9 要把 material_id 改成可空（素材池 / AI 主题模式不绑固定素材），SQLite 只能重建表
+SCHEDULED_POSTS_TABLE = r"""
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id),
+    material_id    INTEGER REFERENCES materials(id),
+    content_mode   TEXT    NOT NULL DEFAULT 'fixed' CHECK (content_mode IN ('fixed','pool','ai_topic')),
+    pool_lang      TEXT    NOT NULL DEFAULT '',
+    pool_tags      TEXT    NOT NULL DEFAULT '',
+    ai_rewrite     INTEGER NOT NULL DEFAULT 0 CHECK (ai_rewrite IN (0,1)),
+    ai_brief       TEXT    NOT NULL DEFAULT '',
+    schedule_type  TEXT    NOT NULL CHECK (schedule_type IN ('once','daily','weekly','cron')),
+    schedule_expr  TEXT    NOT NULL,
+    next_run_at    TEXT,
+    auto_approve   INTEGER NOT NULL DEFAULT 0 CHECK (auto_approve IN (0,1)),
+    status         TEXT    NOT NULL DEFAULT 'active'
+                   CHECK (status IN ('active','paused','done','missed')),
+    last_run_at    TEXT,
+    last_error     TEXT,
+    created_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+"""
 
 DDL = r"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -54,20 +77,7 @@ CREATE TABLE IF NOT EXISTS materials (
 CREATE INDEX IF NOT EXISTS ix_materials_pick  ON materials(kind, status, lang);
 CREATE INDEX IF NOT EXISTS ix_materials_group ON materials(translation_group_id);
 
-CREATE TABLE IF NOT EXISTS scheduled_posts (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id     INTEGER NOT NULL REFERENCES accounts(id),
-    material_id    INTEGER NOT NULL REFERENCES materials(id),
-    schedule_type  TEXT    NOT NULL CHECK (schedule_type IN ('once','daily','weekly','cron')),
-    schedule_expr  TEXT    NOT NULL,
-    next_run_at    TEXT,
-    auto_approve   INTEGER NOT NULL DEFAULT 0 CHECK (auto_approve IN (0,1)),
-    status         TEXT    NOT NULL DEFAULT 'active'
-                   CHECK (status IN ('active','paused','done','missed')),
-    last_run_at    TEXT,
-    created_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-);
-CREATE INDEX IF NOT EXISTS ix_sched_due ON scheduled_posts(status, next_run_at);
+""" + SCHEDULED_POSTS_TABLE + r"""CREATE INDEX IF NOT EXISTS ix_sched_due ON scheduled_posts(status, next_run_at);
 
 CREATE TABLE IF NOT EXISTS watched_users (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,

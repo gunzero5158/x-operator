@@ -44,6 +44,13 @@ c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,mi
 c.execute("INSERT INTO app_settings(key,value) VALUES ('tweet_max_age_hours','48')")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('match_confidence_threshold','0.7')")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('search_runs_per_day','4')")
+c.execute("DROP TABLE scheduled_posts")
+c.execute("CREATE TABLE scheduled_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL REFERENCES accounts(id), "
+          "material_id INTEGER NOT NULL REFERENCES materials(id), schedule_type TEXT NOT NULL, schedule_expr TEXT NOT NULL, next_run_at TEXT, "
+          "auto_approve INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', last_run_at TEXT, "
+          "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))")
+mat_old = c.execute("SELECT id FROM materials WHERE text='我的素材'").fetchone()["id"]
+c.execute("INSERT INTO scheduled_posts(account_id, material_id, schedule_type, schedule_expr, next_run_at) VALUES (?,?,'daily','21:00','2030-01-01T12:00:00Z')", (acc_id, mat_old))
 c.commit(); c.close()
 init_db(old_db)
 with get_conn() as conn:
@@ -60,9 +67,15 @@ with get_conn() as conn:
     thr = conn.execute("SELECT value FROM app_settings WHERE key='match_confidence_threshold'").fetchone()["value"]
     s_int = conn.execute("SELECT value FROM app_settings WHERE key='search_interval_minutes'").fetchone()["value"]
     assert s_int == "360" and conn.execute("SELECT 1 FROM app_settings WHERE key='search_runs_per_day'").fetchone() is None, s_int
-assert ver == 8 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+    sp_row = conn.execute("SELECT * FROM scheduled_posts").fetchone()
+    assert sp_row["content_mode"] == "fixed" and sp_row["material_id"] == mat_old and sp_row["schedule_expr"] == "21:00", dict(sp_row)
+    conn.execute("INSERT INTO review_queue(account_id, action_type, scheduled_post_id, final_text, status, created_at) VALUES (?,'post',?,'x','pending',?)",
+                 (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
+    conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
+    conn.rollback()
+assert ver == 9 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
-print("[1] v2→v8 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
+print("[1] v2→v9 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -733,6 +746,51 @@ assert clamp_recent_window(old) > old and clamp_recent_window(None) is None
 recent = datetime.now(timezone.utc) - timedelta(hours=3)
 assert clamp_recent_window(recent) == recent
 print("[6m] 搜索时间窗钳到 X 允许范围 OK")
+# 定时发帖：素材池轮流（用得最少 + 避开最近发过的）/ AI 改写变体 / AI 按主题创作 / 固定素材重复提醒
+with get_conn() as conn:
+    for i, tags in enumerate(("promo,daily", "promo", "story")):
+        conn.execute("INSERT INTO materials(kind,text,lang,status,scenario_tags) VALUES ('post',?,'ja','active',?)", (f"発帖素材{i} @MyBrand", tags))
+    conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, pool_lang, pool_tags, schedule_type, schedule_expr, next_run_at) "
+                 "VALUES (?,NULL,'pool','ja','promo','daily','21:00','2030-01-01T12:00:00Z')", (acc["id"],))
+    pool_id = conn.execute("SELECT id FROM scheduled_posts WHERE content_mode='pool'").fetchone()["id"]
+    conn.commit()
+picked = []
+for _ in range(3):
+    ok, msg = jobs.fire_plan_now(pool_id); assert ok, msg
+    with get_conn() as conn:
+        picked.append(conn.execute("SELECT material_id, final_text, origin FROM review_queue WHERE scheduled_post_id=? ORDER BY id DESC LIMIT 1", (pool_id,)).fetchone())
+assert len({r["material_id"] for r in picked[:2]}) == 2 and all(r["origin"] == "scheduled" for r in picked), [dict(r) for r in picked]
+assert "story" not in " ".join(r["final_text"] for r in picked) and "只能重用" in msg, msg    # 标签 promo 只有 2 条，第 3 次提示重用
+with get_conn() as conn:   # 开了 AI 改写但没配 LLM → 退回原文并注明
+    conn.execute("UPDATE scheduled_posts SET ai_rewrite=1 WHERE id=?", (pool_id,)); conn.commit()
+ok, msg = jobs.fire_plan_now(pool_id); assert ok and "AI 改写失败" in msg and "设置 → LLM" in msg, msg
+with get_conn() as conn:   # AI 主题模式没配 LLM → 失败并记 last_error
+    conn.execute("INSERT INTO scheduled_posts(account_id, content_mode, pool_lang, ai_brief, schedule_type, schedule_expr, next_run_at) "
+                 "VALUES (?,'ai_topic','ja','写一条关于效率工具的推文，结尾带 @MyBrand','daily','21:00','2030-01-01T12:00:00Z')", (acc["id"],))
+    topic_id = conn.execute("SELECT id FROM scheduled_posts WHERE content_mode='ai_topic'").fetchone()["id"]; conn.commit()
+ok, msg = jobs.fire_plan_now(topic_id); assert not ok and "LLM" in msg, msg
+with get_conn() as conn:
+    assert "LLM" in conn.execute("SELECT last_error FROM scheduled_posts WHERE id=?", (topic_id,)).fetchone()["last_error"]
+# 接上假 LLM：改写保留 @，主题创作强制包含 @
+lc.httpx.Client = FakeCli; config.set_value("llm_base_url", "http://fake"); config.set_value("llm_api_key", "k")
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "少し言い換えた新しい文 @MyBrand", "reason": "换了开头"}')]
+ok, msg = jobs.fire_plan_now(pool_id); assert ok and "AI 改写变体" in msg, msg
+with get_conn() as conn:
+    assert conn.execute("SELECT final_text FROM review_queue WHERE scheduled_post_id=? ORDER BY id DESC LIMIT 1", (pool_id,)).fetchone()["final_text"] == "少し言い換えた新しい文 @MyBrand"
+assert "最近发过的内容" in FakeCli.calls[0]["messages"][1]["content"] and FakeCli.calls[0]["model"] == "gpt-4o"
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "忘了带账号的文", "reason": "r"}'), FakeResp('{"text": "效率工具心得 @MyBrand", "reason": "r"}')]
+ok, msg = jobs.fire_plan_now(topic_id); assert ok and "AI 按主题创作" in msg, msg
+assert len(FakeCli.calls) == 2 and "@MyBrand" in FakeCli.calls[1]["messages"][-1]["content"]   # 缺 @ 时重写一次
+with get_conn() as conn:
+    assert conn.execute("SELECT last_error FROM scheduled_posts WHERE id=?", (topic_id,)).fetchone()["last_error"] is None
+lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
+# 固定素材 + 不改写 + 最近发过 → 提醒可能判重复
+with get_conn() as conn:
+    m0 = conn.execute("SELECT id FROM materials WHERE text LIKE '発帖素材0%'").fetchone()["id"]
+    conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr, next_run_at) VALUES (?,?,'fixed','daily','21:00','2030-01-01T12:00:00Z')", (acc["id"], m0))
+    fixed_id = conn.execute("SELECT id FROM scheduled_posts WHERE content_mode='fixed' ORDER BY id DESC LIMIT 1").fetchone()["id"]; conn.commit()
+ok, msg = jobs.fire_plan_now(fixed_id); assert ok and "可能判定重复" in msg, msg
+print("[6f12] 定时发帖内容来源（素材池轮流 / AI 改写 / AI 主题 / 重复提醒）OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

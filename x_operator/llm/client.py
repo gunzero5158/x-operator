@@ -39,6 +39,8 @@ SCENE_TIERS: dict[str, tuple[str, str]] = {
     "write":        ("strong", "AI 按要求创作回复"),
     "rule_gen":     ("strong", "AI 生成搜索规则（关键词、语义条件、语言）"),
     "material_gen": ("strong", "AI 生成素材"),
+    "post_rewrite": ("strong", "定时发帖：在素材基础上改写出新变体（避开 X 的重复判定）"),
+    "post_write":   ("strong", "定时发帖：AI 按主题要求现写一条推文"),
 }
 TIER_LABEL = {"light": "轻量模型", "strong": "强模型"}
 TIER_SETTING_KEY = {"light": "llm_model_light", "strong": "llm_model_strong"}
@@ -236,6 +238,37 @@ class LLMClient:
                 {"role": "user", "content": "你的回复缺少了必须原样包含的字符串：" + "、".join(missing) + "。请重写，务必包含。"},
             ]
         raise LLMFormatError("AI 两次都没把必须包含的内容写进去：" + "、".join(missing))
+
+    def _generate_with_must(self, scene: str, messages: list[dict], must_include: list[str], what: str) -> dict:
+        """写推文类：必须包含项缺了重写一次。返回 {text, reason}。"""
+        for attempt in range(2):
+            obj = self.chat_json(scene, messages, required_keys=["text", "reason"], temperature=0.8)
+            text = str(obj.get("text") or "").strip()
+            missing = [m for m in must_include if m and m not in text]
+            if text and not missing:
+                return {"text": text, "reason": str(obj.get("reason") or "")}
+            messages = messages + [
+                {"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)},
+                {"role": "user", "content": ("正文为空。" if not text else "缺少必须原样包含的：" + "、".join(missing) + "。") + "请重写，只输出 JSON。"},
+            ]
+        raise LLMFormatError(f"{what}：AI 两次都没写出合格的正文" + (f"（缺少：{'、'.join(missing)}）" if missing else ""))
+
+    def rewrite_post(self, text: str, lang: str, recent: list[str] | None = None) -> dict:
+        """定时发帖：在素材基础上改写一个新变体，保留链接/@。返回 {text, reason}。"""
+        self._require("AI 改写变体")
+        from ..core.matcher import extract_must_include
+        messages = [{"role": "system", "content": prompts.POST_REWRITE_SYSTEM},
+                    {"role": "user", "content": prompts.post_rewrite_user(text, lang, recent or [])}]
+        return self._generate_with_must("post_rewrite", messages, extract_must_include(text), "AI 改写变体")
+
+    def write_post(self, brief: str, lang: str, recent: list[str] | None = None) -> dict:
+        """定时发帖：按主题要求现写一条推文。返回 {text, reason}。"""
+        self._require("AI 按主题创作推文")
+        from ..core.matcher import extract_must_include
+        must = extract_must_include(brief)
+        messages = [{"role": "system", "content": prompts.POST_WRITE_SYSTEM},
+                    {"role": "user", "content": prompts.post_write_user(brief, lang, must, recent or [])}]
+        return self._generate_with_must("post_write", messages, must, "AI 按主题创作推文")
 
     def generate_search_rule(self, description: str) -> dict:
         """自然语言描述 → {name, keywords[], semantic_criteria, langs[]}。"""

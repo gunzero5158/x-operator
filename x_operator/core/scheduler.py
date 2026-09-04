@@ -21,7 +21,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from .. import config
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
-from ..llm.client import LLMClient
+from ..llm.client import LLMClient, LLMError
 from .compliance import ComplianceGuard
 from .dispatcher import Dispatcher
 from .matcher import MatchEngine
@@ -32,17 +32,46 @@ from .search import SearchJob
 log = logging.getLogger("x_operator.scheduler")
 
 
-def enqueue_scheduled_post(conn: sqlite3.Connection, sp: sqlite3.Row) -> bool:
-    """按定时计划生成一条「发帖」队列条目。素材不在了返回 False（不发空内容）。不提交。"""
-    mat = conn.execute("SELECT * FROM materials WHERE id=? AND deleted_at IS NULL", (sp["material_id"],)).fetchone()
-    if mat is None:
-        return False
-    status = "approved" if sp["auto_approve"] else "pending"
-    conn.execute(
-        "INSERT INTO review_queue(account_id, action_type, material_id, scheduled_post_id, "
-        "final_text, auto_approve, status, origin, created_at) VALUES (?,'post',?,?,?,?,?,'scheduled',?)",
-        (sp["account_id"], sp["material_id"], sp["id"], mat["text"], sp["auto_approve"], status, utcnow_iso()))
-    return True
+POST_MODE_LABEL = {"fixed": "固定一条素材", "pool": "素材池轮流", "ai_topic": "AI 按主题创作"}
+RECENT_POST_DAYS = 30
+
+
+def recent_post_texts(conn: sqlite3.Connection, account_id: int, limit: int = 20) -> list[str]:
+    """这个账号最近发过 / 排着要发的推文正文——用来避开重复。"""
+    cutoff = to_iso(datetime.now(timezone.utc) - timedelta(days=RECENT_POST_DAYS))
+    rows = conn.execute(
+        "SELECT final_text FROM review_queue WHERE account_id=? AND action_type='post' "
+        "AND status IN ('sent','approved','pending','sending') AND created_at>=? ORDER BY created_at DESC LIMIT ?",
+        (account_id, cutoff, limit)).fetchall()
+    return [r["final_text"] for r in rows]
+
+
+def _sp_get(sp: sqlite3.Row, key: str, default):
+    try:
+        v = sp[key]
+    except (IndexError, KeyError):
+        return default
+    return default if v is None else v
+
+
+def pick_pool_material(conn: sqlite3.Connection, sp: sqlite3.Row, recent: set[str]) -> tuple[sqlite3.Row | None, str]:
+    """素材池：启用中的发帖素材，按语言/标签圈定，挑用得最少的；正文和最近发过的一样的往后排。"""
+    lang = (_sp_get(sp, "pool_lang", "") or "").strip()
+    tags = [t.strip() for t in (_sp_get(sp, "pool_tags", "") or "").replace("，", ",").split(",") if t.strip()]
+    q = "SELECT * FROM materials WHERE kind='post' AND status='active' AND deleted_at IS NULL"
+    args: list = []
+    if lang:
+        q += " AND lang=?"; args.append(lang)
+    rows = conn.execute(q + " ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC, id ASC", args).fetchall()
+    if tags:
+        rows = [m for m in rows if set(x.strip() for x in (m["scenario_tags"] or "").split(",")) & set(tags)]
+    if not rows:
+        return None, ("素材池是空的：没有" + (f"语言为「{lang}」" if lang else "") + (f"、标签含 {'/'.join(tags)}" if tags else "")
+                      + "的启用中发帖素材。到素材库添加（类型选「发帖」并启用）")
+    fresh = [m for m in rows if m["text"] not in recent]
+    if fresh:
+        return fresh[0], f"素材池轮流：选用用得最少的一条（#{fresh[0]['id']}，已用 {fresh[0]['usage_count']} 次）"
+    return rows[0], f"素材池里的 {len(rows)} 条最近 {RECENT_POST_DAYS} 天内都发过了，只能重用 #{rows[0]['id']}——建议开「AI 改写变体」或补充素材"
 
 
 class Jobs:
@@ -57,6 +86,69 @@ class Jobs:
         self.dispatcher = Dispatcher(self.guard)
         self.scheduler: BackgroundScheduler | None = None   # build_scheduler 里赋值，设置页改节奏时用
         self._sched_lock = threading.Lock()
+
+    def compose_post(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[str | None, int | None, str]:
+        """按计划的内容来源产出正文。返回 (正文, material_id, 说明)；正文为 None 表示失败，说明里是原因。"""
+        mode = _sp_get(sp, "content_mode", "fixed") or "fixed"
+        recent_list = recent_post_texts(conn, sp["account_id"])
+        recent = set(recent_list)
+        note_parts: list[str] = []
+        if mode == "ai_topic":
+            brief = (_sp_get(sp, "ai_brief", "") or "").strip()
+            if not brief:
+                return None, None, "计划选了「AI 按主题创作」但没填主题要求，请编辑计划补上"
+            lang = (_sp_get(sp, "pool_lang", "") or "ja").strip() or "ja"
+            try:
+                res = self.llm.write_post(brief, lang, recent_list)
+            except LLMError as e:
+                return None, None, f"AI 按主题创作失败：{e}"
+            return res["text"], None, "AI 按主题创作：" + (res.get("reason") or "")
+        if mode == "pool":
+            mat, note = pick_pool_material(conn, sp, recent)
+            if mat is None:
+                return None, None, note
+            note_parts.append(note)
+        else:
+            mat = conn.execute("SELECT * FROM materials WHERE id=? AND deleted_at IS NULL", (sp["material_id"],)).fetchone() \
+                if sp["material_id"] else None
+            if mat is None:
+                return None, None, "计划绑定的素材已删除或进了回收站，请编辑计划重新选"
+            note_parts.append("固定素材")
+        text = mat["text"]
+        if _sp_get(sp, "ai_rewrite", 0):
+            try:
+                res = self.llm.rewrite_post(text, mat["lang"], recent_list)
+                text = res["text"]
+                note_parts.append("AI 改写变体：" + (res.get("reason") or ""))
+            except LLMError as e:
+                note_parts.append(f"AI 改写失败（{str(e)[:80]}），用素材原文")
+        if text in recent and not _sp_get(sp, "ai_rewrite", 0):
+            note_parts.append(f"⚠ 正文和最近 {RECENT_POST_DAYS} 天内发过的一样，X 可能判定重复而拒绝；建议开「AI 改写变体」")
+        return text, mat["id"], "；".join(note_parts)
+
+    def enqueue_from_plan(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[bool, str]:
+        """按定时计划生成一条「发帖」队列条目（不提交）。返回 (是否成功, 说明/错误)。"""
+        text, mid, note = self.compose_post(conn, sp)
+        if text is None:
+            return False, note
+        status = "approved" if sp["auto_approve"] else "pending"
+        conn.execute(
+            "INSERT INTO review_queue(account_id, action_type, material_id, scheduled_post_id, "
+            "final_text, llm_reason, auto_approve, status, origin, created_at) VALUES (?,'post',?,?,?,?,?,?,'scheduled',?)",
+            (sp["account_id"], mid, sp["id"], text, note, sp["auto_approve"], status, utcnow_iso()))
+        return True, note
+
+    def fire_plan_now(self, sp_id: int) -> tuple[bool, str]:
+        """「立即生成一次」：不等到点、不改下次运行时间。可能调 LLM，放线程池里跑。"""
+        with get_conn() as conn:
+            sp = conn.execute("SELECT * FROM scheduled_posts WHERE id=?", (sp_id,)).fetchone()
+            if sp is None:
+                return False, "计划不存在"
+            ok, msg = self.enqueue_from_plan(conn, sp)
+            conn.execute("UPDATE scheduled_posts SET last_run_at=?, last_error=? WHERE id=?",
+                         (utcnow_iso(), None if ok else msg, sp_id))
+            conn.commit()
+        return ok, msg
 
     def run_scheduled_posts(self) -> int:
         """扫描到点的定时发帖，生成审核队列条目（post 类）。返回生成条数。
@@ -92,11 +184,16 @@ class Jobs:
                     if cur.rowcount == 0:
                         conn.rollback()
                         continue
-                    if not enqueue_scheduled_post(conn, sp):
-                        # 素材被删/进回收站 → 计划暂停，不发空内容
-                        conn.execute("UPDATE scheduled_posts SET status='paused' WHERE id=?", (sp["id"],))
+                    ok, msg = self.enqueue_from_plan(conn, sp)
+                    if not ok:
+                        # 固定素材被删 → 暂停计划（不发空内容）；其他失败（LLM 出错、素材池空）记下原因，下次到点再试
+                        log.warning("定时计划 #%s 未生成：%s", sp["id"], msg)
+                        pause = (_sp_get(sp, "content_mode", "fixed") or "fixed") == "fixed"
+                        conn.execute("UPDATE scheduled_posts SET last_error=?" + (", status='paused'" if pause else "") + " WHERE id=?",
+                                     (msg, sp["id"]))
                         conn.commit()
                         continue
+                    conn.execute("UPDATE scheduled_posts SET last_error=NULL WHERE id=?", (sp["id"],))
                     conn.commit()
                     generated += 1
         return generated

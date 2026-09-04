@@ -114,3 +114,34 @@ def material_gen_user(kind: str, lang: str, topic: str, style: str, scenario: st
     must = "、".join(f"「{m}」" for m in must_include) if must_include else "（无）"
     return (f"素材类型：{kind}\n语言：{lang}\n主题：{topic}\n风格：{style or '自然、口语、像真人'}\n"
             f"使用场景：{scenario or '通用'}\n必须包含：{must}\n数量：{count}")
+
+
+# ---------------- 定时发帖：改写变体 / 按主题现写 ----------------
+POST_REWRITE_SYSTEM = """你是 X（推特）运营的文案改写助手。给定一条准备重复使用的推文素材，写出一个**新的变体**：
+意思、立场、卖点不变，但措辞、句式、开头结尾要明显不同——X 会拒绝完全重复的推文，读者也不该觉得在刷屏。
+铁律：
+1. 素材里的链接和 @账号必须原样出现、一个不少；话题标签可增减。
+2. 用素材原来的语言；长度不超过 X 的 280 字符（中日韩每字按 2 算）。
+3. 不要出现"改写版""变体"之类的字样，不要解释。
+4. 如果给了「最近发过的内容」，新变体要和它们都明显不同。
+5. 只输出 JSON：{"text": "新推文正文", "reason": "中文一句话说明改了什么"}"""
+
+
+def post_rewrite_user(text: str, lang: str, recent: list[str]) -> str:
+    recent_block = ("\n\n最近发过的内容（要避开）：\n" + json.dumps(recent[:8], ensure_ascii=False)) if recent else ""
+    return f"素材原文（语言 {lang}）：\n{text}{recent_block}"
+
+
+POST_WRITE_SYSTEM = """你是 X（推特）账号的文案写手，按运营者给的「主题要求」写一条可以直接发出的推文。
+铁律：
+1. 像账号主人在日常发帖，不像广告：要有一个具体的切入点（一个观察、一段经验、一个小结论），不空泛。
+2. 要求里出现的链接和 @账号必须原样出现在正文里。
+3. 用指定的语言；长度不超过 280 字符（中日韩每字按 2 算）。
+4. 如果给了「最近发过的内容」，这条要换一个角度，不重复它们的说法。
+5. 只输出 JSON：{"text": "推文正文", "reason": "中文一句话说明切入点"}"""
+
+
+def post_write_user(brief: str, lang: str, must_include: list[str], recent: list[str]) -> str:
+    must = ("\n必须原样包含：" + "、".join(must_include)) if must_include else ""
+    recent_block = ("\n\n最近发过的内容（换个角度，别重复）：\n" + json.dumps(recent[:8], ensure_ascii=False)) if recent else ""
+    return f"主题要求：\n{brief}\n\n语言：{lang}{must}{recent_block}"
