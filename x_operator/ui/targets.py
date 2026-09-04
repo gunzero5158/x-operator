@@ -18,7 +18,7 @@ _LIMIT = 150
 
 
 def _load(status: str, source: str, rule_id: int = 0):
-    q = ("SELECT tt.*, sr.name AS rule_name, sr.min_llm_score AS rule_min, wu.handle AS watched_handle, "
+    q = ("SELECT tt.*, sr.name AS rule_name, sr.min_llm_score AS rule_min, sr.source_kind AS rule_kind, wu.handle AS watched_handle, "
          "(SELECT rq.id FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_id, "
          "(SELECT rq.status FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_status "
          "FROM target_tweets tt "
@@ -221,8 +221,9 @@ _STATUS_COLOR = {"queued": "bg-green-600", "no_match": "bg-orange-500", "filtere
 def _card(t, rematch, delete_one, blacklist, pick, write):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
+            kind_word = {"feed_for_you": "推荐流", "feed_following": "关注流"}.get(t["rule_kind"] or "", "搜索")
             src = f"监控 @{t['watched_handle']}" if t["source"] == "monitor" and t["watched_handle"] else \
-                (f"搜索「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索（规则已删）"))
+                (f"{kind_word}「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索（规则已删）"))
             ui.badge(src).classes("bg-slate-600")
             ui.badge(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"])).classes(_STATUS_COLOR.get(t["process_status"], "bg-gray-500"))
             if t["llm_relevance_score"] is not None:

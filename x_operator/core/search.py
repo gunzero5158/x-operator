@@ -70,9 +70,35 @@ def normalize_keywords(raw: str) -> str:
     return " OR ".join(_term(p) for p in parts)
 
 
+SOURCE_KIND_LABEL = {
+    "search": "关键词搜索",
+    "feed_for_you": "账号推荐流（For You）",
+    "feed_following": "账号关注流（Following）",
+}
+
+
+def _rule_get(rule, key: str, default):
+    try:
+        v = rule[key]
+    except (IndexError, KeyError):
+        return default
+    return default if v is None else v
+
+
+def rule_source_kind(rule) -> str:
+    k = (_rule_get(rule, "source_kind", "search") or "search").strip()
+    return k if k in SOURCE_KIND_LABEL else "search"
+
+
+def is_feed_rule(rule) -> bool:
+    return rule_source_kind(rule) != "search"
+
+
 def effective_query(rule: sqlite3.Row | dict) -> str:
     """实际发给 X 的查询：逗号列表转 OR；用户没写 lang: 时按规则选的语言补上 (lang:ja OR lang:en)；
-    默认排除转推。"""
+    默认排除转推。推荐流/关注流规则没有查询，靠语义条件 + 观看量筛。"""
+    if is_feed_rule(rule):
+        return f"（{SOURCE_KIND_LABEL[rule_source_kind(rule)]}：不用关键词，读时间线后按语义条件和观看量筛）"
     q = normalize_keywords(rule["keyword_query"])
     langs = rule_langs(rule)
     if " OR " in q and not q.startswith("("):
@@ -130,6 +156,17 @@ class SearchJob:
         self.match = match_engine
         self.llm = llm
 
+    @staticmethod
+    def feed_account(rule: sqlite3.Row, fallback: sqlite3.Row) -> sqlite3.Row:
+        """推荐流/关注流规则读哪个账号的时间线：规则里指定的（须启用），否则用抓取通道选出来的账号。"""
+        fid = _rule_get(rule, "feed_account_id", None)
+        if fid:
+            with get_conn() as conn:
+                row = conn.execute("SELECT * FROM accounts WHERE id=? AND status='active'", (fid,)).fetchone()
+            if row is not None:
+                return row
+        return fallback
+
     def run_rule(self, rule: sqlite3.Row, account: sqlite3.Row,
                  notes: list[str] | None = None, progress=None) -> list[ScoredCandidate]:
         """抓取 + 预过滤 + 打分。返回按推文 id 升序的候选（含被预过滤的，prefiltered 字段说明原因）。
@@ -139,9 +176,12 @@ class SearchJob:
             if progress:
                 progress(frac, text)
 
+        feed = is_feed_rule(rule)
+        if feed:
+            account = self.feed_account(rule, account)
         client = factory.get_client(account)
         lookback_h = _row_int(rule, "lookback_hours", 24)
-        if account["access_type"] == "official" and lookback_h > OFFICIAL_SEARCH_MAX_HOURS:
+        if not feed and account["access_type"] == "official" and lookback_h > OFFICIAL_SEARCH_MAX_HOURS:
             if notes is not None:
                 notes.append(f"规则「{rule['name']}」首次回溯 {lookback_h} 小时超过官方 API 上限，按 {OFFICIAL_SEARCH_MAX_HOURS} 小时（7 天）抓")
             lookback_h = OFFICIAL_SEARCH_MAX_HOURS
@@ -164,12 +204,30 @@ class SearchJob:
                 if b.daily_budget > 0:
                     scan_limit = max(max_results, min(scan_limit, b.remaining))
         window = f"最近 {lookback_h} 小时" if start_time else "游标之后的新推文"
-        _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{window}"
-                 + (f"，按热度排序找观看量 ≥ {min_views} 的，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
-        result = client.search_recent(effective_query(rule), since_id=since_id,
-                                      start_time=start_time, max_results=max_results,
-                                      min_views=min_views, scan_limit=scan_limit)
-        _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
+        if feed:
+            # 时间线不按时间排，不用游标：按时间窗 + 数据库去重；没有观看量门槛也翻几页凑够条数
+            since_id = None
+            start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h or 24)
+            window = f"最近 {lookback_h} 小时"
+            if not scan_limit:
+                scan_limit = max_results * 3
+            kind_label = SOURCE_KIND_LABEL[rule_source_kind(rule)]
+            _p(0.05, f"规则「{rule['name']}」：正在读取 @{account['handle']} 的{kind_label}（{window}"
+                     + (f"，观看量 ≥ {min_views}" if min_views else "") + f"，最多扫 {scan_limit} 条）…")
+            result = client.get_home_timeline(kind="for_you" if rule_source_kind(rule) == "feed_for_you" else "following",
+                                              max_results=max_results, min_views=min_views, scan_limit=scan_limit,
+                                              max_age_h=lookback_h or None)
+            _log_read(account["id"], client.api_kind, "home_timeline", result.reads_consumed)
+            if notes is not None:
+                notes.append(f"规则「{rule['name']}」：读取 @{account['handle']} 的{kind_label}"
+                             f"（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}），扫描 {result.scanned} 条")
+        else:
+            _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{window}"
+                     + (f"，按热度排序找观看量 ≥ {min_views} 的，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
+            result = client.search_recent(effective_query(rule), since_id=since_id,
+                                          start_time=start_time, max_results=max_results,
+                                          min_views=min_views, scan_limit=scan_limit)
+            _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
         tweets = result.tweets
         if min_views and notes is not None and result.scanned:
             tip = (f"规则「{rule['name']}」：按热度排序扫描 {result.scanned} 条（{window}），观看量低于 {min_views} 的 {result.dropped_low_views} 条已跳过（不入库），"
@@ -187,6 +245,10 @@ class SearchJob:
         if not tweets and notes is not None:
             if result.scanned and min_views:
                 pass   # 上面已经写了「扫描 N 条、观看量不足的都跳过、最高观看量是多少」
+            elif feed:
+                notes.append(f"⚠ 规则「{rule['name']}」：@{account['handle']} 的时间线里最近 {lookback_h} 小时内没有可用推文"
+                             f"（扫描 {result.scanned} 条，转推/回复/太旧的已跳过）。推荐流内容取决于这个号平时关注谁、点什么赞——"
+                             "先用它关注几十个目标领域的账号、刷几天再来；或调大「首次回溯」")
             elif since_id:
                 notes.append(f"规则「{rule['name']}」：游标之后没有新推文（想重新抓最近的，点规则卡片上的「重置游标」）")
             else:

@@ -73,9 +73,9 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 9 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 10 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
-print("[1] v2→v9 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
+print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -284,6 +284,11 @@ print("[5b] 凭据格式校验 OK")
 oc = OfficialXClient(credentials={"consumer_key": "k", "consumer_secret": "s", "access_token": "t", "access_token_secret": "ts", "proxy": "127.0.0.1:9999"})
 assert oc._client.session.proxies["https"] == "http://127.0.0.1:9999" and oc.proxy_used == "http://127.0.0.1:9999"
 print("[5c] 官方 API 客户端代理注入 OK")
+try:
+    oc.get_home_timeline(kind="for_you"); raise SystemExit("应报错")
+except Exception as e:
+    assert "推荐流" in str(e) and "小号" in str(e), str(e)
+print("[5d] 官方 API 读推荐流给出明确提示 OK")
 
 # ---------- 6. 审查后修复的回归用例 ----------
 from datetime import datetime, timedelta, timezone  # noqa: E402
@@ -558,6 +563,21 @@ cli0.search_recent = orig_search
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
 print("[6f10] 搜索 0 条 / 出错的提示 OK")
+# 推荐流规则：不用关键词，读时间线 → 同一条流水线；抓取记录里标「推荐流」
+from x_operator.core.search import is_feed_rule, effective_query as _eq  # noqa: E402
+with get_conn() as conn:
+    conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, max_results_per_run, source_kind, feed_account_id) "
+                 "VALUES ('推荐流规则', '', '本人在抱怨或求推荐', 'ja,en', 5, 15, 'feed_for_you', ?)", (acc["id"],))
+    feed_rule = conn.execute("SELECT * FROM search_rules WHERE name='推荐流规则'").fetchone(); conn.commit()
+assert is_feed_rule(feed_rule) and "推荐流" in _eq(feed_rule)
+st = jobs.search.run_once(rule_ids=[feed_rule["id"]]); m = st.as_msg()
+assert st.rules_run == 1 and st.tweets_fetched > 0 and "推荐流" in m and "@tester" in m, m
+with get_conn() as conn:
+    n_feed = conn.execute("SELECT COUNT(*) c FROM target_tweets WHERE source_rule_id=?", (feed_rule["id"],)).fetchone()["c"]
+    assert n_feed == st.tweets_fetched, (n_feed, st.tweets_fetched)
+    assert conn.execute("SELECT COUNT(*) c FROM action_log WHERE endpoint='home_timeline'").fetchone()["c"] >= 1
+    conn.execute("UPDATE search_rules SET enabled=0 WHERE id=?", (feed_rule["id"],)); conn.commit()   # 别影响后面「只有 1 条启用规则」的用例
+print("[6f13] 推荐流规则走同一条流水线 OK")
 # 自动轮询：节奏可选每隔 N 分钟 / 每天固定时间点；总开关 + 单独开关；改设置立即重排
 from x_operator.core.scheduler import (build_scheduler, build_trigger, describe_schedule, job_enabled,  # noqa: E402
                                        next_runs, parse_daily_times, reschedule_auto_jobs)

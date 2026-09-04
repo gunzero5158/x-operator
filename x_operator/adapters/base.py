@@ -125,6 +125,12 @@ class XClient(ABC):
         一页不够就继续翻页，直到凑够 max_results 条达标的，或累计扫描到 scan_limit 条（0 = 只扫一页）。
         低于门槛或不在 start_time 窗口内的不返回，但计入 scanned / max_views_seen。"""
 
+    def get_home_timeline(self, kind: str = "for_you", max_results: int = 50, min_views: int = 0,
+                          scan_limit: int = 0, max_age_h: int | None = None) -> FetchResult:
+        """读本账号的首页时间线：kind='for_you' 推荐流 / 'following' 关注流。不含转推和回复；
+        max_age_h 只要这么多小时内的；min_views/scan_limit 语义同 search_recent。官方 API 没有推荐流接口。"""
+        raise XClientError("该通道不支持读取首页时间线")
+
     def upload_media(self, file_path: str, media_type: str,
                      alt_text: str | None = None) -> str:
         raise MediaError("MVP 暂不支持媒体上传")

@@ -134,6 +134,10 @@ class MockXClient(XClient):
         return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned, scanned=scanned,
                            dropped_low_views=dropped, max_views_seen=max_views)
 
+    def get_home_timeline(self, kind: str = "for_you", max_results: int = 50, min_views: int = 0,
+                          scan_limit: int = 0, max_age_h: int | None = None) -> FetchResult:
+        return self.search_recent("", None, None, max_results, min_views, scan_limit)
+
     # --- 写 ---
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:
         return PostResult(tweet_id="mock_post_" + _next_id())

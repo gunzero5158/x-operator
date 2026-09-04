@@ -60,6 +60,9 @@ _ADDED_COLUMNS = [
     # v8：每条规则/推主可指定回复账号（NULL = 自动轮流）
     ("search_rules", "reply_account_id", "INTEGER"),
     ("watched_users", "reply_account_id", "INTEGER"),
+    # v10：规则来源可选关键词搜索 / 某账号的推荐流 / 关注流
+    ("search_rules", "source_kind", "TEXT NOT NULL DEFAULT 'search'"),
+    ("search_rules", "feed_account_id", "INTEGER"),
 ]
 
 

@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # 定时计划表单独拎出来：v9 要把 material_id 改成可空（素材池 / AI 主题模式不绑固定素材），SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS search_rules (
     ai_brief            TEXT    NOT NULL DEFAULT '',
     allow_polish        INTEGER NOT NULL DEFAULT 0,
     reply_account_id    INTEGER,
+    source_kind         TEXT    NOT NULL DEFAULT 'search',
+    feed_account_id     INTEGER,
     enabled             INTEGER NOT NULL DEFAULT 1  CHECK (enabled IN (0,1)),
     last_run_at         TEXT,
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))

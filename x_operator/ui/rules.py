@@ -10,7 +10,8 @@ from nicegui import run, ui
 from .. import config
 from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
-from ..core.search import LANG_LABEL, effective_query, langs_label, rule_langs
+from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule,
+                           langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
 from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell
 from .pickers import reply_mode_fields, reply_mode_invalid
@@ -19,6 +20,10 @@ _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
 
 # 各参数的说明与推荐值（弹窗里逐项显示）
 HINTS = {
+    "source": "关键词搜索=用下面的关键词去 X 搜（结果多但观看量普遍低）；账号推荐流=直接读某个小号首页 For You 里算法推给它的推文，"
+              "热门内容多、观看量高，但内容取决于这个号平时关注谁、点什么赞——先用它关注几十个目标领域账号、刷几天，推荐流才对路；"
+              "账号关注流=只看它关注的人发的。推荐流只有小号（Cookie 通道）能读，官方 API 没有这个接口。",
+    "feed_account": "读哪个账号的时间线。留「自动」= 用「设置 → 预算 → 抓取通道」选出来的那个号。推荐流建议固定一个专门养过的小号。",
     "keywords": "最简单：逗号隔开多个词，命中任意一个即可（中文词会自动整词匹配）。高级：直接写 X 语法，空格=同时包含、OR=或、-词=排除。"
                 "语言不用写，下面勾选；转推默认排除。",
     "semantic": "写给打分 AI 看的：要什么样的人/内容、排除什么。例：作者本人在抱怨某类工具太贵或在找替代；排除新闻、教程、招聘、广告。",
@@ -42,14 +47,18 @@ def _save(rid, data: dict):
     with get_conn() as conn:
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
-                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=? WHERE id=?",
+                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
+                         "source_kind=?, feed_account_id=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"], rid))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["source_kind"], data["feed_account_id"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id) "
+                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"]))
+                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["source_kind"], data["feed_account_id"]))
         conn.commit()
 
 
@@ -77,7 +86,7 @@ def register(jobs) -> None:
                                   lambda progress: jobs.search.run_once(progress=progress), "搜索", render,
                                   result_link=("查看抓取记录", "/targets?source=search"))
                               ).props("outline").tooltip("把所有「启用」的规则各跑一次；只想跑某一条就点该规则卡片上的「运行此规则」")
-            ui.label("两级漏斗：关键词查询粗筛（X 搜索语法，自动带上所选语言）→ 按语义条件给每条推文打 0-10 分 → "
+            ui.label("推文来源可选：关键词搜索，或直接读某个小号的推荐流 / 关注流（热门内容多，观看量高）。之后统一走：按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
                      ).classes("text-xs text-gray-400")
             llm_on = jobs.llm.configured
@@ -127,6 +136,7 @@ def register(jobs) -> None:
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 w-full"):
                                 ui.label(r["name"]).classes("font-semibold")
+                                ui.badge(SOURCE_KIND_LABEL[rule_source_kind(r)]).classes("bg-indigo-600" if is_feed_rule(r) else "bg-slate-600")
                                 ui.badge(langs_label(rule_langs(r))).classes("bg-slate-500")
                                 ui.badge(f"达标分 ≥{r['min_llm_score']}").classes("bg-blue-600")
                                 ui.badge(f"每次 {r['max_results_per_run']} 条").classes("bg-slate-400")
@@ -144,8 +154,13 @@ def register(jobs) -> None:
                                 ui.space()
                                 sw = ui.switch("启用", value=bool(r["enabled"]))
                                 sw.on("update:model-value", lambda e, rid=r["id"]: _toggle(rid, e.args))
-                            ui.label("关键词：" + r["keyword_query"]).classes("text-xs font-mono text-gray-600")
-                            ui.label("实际查询：" + effective_query(r)).classes("text-xs font-mono text-gray-400")
+                            if is_feed_rule(r):
+                                ui.label("来源：" + SOURCE_KIND_LABEL[rule_source_kind(r)] + "，读取 "
+                                         + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（抓取通道选的号）")
+                                         + " 的时间线，不用关键词").classes("text-xs text-gray-600")
+                            else:
+                                ui.label("关键词：" + r["keyword_query"]).classes("text-xs font-mono text-gray-600")
+                                ui.label("实际查询：" + effective_query(r)).classes("text-xs font-mono text-gray-400")
                             ui.label("语义：" + r["semantic_criteria"]).classes("text-sm")
                             if r["reply_mode"] == "ai_write":
                                 ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
@@ -178,8 +193,23 @@ def register(jobs) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-[95vw] max-h-[92vh] overflow-auto"):
             ui.label("编辑规则" if r else "新建规则").classes("text-lg font-bold")
             name = ui.input("规则名", value=g("name", "")).classes("w-full").props("outlined")
-            kq = ui.textarea("关键词（逗号隔开 = 命中任意一个即可）", value=g("keyword_query", "")).classes("w-full").props("outlined autogrow")
-            _hint("keywords")
+            src = ui.select(SOURCE_KIND_LABEL, value=g("source_kind", "search") if g("source_kind", "search") in SOURCE_KIND_LABEL else "search",
+                            label="推文来源").classes("w-full").props("outlined")
+            _hint("source")
+            feed_opts = {0: "自动（用抓取通道选出来的号）", **{k: v for k, v in account_options().items() if k}}
+            feed_box = ui.column().classes("w-full gap-1")
+            with feed_box:
+                feed_acc = ui.select(feed_opts, value=g("feed_account_id", 0) if g("feed_account_id", 0) in feed_opts else 0,
+                                     label="读哪个账号的时间线").classes("w-full").props("outlined")
+                _hint("feed_account")
+            kq_box = ui.column().classes("w-full gap-1")
+            with kq_box:
+                kq = ui.textarea("关键词（逗号隔开 = 命中任意一个即可）", value=g("keyword_query", "")).classes("w-full").props("outlined autogrow")
+                _hint("keywords")
+
+            def sync_src():
+                kq_box.set_visibility(src.value == "search"); feed_box.set_visibility(src.value != "search")
+            src.on("update:model-value", lambda e: sync_src()); sync_src()
             sc = ui.textarea("语义筛选条件（大白话写给 AI 看）", value=g("semantic_criteria", "")).classes("w-full").props("outlined autogrow")
             _hint("semantic")
             cur_langs = rule_langs(r) if r else list(p.get("langs", ["ja"]))
@@ -197,12 +227,15 @@ def register(jobs) -> None:
                                                          "抓到达标推文后", g("reply_account_id", 0))
 
             def do_save():
-                if not (name.value or "").strip() or not (kq.value or "").strip() or not (sc.value or "").strip():
-                    ui.notify("规则名 / 关键词 / 语义条件都不能为空", type="negative"); return
+                if not (name.value or "").strip() or not (sc.value or "").strip():
+                    ui.notify("规则名 / 语义条件不能为空", type="negative"); return
+                if src.value == "search" and not (kq.value or "").strip():
+                    ui.notify("关键词搜索要填关键词（改成「账号推荐流」就不用填）", type="negative"); return
                 problem = reply_mode_invalid(mode, brief)
                 if problem:
                     ui.notify(problem, type="negative"); return
-                data = dict(name=name.value.strip(), kq=kq.value.strip(), sc=sc.value.strip(),
+                data = dict(name=name.value.strip(), kq=(kq.value or "").strip() if src.value == "search" else "", sc=sc.value.strip(),
+                            source_kind=src.value, feed_account_id=(int(feed_acc.value) or None) if (src.value != "search" and feed_acc.value) else None,
                             lang=",".join(x for x in (lang.value or []) if x),
                             min_score=max(0, min(10, int(min_score.value or 0))),
                             max_results=max(10, min(100, int(max_results.value or 10))),
