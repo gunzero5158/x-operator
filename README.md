@@ -31,7 +31,7 @@ uv run python -m x_operator.main
 - **官方 API 通道**（主号必须用它）：developer.x.com → App → Settings 里把权限改成 *Read and write* →
   Keys and tokens 生成 API Key / API Key Secret / Access Token / Access Token Secret（Bearer 选填）。
   按量计费：读约 $0.005/条、发 $0.015/条、含链接推文 $0.20/条。
-- **非官方通道**（仅小号），两种方式填一种即可：
+- **非官方通道**（仅小号），弹窗里用「方式一 / 方式二」切换按钮**二选一**填（绿框 = Cookie，黄框 = 密码登录，不用两种都填）：
   - 方式一 **Cookie**：Chrome/Edge 登录小号 → F12 → Application（应用）→ Cookies → https://x.com →
     复制 `auth_token`（40 位）和 `ct0`（32 或 160 位）的 **Value** 值。保存时会做格式体检，复制错列会直接提示。
   - 方式二 **用户名 + 密码 + 两步验证 TOTP 密钥**：程序自己走登录流程（自研，不用 twikit 自带的、会卡在
@@ -63,8 +63,9 @@ uv run python -m x_operator.main
   支持 URL 直达（`/targets?source=search&rule=3`）。每条可 **「选素材」**（手动从素材库挑一条、可改文案）、
   **「AI 撰写」**（按创作要求现写；写好的创作要求可**存为模板**，下次同类场景直接从模板选——规则/推主里的
   「AI 创作要求」也能用同一批模板）、「自动匹配」、删除、拉黑作者。
-- **素材库**：增删改、启用/归档、回收站；**「AI 生成素材」**：给主题、风格、语言、场景、必须包含的 @/链接和条数，
-  预览勾选后入库（标记 AI）。
+- **素材库**：增删改、启用/归档、回收站；每条素材可挂**配图 / 视频**（见下面「配图 / 视频」）；标签按用途配色：
+  靛蓝「回复」= 用在别人推文下，橙「发帖」= 自己账号的主贴；绿「启用」/ 黄「草稿」/ 灰「归档」；紫「AI」；粉「📎」= 带附件（页顶有图例，鼠标悬停有解释）。
+  **「AI 生成素材」**：给主题、风格、语言、场景、必须包含的 @/链接和条数，预览勾选后入库（标记 AI）。
 - **监控推主**：添加后可编辑：**首次回溯小时数**、含不含回复、**回复方式**、AI 创作要求。
 - **搜索规则**：**推文来源**三选一——关键词搜索 / **某个小号的推荐流（For You）** / 某账号的关注流。推荐流是算法推给那个号的热门内容，
   观看量普遍比搜索高得多，但取决于这个号平时关注谁、点什么赞（先用它关注几十个目标领域账号、刷几天）；只有小号 Cookie 通道能读，
@@ -98,6 +99,18 @@ uv run python -m x_operator.main
   - 审核队列里每条待审核条目都能临时改「发送账号」。
 - **发帖账号**：定时计划新建时选。
 - 去重账本按推文去重：同一条推文只会被一个账号回。
+
+### 配图 / 视频（附件）
+
+回复和主贴都能带附件，规则跟 X 一样：**最多 4 张图片**（jpg/png/webp，单张 ≤5MB）、或 **1 个 GIF**（≤15MB）、或 **1 个视频**（mp4/mov，≤512MB），不能混搭。
+
+- **在哪加**：素材库「新建 / 编辑素材」（附件跟着素材走：自动匹配、手动选素材、素材池轮流、固定素材都会带上）；
+  抓取记录「AI 撰写」弹窗（AI 只写文字，附件原样带上）；定时计划「AI 按主题创作」模式（每次随帖一起发）；
+  审核队列每条待审核条目的「附件」按钮（加 / 换 / 去掉，改完再批准）。
+- **怎么存**：文件放在 `data/media/`（跟数据库同目录，备份时一起带走），库里只记路径。X 的 media_id 只对上传它的账号有效、24 小时内作废，
+  所以**发送前才用这条的发送账号上传**，换账号发也没问题。附件文件丢了会标「失败」并写明是哪个文件，不会发出没图的半成品。
+- 官方 API 通道走 v1.1 媒体上传（视频 / GIF 分块 + 指定类别等 X 转码完成）；小号通道走 twikit 的 upload_media（等处理完成）。
+- 启动时会清掉没有任何记录引用的附件文件（弹窗里传了又删掉的那种）。
 
 ### 时间窗
 
@@ -174,26 +187,28 @@ uv run python -m x_operator.main
 ```bash
 uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
+# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材/队列/定时计划的附件区、账号方式一二切换
+uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
 ```
 
 ## 目录结构
 
 ```
 x_operator/
-  db/         schema.py(DDL v10) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v11) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
-  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流)
-  ui/         layout.py pickers.py(共用弹窗/回复方式字段) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
+  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/发送前上传)
+  ui/         layout.py pickers.py(共用弹窗/回复方式字段) media_widget.py(附件上传/缩略图) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
-scripts/      smoke_test.py serve_check.sh
+scripts/      smoke_test.py serve_check.sh ui_dialog_check.py
 config/settings.toml   start.bat / start.sh
+data/         x_operator.db（所有数据） media/（附件文件）
 ```
 
 ## 尚未实现（后续迭代）
 
 - 邮箱验证码登录（X 偶发要求；目前提示改用 Cookie）。
-- 媒体上传的 UI（适配器已支持 `upload_media`，素材库还没有上传入口）。
 - 翻译组并排视图、AI 撰写弹窗、自动翻译。
 - 预算熔断/月度重算。
 - cron 表达式仅支持 `M H * * *`（每日固定时分）。

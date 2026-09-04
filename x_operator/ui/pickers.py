@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
+from ..core import media
 from ..db.database import get_conn, utcnow_iso
 from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
 from .layout import confirm, notify_long
+from .media_widget import MediaField, media_badge
 
 
 # ====================================================================================
@@ -189,6 +191,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
                             ui.label(f"用过 {m['usage_count']} 次").classes("text-xs text-gray-400")
                             if m["created_by"] == "ai":
                                 ui.badge("AI").classes("bg-purple-600")
+                            media_badge(media.parse_files(m["media_files"]))
                         ui.label(m["text"]).classes("text-sm whitespace-pre-wrap")
         all_sw.on("update:model-value", lambda e: render())
         render()
@@ -208,7 +211,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
 
 async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: str = ""):
     """弹出「AI 撰写」框：填创作要求 → 调 LLM 生成 → 直接进待审核。返回 MatchOutcome 或 None。"""
-    with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw]"):
+    with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
         ui.label("AI 按要求撰写回复").classes("text-lg font-bold")
         with ui.card().classes("bg-slate-50 w-full"):
             ui.label("目标推文").classes("text-xs text-gray-500")
@@ -224,16 +227,18 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
             m = extract_must_include(brief.value or "")
             must_lbl.text = ("将强制包含：" + "、".join(m)) if m else "（没检测到链接或 @账号，正文里不会带任何链接/@）"
         brief.on("update:model-value", lambda e: upd()); upd()
+        mf = MediaField([], label="随这条回复一起发的配图 / 视频（选填）", note="AI 只写文字，附件原样带上。")
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
-            ui.button("生成并进待审核", icon="auto_awesome", on_click=lambda: dlg.submit(brief.value or "")).props("color=primary")
+            ui.button("生成并进待审核", icon="auto_awesome", on_click=lambda: dlg.submit((brief.value or "", list(mf.files)))).props("color=primary")
     dlg.open()
-    text = await dlg
-    if text is None:
+    res = await dlg
+    if res is None:
         return None
+    text, files = res
     ui.notify("AI 撰写中…", type="info")
     try:
-        outcome = await run.io_bound(jobs.match.ai_write, target_id, text)
+        outcome = await run.io_bound(jobs.match.ai_write, target_id, text, None, "ai_write", "", files)
     except Exception as e:
         notify_long(f"AI 撰写出错：{e}", ok=False, kind="negative"); return None
     notify_long(("已生成并进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,

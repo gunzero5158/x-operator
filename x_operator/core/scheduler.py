@@ -22,6 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from .. import config
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
+from . import media
 from .compliance import ComplianceGuard
 from .dispatcher import Dispatcher
 from .matcher import MatchEngine
@@ -87,32 +88,35 @@ class Jobs:
         self.scheduler: BackgroundScheduler | None = None   # build_scheduler 里赋值，设置页改节奏时用
         self._sched_lock = threading.Lock()
 
-    def compose_post(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[str | None, int | None, str]:
-        """按计划的内容来源产出正文。返回 (正文, material_id, 说明)；正文为 None 表示失败，说明里是原因。"""
+    def compose_post(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[str | None, int | None, str, list[str]]:
+        """按计划的内容来源产出正文。返回 (正文, material_id, 说明, 附件列表)；正文为 None 表示失败，说明里是原因。
+        附件：固定素材 / 素材池用素材自带的；AI 按主题创作用计划上挂的。"""
         mode = _sp_get(sp, "content_mode", "fixed") or "fixed"
         recent_list = recent_post_texts(conn, sp["account_id"])
         recent = set(recent_list)
         note_parts: list[str] = []
         if mode == "ai_topic":
             brief = (_sp_get(sp, "ai_brief", "") or "").strip()
+            plan_files = media.parse_files(_sp_get(sp, "media_files", "[]"))
             if not brief:
-                return None, None, "计划选了「AI 按主题创作」但没填主题要求，请编辑计划补上"
+                return None, None, "计划选了「AI 按主题创作」但没填主题要求，请编辑计划补上", plan_files
             lang = (_sp_get(sp, "pool_lang", "") or "ja").strip() or "ja"
             try:
                 res = self.llm.write_post(brief, lang, recent_list)
             except LLMError as e:
-                return None, None, f"AI 按主题创作失败：{e}"
-            return res["text"], None, "AI 按主题创作：" + (res.get("reason") or "")
+                return None, None, f"AI 按主题创作失败：{e}", plan_files
+            return res["text"], None, "AI 按主题创作：" + (res.get("reason") or "") + (
+                f"（带{media.describe(plan_files)}）" if plan_files else ""), plan_files
         if mode == "pool":
             mat, note = pick_pool_material(conn, sp, recent)
             if mat is None:
-                return None, None, note
+                return None, None, note, []
             note_parts.append(note)
         else:
             mat = conn.execute("SELECT * FROM materials WHERE id=? AND deleted_at IS NULL", (sp["material_id"],)).fetchone() \
                 if sp["material_id"] else None
             if mat is None:
-                return None, None, "计划绑定的素材已删除或进了回收站，请编辑计划重新选"
+                return None, None, "计划绑定的素材已删除或进了回收站，请编辑计划重新选", []
             note_parts.append("固定素材")
         text = mat["text"]
         if _sp_get(sp, "ai_rewrite", 0):
@@ -124,18 +128,22 @@ class Jobs:
                 note_parts.append(f"AI 改写失败（{str(e)[:80]}），用素材原文")
         if text in recent and not _sp_get(sp, "ai_rewrite", 0):
             note_parts.append(f"⚠ 正文和最近 {RECENT_POST_DAYS} 天内发过的一样，X 可能判定重复而拒绝；建议开「AI 改写变体」")
-        return text, mat["id"], "；".join(note_parts)
+        files = media.parse_files(mat["media_files"])
+        if files:
+            note_parts.append("带" + media.describe(files))
+        return text, mat["id"], "；".join(note_parts), files
 
     def enqueue_from_plan(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[bool, str]:
         """按定时计划生成一条「发帖」队列条目（不提交）。返回 (是否成功, 说明/错误)。"""
-        text, mid, note = self.compose_post(conn, sp)
+        text, mid, note, files = self.compose_post(conn, sp)
         if text is None:
             return False, note
         status = "approved" if sp["auto_approve"] else "pending"
         conn.execute(
             "INSERT INTO review_queue(account_id, action_type, material_id, scheduled_post_id, "
-            "final_text, llm_reason, auto_approve, status, origin, created_at) VALUES (?,'post',?,?,?,?,?,?,'scheduled',?)",
-            (sp["account_id"], mid, sp["id"], text, note, sp["auto_approve"], status, utcnow_iso()))
+            "final_text, final_media_files, llm_reason, auto_approve, status, origin, created_at) "
+            "VALUES (?,'post',?,?,?,?,?,?,?,'scheduled',?)",
+            (sp["account_id"], mid, sp["id"], text, media.dump_files(files), note, sp["auto_approve"], status, utcnow_iso()))
         return True, note
 
     def fire_plan_now(self, sp_id: int) -> tuple[bool, str]:

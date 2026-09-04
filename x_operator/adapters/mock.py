@@ -146,5 +146,8 @@ class MockXClient(XClient):
               media_ids: list[str] | None = None) -> PostResult:
         return PostResult(tweet_id="mock_reply_" + _next_id())
 
+    def upload_media(self, file_path: str, media_type: str, alt_text: str | None = None) -> str:
+        return "mock_media_" + _next_id()
+
     def tweet_exists(self, tweet_id: str) -> bool | None:
         return True

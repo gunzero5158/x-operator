@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
+from ..core import media
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
                      shell, tweet_link)
+from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
 
 ORIGIN_LABEL = {"ai_match": "AI 匹配素材", "manual": "手动选素材", "ai_write": "AI 撰写", "scheduled": "定时计划"}
@@ -96,9 +98,19 @@ def _active_account_options() -> dict:
 
 def _swap_material(item_id: int, material_id: int, text: str) -> None:
     with get_conn() as conn:
-        conn.execute("UPDATE review_queue SET material_id=?, final_text=?, origin='manual', llm_reason='人工换用素材' "
-                     "WHERE id=? AND status='pending'", (material_id, text, item_id))
+        mat = conn.execute("SELECT media_files FROM materials WHERE id=?", (material_id,)).fetchone()
+        conn.execute("UPDATE review_queue SET material_id=?, final_text=?, final_media_files=?, origin='manual', llm_reason='人工换用素材' "
+                     "WHERE id=? AND status='pending'", (material_id, text, mat["media_files"] if mat else "[]", item_id))
         conn.commit()
+
+
+def _set_media(item_id: int, files: list[str]) -> bool:
+    """待审核条目改附件。"""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE review_queue SET final_media_files=? WHERE id=? AND status='pending'",
+                           (media.dump_files(files), item_id))
+        conn.commit()
+    return cur.rowcount > 0
 
 
 def _delete(item_id: int) -> None:
@@ -164,7 +176,7 @@ def register(jobs) -> None:
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, state["dirty"])
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, state["dirty"])
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -191,6 +203,20 @@ def register(jobs) -> None:
                 mid, text = res
                 _swap_material(it["id"], mid, text)
                 ui.notify("已换用所选素材", type="positive")
+                render()
+
+            async def attach_cb(it):
+                state["busy"] += 1
+                try:
+                    files = await _attach_dialog(media.parse_files(it["final_media_files"]))
+                finally:
+                    state["busy"] -= 1
+                if files is None:
+                    return
+                if _set_media(it["id"], files):
+                    ui.notify("附件已更新" if files else "已去掉附件", type="positive")
+                else:
+                    ui.notify("该条目已不是待审核状态", type="warning")
                 render()
 
             async def verify_cb(it):
@@ -234,7 +260,26 @@ def _weighted_len(text: str) -> int:
     return n
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb, dirty: set):
+async def _attach_dialog(initial: list[str]):
+    """改附件的弹窗。返回新列表，取消返回 None。"""
+    with ui.dialog() as dlg, ui.card().classes("w-[640px] max-w-[95vw] max-h-[92vh] overflow-auto"):
+        ui.label("这条的配图 / 视频").classes("text-lg font-bold")
+        mf = MediaField(initial, note="发送时用这条的发送账号上传。")
+
+        def ok():
+            err = media.check_set(mf.files)
+            if err:
+                ui.notify(err, type="negative"); return
+            dlg.submit(list(mf.files))
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
+            ui.button("保存附件", icon="save", on_click=ok).props("color=primary")
+    dlg.open()
+    return await dlg
+
+
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
+    files = media.parse_files(it["final_media_files"])
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
             if it["status"] == "pending":
@@ -253,6 +298,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, dirty: set):
                 "bg-purple-600" if origin == "ai_write" else ("bg-teal-600" if origin == "manual" else "bg-slate-500"))
             if it["is_auto_translated"]:
                 ui.badge("自动翻译，请重点检查").classes("bg-yellow-600")
+            media_badge(files)
             if "http://" in (it["final_text"] or "") or "https://" in (it["final_text"] or ""):
                 ui.badge("含链接（官方 API 计费约 $0.20；外链回复易被折叠）").classes("bg-gray-500")
             ui.label(f"#{it['id']} · {fmt_time(it['created_at'])}").classes("text-xs text-gray-400")
@@ -289,10 +335,13 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, dirty: set):
                     dirty.discard(it["id"])
         ta.on("update:model-value", lambda e: update_len())
         update_len()
+        media_strip(files)
 
         with ui.row().classes("gap-2 items-center flex-wrap"):
             if it["status"] == "pending":
                 ui.button("批准", icon="check", on_click=lambda: _approve(it["id"], ta.value, refresh)).props("color=primary")
+                ui.button("附件" if not files else f"附件（{len(files)}）", icon="attach_file", on_click=lambda: attach_cb(it)).props("outline") \
+                    .tooltip("给这条加 / 换 / 去掉配图和视频")
                 if it["action_type"] == "reply":
                     ui.button("换素材", icon="swap_horiz", on_click=lambda: swap_cb(it)).props("outline").tooltip("从素材库另选一条替换当前文案")
                 ui.button("跳过", on_click=lambda: _skip(it["id"], refresh)).props("outline")

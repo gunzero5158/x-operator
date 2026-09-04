@@ -63,6 +63,10 @@ _ADDED_COLUMNS = [
     # v10：规则来源可选关键词搜索 / 某账号的推荐流 / 关注流
     ("search_rules", "source_kind", "TEXT NOT NULL DEFAULT 'search'"),
     ("search_rules", "feed_account_id", "INTEGER"),
+    # v11：附件（配图 / 视频）——存本地相对路径的 JSON 列表，发送时再上传
+    ("materials", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
+    ("review_queue", "final_media_files", "TEXT NOT NULL DEFAULT '[]'"),
+    ("scheduled_posts", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 

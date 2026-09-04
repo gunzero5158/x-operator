@@ -19,6 +19,7 @@ from typing import Literal
 from .. import config
 from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
+from . import media
 from .accounts import choose_reply_account
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
@@ -149,7 +150,8 @@ class MatchEngine:
                 "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + str(decision.get("reason") or "") + lang_note
         if acc_note:
             reason += f"｜{acc_note}"
-        qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match")
+        qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match",
+                            media_files=media.parse_files(chosen["media_files"]))
         return MatchOutcome("queued", qid, reason)
 
     # ---------------- 手动路线 ----------------
@@ -165,12 +167,13 @@ class MatchEngine:
             return MatchOutcome("no_match", None, "素材不存在或已在回收站")
         final = (text or "").strip() or mat["text"]
         reason = "人工选定素材" + (f"｜{acc_note}" if acc_note else "")
-        qid = self._enqueue(account["id"], target["id"], mat["id"], final, reason, 1.0, origin="manual")
+        qid = self._enqueue(account["id"], target["id"], mat["id"], final, reason, 1.0, origin="manual",
+                            media_files=media.parse_files(mat["media_files"]))
         return MatchOutcome("queued", qid, f"已按你选的素材生成待审核条目（{acc_note}）" if acc_note else "已按你选的素材生成待审核条目")
 
     def ai_write(self, target_id: int, brief: str, account: sqlite3.Row | None = None,
-                 origin: str = "ai_write", acc_note: str = "") -> MatchOutcome:
-        """按创作要求让 LLM 现写回复 → 进待审核。account 不传时按来源规则的「回复账号」选。"""
+                 origin: str = "ai_write", acc_note: str = "", media_files: list[str] | None = None) -> MatchOutcome:
+        """按创作要求让 LLM 现写回复 → 进待审核。account 不传时按来源规则的「回复账号」选；media_files 是随回复一起发的附件。"""
         target, account, err, note = self._prepare(target_id, account)
         if err:
             return MatchOutcome("no_match", None, err)
@@ -187,7 +190,8 @@ class MatchEngine:
         reason = "AI 按创作要求撰写" + (f"（已强制包含：{'、'.join(must)}）" if must else "") + "：" + (res.get("reason") or "")
         if acc_note:
             reason += f"｜{acc_note}"
-        qid = self._enqueue(account["id"], target["id"], None, res["reply_text"], reason, 0.9, origin=origin)
+        qid = self._enqueue(account["id"], target["id"], None, res["reply_text"], reason, 0.9, origin=origin,
+                            media_files=media_files)
         return MatchOutcome("queued", qid, reason)
 
     def rematch(self, target_id: int) -> MatchOutcome:
@@ -227,16 +231,16 @@ class MatchEngine:
         return target, reply_acc, "", note
 
     def _enqueue(self, account_id: int, target_id: int, material_id: int | None, text: str,
-                 reason: str, confidence: float, origin: str) -> int:
+                 reason: str, confidence: float, origin: str, media_files: list[str] | None = None) -> int:
         ttl_hours = config.get_int("reply_ttl_hours", 48)
         expires_at = to_iso(datetime.now(timezone.utc) + timedelta(hours=ttl_hours))
         with get_conn() as conn:
             cur = conn.execute(
                 "INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, "
-                "final_text, llm_reason, llm_confidence, status, expires_at, origin, created_at) "
-                "VALUES (?, 'reply', ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
-                (account_id, target_id, material_id, text, reason, min(max(confidence, 0.0), 1.0),
-                 expires_at, origin, utcnow_iso()),
+                "final_text, final_media_files, llm_reason, llm_confidence, status, expires_at, origin, created_at) "
+                "VALUES (?, 'reply', ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (account_id, target_id, material_id, text, media.dump_files(media_files), reason,
+                 min(max(confidence, 0.0), 1.0), expires_at, origin, utcnow_iso()),
             )
             qid = cur.lastrowid
             conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=?", (target_id,))

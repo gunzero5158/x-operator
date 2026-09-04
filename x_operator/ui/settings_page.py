@@ -261,15 +261,21 @@ _OFFICIAL_FIELDS = [
     ("bearer_token", "Bearer Token（选填）", True),
     ("proxy", "代理（留空=自动用系统代理；填 direct 强制直连）", False),
 ]
-_UNOFFICIAL_FIELDS = [
-    ("auth_token", "Cookie: auth_token（方式一）", True),
-    ("ct0", "Cookie: ct0（方式一）", True),
-    ("username", "用户名 @handle 或邮箱（方式二）", False),
-    ("password", "密码（方式二）", True),
-    ("totp_secret", "两步验证 TOTP 密钥（方式二，开了 2FA 必填）", True),
-    ("email", "邮箱（方式二选填：X 要求二次确认身份时用）", False),
+# 非官方通道的凭据分三组：方式一（Cookie）、方式二（密码登录）、公共（代理）。界面上二选一显示，避免误以为两种都要填
+_COOKIE_FIELDS = [
+    ("auth_token", "auth_token（40 位）", True),
+    ("ct0", "ct0（32 或 160 位）", True),
+]
+_PASSWORD_FIELDS = [
+    ("username", "用户名 @handle（不带 @）或登录邮箱", False),
+    ("password", "登录密码", True),
+    ("totp_secret", "两步验证 TOTP 密钥（开了 2FA 必填）", True),
+    ("email", "邮箱（选填：X 要求二次确认身份时用）", False),
+]
+_COMMON_FIELDS = [
     ("proxy", "代理（留空=自动用系统代理；填 direct 强制直连）", False),
 ]
+_UNOFFICIAL_FIELDS = _COOKIE_FIELDS + _PASSWORD_FIELDS + _COMMON_FIELDS
 
 _COOKIE_GUIDE = """
 **方式一：从浏览器复制 Cookie（最稳，推荐）**
@@ -406,9 +412,40 @@ def _accounts_panel():
                 with ui.expansion("怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）",
                                   icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
                     ui.markdown(_COOKIE_GUIDE).classes("text-xs")
-                ui.label("方式一（Cookie）和方式二（密码+2FA）填一种即可；两种都填时优先用 Cookie，Cookie 失效自动用方式二重新登录。"
-                         ).classes("text-xs text-gray-500")
-                for k, label, secret in _UNOFFICIAL_FIELDS:
+                has_cookie = bool(creds.get("auth_token"))
+                has_pw = bool(creds.get("username") or creds.get("password"))
+                ui.label("下面两种登录方式选一种填就行（不用两种都填）：").classes("text-sm font-semibold mt-1")
+                method = ui.toggle({"cookie": "方式一：从浏览器复制 Cookie（推荐）", "password": "方式二：账号密码 + 两步验证"},
+                                   value=("password" if (has_pw and not has_cookie) else "cookie")).props("no-caps spread").classes("w-full")
+                cookie_box = ui.card().classes("w-full gap-1 border-2 border-emerald-500 bg-emerald-50/40")
+                with cookie_box:
+                    ui.label("方式一：浏览器 Cookie").classes("font-semibold text-emerald-700")
+                    ui.label("在浏览器里登录这个小号后，按上面步骤复制两个 Cookie 值粘过来。最稳，一般能用几个月；失效了重新复制一次。"
+                             ).classes("text-xs text-gray-600")
+                    for k, label, secret in _COOKIE_FIELDS:
+                        cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                                                  password_toggle_button=secret).classes("w-full").props("outlined dense")
+                pw_box = ui.card().classes("w-full gap-1 border-2 border-amber-500 bg-amber-50/40")
+                with pw_box:
+                    ui.label("方式二：账号密码 + 两步验证密钥").classes("font-semibold text-amber-700")
+                    ui.label("程序自己去登录，Cookie 失效时也能自动续。开了两步验证的账号必须填 TOTP 密钥；X 要邮箱验证码的话这条路走不通，改用方式一。"
+                             ).classes("text-xs text-gray-600")
+                    for k, label, secret in _PASSWORD_FIELDS:
+                        cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                                                  password_toggle_button=secret).classes("w-full").props("outlined dense")
+                other_note = ui.label("").classes("text-xs text-gray-500")
+
+                def sync_method():
+                    cookie_box.set_visibility(method.value == "cookie")
+                    pw_box.set_visibility(method.value != "cookie")
+                    if method.value == "cookie" and has_pw:
+                        other_note.text = "（方式二的账号密码也已保存：Cookie 失效时会自动用它重新登录）"
+                    elif method.value != "cookie" and has_cookie:
+                        other_note.text = "（方式一的 Cookie 也已保存，会优先用 Cookie；登录成功后 Cookie 会自动更新）"
+                    else:
+                        other_note.text = ""
+                method.on("update:model-value", lambda e: sync_method()); sync_method()
+                for k, label, secret in _COMMON_FIELDS:
                     cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
 
@@ -477,6 +514,9 @@ def _accounts_panel():
                     if (creds_now.get("username") and not creds_now.get("password")) or \
                        (creds_now.get("password") and not creds_now.get("username")):
                         ui.notify("方式二需要用户名和密码都填", type="negative"); return
+                    if method.value == "cookie" and not creds_now.get("auth_token") and not creds_now.get("username"):
+                        ui.notify("方式一要把 auth_token 和 ct0 两个都粘进来（或切到方式二填账号密码）。现在先保存也行，之后再补",
+                                  type="warning", multi_line=True)
                 ok = save_account(collect(), creds_now, existing["id"] if existing else None)
                 if ok:
                     dlg.close(); render()

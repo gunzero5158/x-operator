@@ -9,8 +9,17 @@ import sqlite3
 
 from nicegui import run, ui
 
+from ..core import media
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, shell
+from .media_widget import MediaField, media_badge, media_strip
+
+# 标签配色：一眼分清「干什么用的」（类型）、「现在能不能用」（状态）、「谁写的」
+KIND_BADGE = {"reply": ("回复", "bg-indigo-600", "回复素材：用在别人的推文下面（自动匹配 / 换素材 时从这里挑）"),
+              "post": ("发帖", "bg-orange-600", "发帖素材：自己账号发的主贴（定时计划 从这里挑）")}
+STATUS_BADGE = {"active": ("启用", "bg-green-600", "启用：会被匹配 / 定时计划选中"),
+                "draft": ("草稿", "bg-amber-500", "草稿：还没启用，不会被选中"),
+                "archived": ("归档", "bg-gray-500", "归档：保留但不再参与匹配")}
 
 
 def _load(kind_filter: str, status_filter: str, trash: bool):
@@ -31,14 +40,15 @@ def _trash_count() -> int:
         return conn.execute("SELECT COUNT(*) AS c FROM materials WHERE deleted_at IS NOT NULL").fetchone()["c"]
 
 
-def _save(mid, kind, text, lang, tags, status):
+def _save(mid, kind, text, lang, tags, status, files=None):
+    mf = media.dump_files(files)
     with get_conn() as conn:
         if mid:
-            conn.execute("UPDATE materials SET kind=?, text=?, lang=?, scenario_tags=?, status=? WHERE id=?",
-                         (kind, text, lang, tags, status, mid))
+            conn.execute("UPDATE materials SET kind=?, text=?, lang=?, scenario_tags=?, status=?, media_files=? WHERE id=?",
+                         (kind, text, lang, tags, status, mf, mid))
         else:
-            conn.execute("INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) "
-                         "VALUES (?,?,?,?,?,'human')", (kind, text, lang, tags, status))
+            conn.execute("INSERT INTO materials(kind, text, lang, scenario_tags, status, media_files, created_by) "
+                         "VALUES (?,?,?,?,?,?,'human')", (kind, text, lang, tags, status, mf))
         conn.commit()
 
 
@@ -106,6 +116,16 @@ def register(jobs) -> None:
                     new_btn = ui.button("新建素材", icon="add", on_click=lambda: _edit_dialog(None, render)).props("color=primary")
 
             hint = ui.label("").classes("text-xs text-gray-400")
+            with ui.row().classes("items-center gap-2 flex-wrap") as legend:
+                ui.label("标签说明：").classes("text-xs text-gray-500")
+                for _k, (_t, _c, _tip) in KIND_BADGE.items():
+                    ui.badge(_t).classes(_c).tooltip(_tip)
+                ui.label("= 用途").classes("text-xs text-gray-400 mr-2")
+                for _k, (_t, _c, _tip) in STATUS_BADGE.items():
+                    ui.badge(_t).classes(_c).tooltip(_tip)
+                ui.label("= 状态").classes("text-xs text-gray-400 mr-2")
+                ui.badge("AI").classes("bg-purple-600"); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
+                ui.badge("📎 附件").classes("bg-pink-600"); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-2")
 
             def toggle_trash():
@@ -141,6 +161,7 @@ def register(jobs) -> None:
                     trash_btn.props(remove="color=negative")
                 title.text = "素材库 · 回收站" if trash else "素材库"
                 status_f.set_visibility(not trash)
+                legend.set_visibility(not trash)
                 new_btn.set_visibility(not trash)
                 ai_btn.set_visibility(not trash)
                 hint.text = ("回收站里的素材不会被匹配引擎使用；可恢复或彻底删除。" if trash
@@ -155,13 +176,16 @@ def register(jobs) -> None:
                         return
                     for m in rows:
                         with ui.card().classes("w-full" + (" bg-red-50" if trash else "")):
+                            files = media.parse_files(m["media_files"])
                             with ui.row().classes("items-center gap-2"):
-                                ui.badge("回复" if m["kind"] == "reply" else "发帖").classes("bg-blue-600")
-                                ui.badge(m["lang"]).classes("bg-slate-500")
-                                ui.badge({"active": "启用", "draft": "草稿", "archived": "归档"}.get(m["status"], m["status"])) \
-                                    .classes("bg-green-600" if m["status"] == "active" else "bg-gray-500")
+                                kt, kc, ktip = KIND_BADGE.get(m["kind"], (m["kind"], "bg-slate-500", ""))
+                                ui.badge(kt).classes(kc).tooltip(ktip)
+                                ui.badge(m["lang"]).classes("bg-slate-500").tooltip("语言")
+                                st, sc, stip = STATUS_BADGE.get(m["status"], (m["status"], "bg-gray-500", ""))
+                                ui.badge(st).classes(sc).tooltip(stip)
                                 if m["created_by"] == "ai":
-                                    ui.badge("AI").classes("bg-purple-600")
+                                    ui.badge("AI").classes("bg-purple-600").tooltip("由「AI 生成素材」写的")
+                                media_badge(files)
                                 if m["translation_group_id"]:
                                     ui.badge(f"翻译组 #{m['translation_group_id']}").classes("bg-teal-600")
                                 ui.label(f"用 {m['usage_count']} 次").classes("text-xs text-gray-400")
@@ -170,6 +194,7 @@ def register(jobs) -> None:
                                 if trash:
                                     ui.label(f"删除于 {fmt_time(m['deleted_at'])}").classes("text-xs text-red-400")
                             ui.label(m["text"]).classes("text-sm whitespace-pre-wrap")
+                            media_strip(files)
                             with ui.row().classes("gap-2"):
                                 if trash:
                                     ui.button("恢复", icon="restore", on_click=lambda mm=m: (_restore(mm["id"]), ui.notify("已恢复", type="positive"), render())).props("flat")
@@ -187,7 +212,7 @@ def register(jobs) -> None:
             render()
 
     def _edit_dialog(m, refresh):
-        with ui.dialog() as dialog, ui.card().classes("min-w-96"):
+        with ui.dialog() as dialog, ui.card().classes("w-[640px] max-w-[95vw] max-h-[92vh] overflow-auto"):
             ui.label("编辑素材" if m else "新建素材").classes("text-lg font-bold")
             kind = ui.select({"reply": "回复", "post": "发帖"}, value=m["kind"] if m else "reply", label="类型").classes("w-full").props("outlined")
             lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").classes("w-full").props("outlined")
@@ -195,12 +220,17 @@ def register(jobs) -> None:
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
                                value=m["status"] if m else "active", label="状态").classes("w-full").props("outlined")
+            mf = MediaField(media.parse_files(m["media_files"]) if m else [],
+                            note="这条素材被用来回复或发帖时，附件会一起发出去。")
 
             def do_save():
                 if not text.value.strip():
                     ui.notify("正文不能为空", type="negative"); return
+                err = media.check_set(mf.files)
+                if err:
+                    ui.notify(err, type="negative"); return
                 _save(m["id"] if m else None, kind.value, text.value.strip(), lang.value,
-                      tags.value.strip(), status.value)
+                      tags.value.strip(), status.value, mf.files)
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 
             with ui.row():

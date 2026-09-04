@@ -404,7 +404,8 @@ class OfficialXClient(XClient):
             auth = t.OAuth1UserHandler(self.creds["consumer_key"].strip(), self.creds["consumer_secret"].strip(),
                                        self.creds["access_token"].strip(), self.creds["access_token_secret"].strip())
             api = t.API(auth, proxy=self.proxy_used) if self.proxy_used else t.API(auth)
-            media = api.media_upload(file_path)
+            category = {"video": "tweet_video", "gif": "tweet_gif"}.get(media_type, "tweet_image")
+            media = api.media_upload(file_path, chunked=(media_type in ("video", "gif")), media_category=category)
             if alt_text:
                 try:
                     api.create_media_metadata(media.media_id_string, alt_text)
@@ -908,7 +909,9 @@ class UnofficialXClient(XClient):
 
     def upload_media(self, file_path: str, media_type: str, alt_text: str | None = None) -> str:
         try:
-            return str(self._call(lambda: self._client.upload_media(file_path, wait_for_completion=True), "上传媒体"))
+            category = {"video": "tweet_video", "gif": "tweet_gif"}.get(media_type, "tweet_image")
+            return str(self._call(lambda: self._client.upload_media(file_path, wait_for_completion=True,
+                                                                    media_category=category), "上传媒体"))
         except XClientError as e:
             raise MediaError(f"媒体上传失败：{e}", raw=e)
 

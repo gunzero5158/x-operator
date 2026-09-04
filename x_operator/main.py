@@ -10,6 +10,7 @@ from pathlib import Path
 import tomllib
 from nicegui import app, ui
 
+from .core import media
 from .core.scheduler import Jobs, build_scheduler, run_startup_recovery
 from .db.database import init_db
 from .ui import (dashboard, materials, queue, rules, schedule, settings_page,
@@ -43,6 +44,15 @@ def main() -> None:
     db_path = data_dir / "x_operator.db"
     init_db(db_path, setting_overrides=conf.get("defaults") or {})
     log.info("数据库就绪：%s", db_path)
+    # 附件（配图/视频）存在 data/media/，页面里预览用
+    app.add_static_files("/media", str(media.media_dir()))
+
+    try:
+        n = media.sweep_orphans()
+        if n:
+            log.info("已清理 %d 个没有记录引用的附件文件", n)
+    except Exception:
+        log.exception("清理附件孤儿文件失败（不影响运行）")
 
     jobs = Jobs()
     msgs = run_startup_recovery(jobs)

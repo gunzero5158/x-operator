@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # 定时计划表单独拎出来：v9 要把 material_id 改成可空（素材池 / AI 主题模式不绑固定素材），SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
     pool_tags      TEXT    NOT NULL DEFAULT '',
     ai_rewrite     INTEGER NOT NULL DEFAULT 0 CHECK (ai_rewrite IN (0,1)),
     ai_brief       TEXT    NOT NULL DEFAULT '',
+    media_files    TEXT    NOT NULL DEFAULT '[]',
     schedule_type  TEXT    NOT NULL CHECK (schedule_type IN ('once','daily','weekly','cron')),
     schedule_expr  TEXT    NOT NULL,
     next_run_at    TEXT,
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS materials (
     translation_group_id INTEGER,
     scenario_tags        TEXT    NOT NULL DEFAULT '',
     media_ids            TEXT    NOT NULL DEFAULT '[]',
+    media_files          TEXT    NOT NULL DEFAULT '[]',
     created_by           TEXT    NOT NULL DEFAULT 'human' CHECK (created_by IN ('human','ai')),
     status               TEXT    NOT NULL DEFAULT 'draft'
                          CHECK (status IN ('draft','active','archived')),
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS review_queue (
     scheduled_post_id INTEGER REFERENCES scheduled_posts(id),
     final_text        TEXT    NOT NULL,
     final_media_ids   TEXT    NOT NULL DEFAULT '[]',
+    final_media_files TEXT    NOT NULL DEFAULT '[]',
     llm_reason        TEXT    NOT NULL DEFAULT '',
     llm_confidence    REAL    CHECK (llm_confidence BETWEEN 0 AND 1),
     is_auto_translated INTEGER NOT NULL DEFAULT 0 CHECK (is_auto_translated IN (0,1)),

@@ -9,11 +9,13 @@ from datetime import datetime, timezone
 
 from nicegui import run, ui
 
+from ..core import media
 from ..core.schedule_calc import compute_next_run
 from ..core.scheduler import POST_MODE_LABEL
 from ..core.search import LANG_LABEL
 from ..db.database import get_conn, to_iso, utcnow_iso
 from .layout import confirm, fmt_time, shell
+from .media_widget import MediaField, media_badge
 from .pickers import hint, template_controls
 
 _TYPE_LABEL = {"once": "一次", "daily": "每天", "weekly": "每周", "cron": "cron"}
@@ -73,7 +75,7 @@ def register(jobs) -> None:
                 body.clear()
                 with get_conn() as conn:
                     rows = conn.execute(
-                        "SELECT sp.*, a.handle AS acc_handle, m.text AS mat_text, m.deleted_at AS mat_deleted "
+                        "SELECT sp.*, a.handle AS acc_handle, m.text AS mat_text, m.deleted_at AS mat_deleted, m.media_files AS mat_media "
                         "FROM scheduled_posts sp JOIN accounts a ON a.id=sp.account_id "
                         "LEFT JOIN materials m ON m.id=sp.material_id ORDER BY sp.id").fetchall()
                 with body:
@@ -94,6 +96,7 @@ def register(jobs) -> None:
                                     ui.badge("自动批准").classes("bg-red-600")
                                 if mode == "fixed" and sp["mat_deleted"]:
                                     ui.badge("素材已在回收站").classes("bg-amber-500")
+                                media_badge(media.parse_files(sp["mat_media"] if mode == "fixed" else (sp["media_files"] if mode == "ai_topic" else None)))
                                 ui.label(f"下次 {fmt_time(sp['next_run_at']) if sp['next_run_at'] else '—'}"
                                          + (f" · 上次 {fmt_time(sp['last_run_at'])}" if sp["last_run_at"] else "")).classes("text-xs text-gray-400")
                             if mode == "fixed":
@@ -162,6 +165,8 @@ def register(jobs) -> None:
                 brief = ui.textarea("主题要求", value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow")
                 hint(HINTS["brief"])
                 template_controls(brief)
+                mf = MediaField(media.parse_files(sp["media_files"]) if sp else [], label="每次随帖一起发的配图 / 视频（选填）",
+                                note="固定素材 / 素材池模式的附件跟着素材走，在素材库里给素材加。")
 
             def sync():
                 m = mode.value
@@ -184,6 +189,8 @@ def register(jobs) -> None:
                     ui.notify("固定素材模式要选一条发帖素材", type="negative"); return
                 if m == "ai_topic" and not (brief.value or "").strip():
                     ui.notify("AI 按主题创作要填主题要求", type="negative"); return
+                if m == "ai_topic" and media.check_set(mf.files):
+                    ui.notify(media.check_set(mf.files), type="negative"); return
                 if (m == "ai_topic" or (rewrite.value and m in ("fixed", "pool"))) and not jobs.llm.configured:
                     ui.notify("AI 创作 / AI 改写需要先到「设置 → LLM」配置网关（或先关掉「AI 改写变体」）", type="negative", multi_line=True); return
                 if m == "pool":
@@ -223,20 +230,21 @@ def register(jobs) -> None:
                             pool_tags=(pool_tags.value or "").strip() if m == "pool" else "",
                             ai_rewrite=1 if (rewrite.value and m in ("fixed", "pool")) else 0,
                             ai_brief=(brief.value or "").strip() if m == "ai_topic" else "",
+                            media_files=media.dump_files(mf.files if m == "ai_topic" else []),
                             schedule_type=stype.value, schedule_expr=expr.value.strip(), next_run_at=nxt_s,
                             auto_approve=1 if auto.value else 0)
                 with get_conn() as conn:
                     if sp:
                         conn.execute(
                             "UPDATE scheduled_posts SET account_id=:account_id, material_id=:material_id, content_mode=:content_mode, "
-                            "pool_lang=:pool_lang, pool_tags=:pool_tags, ai_rewrite=:ai_rewrite, ai_brief=:ai_brief, "
+                            "pool_lang=:pool_lang, pool_tags=:pool_tags, ai_rewrite=:ai_rewrite, ai_brief=:ai_brief, media_files=:media_files, "
                             "schedule_type=:schedule_type, schedule_expr=:schedule_expr, next_run_at=:next_run_at, "
                             "auto_approve=:auto_approve, status='active', last_error=NULL WHERE id=:id", {**data, "id": sp["id"]})
                     else:
                         conn.execute(
-                            "INSERT INTO scheduled_posts(account_id, material_id, content_mode, pool_lang, pool_tags, ai_rewrite, ai_brief, "
+                            "INSERT INTO scheduled_posts(account_id, material_id, content_mode, pool_lang, pool_tags, ai_rewrite, ai_brief, media_files, "
                             "schedule_type, schedule_expr, next_run_at, auto_approve, status, created_at) "
-                            "VALUES (:account_id, :material_id, :content_mode, :pool_lang, :pool_tags, :ai_rewrite, :ai_brief, "
+                            "VALUES (:account_id, :material_id, :content_mode, :pool_lang, :pool_tags, :ai_rewrite, :ai_brief, :media_files, "
                             ":schedule_type, :schedule_expr, :next_run_at, :auto_approve, 'active', :created_at)",
                             {**data, "created_at": utcnow_iso()})
                     conn.commit()

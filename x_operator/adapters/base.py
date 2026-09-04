@@ -133,7 +133,8 @@ class XClient(ABC):
 
     def upload_media(self, file_path: str, media_type: str,
                      alt_text: str | None = None) -> str:
-        raise MediaError("MVP 暂不支持媒体上传")
+        """上传附件，返回本账号当次有效的 media_id。media_type：image / gif / video。"""
+        raise MediaError("该通道不支持上传附件")
 
     def tweet_exists(self, tweet_id: str) -> bool | None:
         """发送后核实：True=在 X 上能查到；False=查不到（被删/被限制）；None=无法判断。"""

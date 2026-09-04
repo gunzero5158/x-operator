@@ -19,9 +19,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from ..adapters import factory
-from ..adapters.base import (AuthExpired, DuplicateContent, NetworkError, PermissionDenied,
+from ..adapters.base import (AuthExpired, DuplicateContent, MediaError, NetworkError, PermissionDenied,
                              PostResult, RateLimited, TargetNotFound, XClientError)
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
+from . import media
 from .compliance import ComplianceGuard
 
 log = logging.getLogger("x_operator.dispatcher")
@@ -158,11 +159,17 @@ class Dispatcher:
             if tgt is None:
                 self._set_status(item["id"], "failed", error_msg="目标推文记录已不存在")
                 return False
+        files = media.parse_files(item["final_media_files"] if "final_media_files" in item.keys() else None)
         try:
+            # 附件：发送前才用本账号上传（media_id 只对上传的账号有效且很快过期）
+            media_ids = media.upload_all(client, files) if files else []
             if tgt is not None:
-                res = client.reply(item["final_text"], tgt["tweet_id"])
+                res = client.reply(item["final_text"], tgt["tweet_id"], media_ids or None)
             else:
-                res = client.post(item["final_text"])
+                res = client.post(item["final_text"], media_ids or None)
+        except MediaError as e:
+            self._set_status(item["id"], "failed", error_msg=str(e))
+            return False
         except AuthExpired as e:
             self._set_account_auth_error(account["id"])
             self._set_status(item["id"], "failed", error_msg=str(e))
