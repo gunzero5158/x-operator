@@ -4,7 +4,7 @@
 一条素材会被不同小号在不同时间反复使用，所以库里存的是本地文件（data/media/ 下的相对路径），
 分发器真正发送前才用「这次发送的账号」把文件上传一遍，拿到当次有效的 media_id。
 
-X 的附件规则（回复和主贴一样）：最多 4 张图；或 1 个 GIF；或 1 个视频；不能混搭。
+X 的附件规则（回复和主贴一样）：图片、GIF、视频合计最多 4 个，可以混搭（X 2022 年 10 月起支持）。
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ GIF_EXT = {".gif"}
 VIDEO_EXT = {".mp4", ".mov"}
 ALL_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
 
-MAX_IMAGES = 4
+MAX_ITEMS = 4
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 GIF_MAX_BYTES = 15 * 1024 * 1024
 VIDEO_MAX_BYTES = 512 * 1024 * 1024
@@ -31,7 +31,7 @@ KIND_LABEL = {"image": "图片", "gif": "GIF", "video": "视频"}
 MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
         ".gif": "image/gif", ".mp4": "video/mp4", ".mov": "video/quicktime"}
 
-RULE_TEXT = "最多 4 张图片（jpg/png/webp，单张 ≤5MB）；或 1 个 GIF（≤15MB）；或 1 个视频（mp4/mov，≤512MB）。图片、GIF、视频不能混搭。"
+RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB）合计最多 4 个，可以混搭。"
 
 
 def media_dir() -> Path:
@@ -96,14 +96,8 @@ def check_set(files: list[str]) -> str:
     kinds = [media_kind(f) for f in files]
     if any(k is None for k in kinds):
         return "附件里有不支持的文件类型"
-    if not files:
-        return ""
-    if len(set(kinds)) > 1:
-        return "图片、GIF、视频不能混在一条里"
-    if kinds[0] == "image" and len(files) > MAX_IMAGES:
-        return f"图片最多 {MAX_IMAGES} 张"
-    if kinds[0] in ("gif", "video") and len(files) > 1:
-        return f"{KIND_LABEL[kinds[0]]}一条只能带 1 个"
+    if len(files) > MAX_ITEMS:
+        return f"附件合计最多 {MAX_ITEMS} 个"
     return ""
 
 
@@ -121,14 +115,19 @@ def new_rel_path(original_name: str) -> str:
 
 
 def describe(files: list[str]) -> str:
-    """给卡片上显示：「2 张图片」「1 个视频」。"""
+    """给卡片上显示：「2 张图片」「1 个视频」「2 张图片 + 1 个视频」。"""
     files = list(files or [])
     if not files:
         return ""
-    kind = media_kind(files[0]) or "image"
-    if kind == "image":
-        return f"{len(files)} 张图片"
-    return f"1 个{KIND_LABEL[kind]}"
+    counts: dict[str, int] = {}
+    for f in files:
+        k = media_kind(f) or "image"
+        counts[k] = counts.get(k, 0) + 1
+    parts = []
+    for k in ("image", "gif", "video"):
+        if counts.get(k):
+            parts.append(f"{counts[k]} 张图片" if k == "image" else f"{counts[k]} 个{KIND_LABEL[k]}")
+    return " + ".join(parts)
 
 
 def missing(files: list[str]) -> list[str]:

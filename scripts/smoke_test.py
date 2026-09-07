@@ -817,7 +817,8 @@ print("[6f12] 定时发帖内容来源（素材池轮流 / AI 改写 / AI 主题
 from x_operator.core import media as mediam  # noqa: E402
 assert mediam.media_dir() == TMP / "media"
 assert "最多 4" in mediam.check_set([f"a{i}.jpg" for i in range(5)]) and mediam.check_set(["a.jpg", "b.png", "c.webp"]) == ""
-assert "混" in mediam.check_set(["a.jpg", "b.mp4"]) and "1 个" in mediam.check_set(["a.mp4", "b.mp4"]) and "不支持" in mediam.check_set(["a.exe"])
+assert mediam.check_set(["a.jpg", "b.mp4", "c.gif"]) == "" and "最多 4" in mediam.check_set(["a.jpg", "b.mp4", "c.gif", "d.png", "e.jpg"]) and "不支持" in mediam.check_set(["a.exe"])
+assert mediam.describe(["a.jpg", "b.jpg", "c.mp4"]) == "2 张图片 + 1 个视频"
 assert "不支持" in mediam.check_one("x.exe", 10) and "太大" in mediam.check_one("x.jpg", 6 * 1024 * 1024) and mediam.check_one("x.jpg", 1000) == ""
 rel1 = mediam.new_rel_path("photo.JPEG"); rel2 = mediam.new_rel_path("b.png")
 assert mediam.is_safe_rel(rel1) and rel1.endswith(".jpg") and not mediam.is_safe_rel("../x.jpg")
