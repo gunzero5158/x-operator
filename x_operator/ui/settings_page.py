@@ -357,21 +357,21 @@ def _accounts_panel():
                     conn.execute("UPDATE accounts SET is_primary=0")
                 if existing_id:
                     conn.execute(
-                        "UPDATE accounts SET handle=?, display_name=?, access_type=?, is_primary=?, "
+                        "UPDATE accounts SET handle=?, display_name=?, access_type=?, is_primary=?, is_premium=?, "
                         "credentials=?, daily_post_limit=?, daily_reply_limit=?, "
                         "min_interval_sec=?, max_interval_sec=?, active_hours_start=?, active_hours_end=?, "
                         "timezone=?, note=?, status=CASE WHEN status='auth_error' THEN 'active' ELSE status END WHERE id=?",
-                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0,
+                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0, 1 if data.get("is_premium") else 0,
                          creds_json, data["daily_post_limit"], data["daily_reply_limit"],
                          data["min_interval_sec"], data["max_interval_sec"], data["active_start"], data["active_end"],
                          data["timezone"], data["note"], existing_id))
                 else:
                     conn.execute(
-                        "INSERT INTO accounts(handle, display_name, access_type, is_primary, credentials, "
+                        "INSERT INTO accounts(handle, display_name, access_type, is_primary, is_premium, credentials, "
                         "daily_post_limit, daily_reply_limit, min_interval_sec, max_interval_sec, "
                         "active_hours_start, active_hours_end, timezone, note, created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0,
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (handle, data["display_name"], data["access_type"], 1 if data["is_primary"] else 0, 1 if data.get("is_premium") else 0,
                          creds_json, data["daily_post_limit"], data["daily_reply_limit"],
                          data["min_interval_sec"], data["max_interval_sec"], data["active_start"], data["active_end"],
                          data["timezone"], data["note"], utcnow_iso()))
@@ -395,6 +395,10 @@ def _accounts_panel():
                               value=existing["access_type"] if existing else "official", label="通道类型") \
                 .classes("w-full").props("outlined dense")
             primary = ui.switch("设为主号", value=bool(existing["is_primary"]) if existing else False)
+            premium = ui.switch("已订阅 X Premium（会员）", value=bool(existing["is_premium"]) if existing else False)
+            ui.label("影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），"
+                     "超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。"
+                     "请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。").classes("text-xs text-gray-400 -mt-2 mb-1")
 
             # ---- 凭据区：按通道类型显示不同字段 ----
             ui.separator()
@@ -488,6 +492,7 @@ def _accounts_panel():
                     "display_name": dname.value or "",
                     "access_type": atype.value,
                     "is_primary": bool(primary.value),
+                    "is_premium": bool(premium.value),
                     "daily_post_limit": int(post_lim.value or 0),
                     "daily_reply_limit": int(reply_lim.value or 0),
                     "min_interval_sec": int(mn.value or 0),
@@ -596,6 +601,8 @@ def _accounts_panel():
                         ui.badge("官方 API" if a["access_type"] == "official" else "非官方 Cookie").classes("bg-slate-500")
                         if a["is_primary"]:
                             ui.badge("主号 ★").classes("bg-amber-500")
+                        ui.badge("Premium 会员" if a["is_premium"] else "免费账号 · 280 单位").classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
+                            .tooltip("会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写")
                         ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "凭据失效"}.get(a["status"], a["status"])) \
                             .classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
                         ui.badge("凭据已填" if cred_ok else "未填凭据").classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)

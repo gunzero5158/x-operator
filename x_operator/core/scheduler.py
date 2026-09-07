@@ -22,10 +22,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from .. import config
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
-from . import media
+from . import media, textlimit
 from .compliance import ComplianceGuard
 from .dispatcher import Dispatcher
-from .matcher import MatchEngine
+from .matcher import MatchEngine, extract_must_include
 from .monitor import MonitorJob
 from .schedule_calc import compute_next_run
 from .search import SearchJob
@@ -92,6 +92,8 @@ class Jobs:
         """按计划的内容来源产出正文。返回 (正文, material_id, 说明, 附件列表)；正文为 None 表示失败，说明里是原因。
         附件：固定素材 / 素材池用素材自带的；AI 按主题创作用计划上挂的。"""
         mode = _sp_get(sp, "content_mode", "fixed") or "fixed"
+        account = conn.execute("SELECT * FROM accounts WHERE id=?", (sp["account_id"],)).fetchone()
+        limit = textlimit.limit_for(account)
         recent_list = recent_post_texts(conn, sp["account_id"])
         recent = set(recent_list)
         note_parts: list[str] = []
@@ -102,11 +104,12 @@ class Jobs:
                 return None, None, "计划选了「AI 按主题创作」但没填主题要求，请编辑计划补上", plan_files
             lang = (_sp_get(sp, "pool_lang", "") or "ja").strip() or "ja"
             try:
-                res = self.llm.write_post(brief, lang, recent_list)
+                res = self.llm.write_post(brief, lang, recent_list, limit)
             except LLMError as e:
                 return None, None, f"AI 按主题创作失败：{e}", plan_files
-            return res["text"], None, "AI 按主题创作：" + (res.get("reason") or "") + (
-                f"（带{media.describe(plan_files)}）" if plan_files else ""), plan_files
+            text, len_note = textlimit.fit(res["text"], account, self.llm, extract_must_include(brief), lang)
+            return text, None, "AI 按主题创作：" + (res.get("reason") or "") + (
+                f"（带{media.describe(plan_files)}）" if plan_files else "") + (f"；{len_note}" if len_note else ""), plan_files
         if mode == "pool":
             mat, note = pick_pool_material(conn, sp, recent)
             if mat is None:
@@ -121,13 +124,16 @@ class Jobs:
         text = mat["text"]
         if _sp_get(sp, "ai_rewrite", 0):
             try:
-                res = self.llm.rewrite_post(text, mat["lang"], recent_list)
+                res = self.llm.rewrite_post(text, mat["lang"], recent_list, limit)
                 text = res["text"]
                 note_parts.append("AI 改写变体：" + (res.get("reason") or ""))
             except LLMError as e:
                 note_parts.append(f"AI 改写失败（{str(e)[:80]}），用素材原文")
         if text in recent and not _sp_get(sp, "ai_rewrite", 0):
             note_parts.append(f"⚠ 正文和最近 {RECENT_POST_DAYS} 天内发过的一样，X 可能判定重复而拒绝；建议开「AI 改写变体」")
+        text, len_note = textlimit.fit(text, account, self.llm, extract_must_include(text), mat["lang"])
+        if len_note:
+            note_parts.append(len_note)
         files = media.parse_files(mat["media_files"])
         if files:
             note_parts.append("带" + media.describe(files))

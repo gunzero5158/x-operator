@@ -73,7 +73,7 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 12 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 13 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -912,6 +912,69 @@ with get_conn() as conn:
     nxt = parse_iso(conn.execute("SELECT next_run_at FROM scheduled_posts WHERE id=?", (iv_id,)).fetchone()["next_run_at"])
 assert nxt is not None and timedelta(hours=5, minutes=59) < (nxt - before_) < timedelta(hours=6, minutes=1), nxt
 print("[6f15] 定时发帖每隔 N 小时 OK")
+
+# [6f16] 推文长度：X 计数单位（中日韩 2 / 链接 23）；免费账号超限 → AI 缩写（保留必带项）；会员不缩；缩不下来发送前拦下
+from x_operator.core import textlimit  # noqa: E402
+assert textlimit.weighted_len("abc") == 3 and textlimit.weighted_len("你好") == 4 and textlimit.weighted_len("a 你") == 4
+assert textlimit.weighted_len("看 https://example.com/very/long/path/that/is/long") == 2 + 1 + 23
+assert textlimit.weighted_len("😀") == 2 and textlimit.weighted_len("あ" * 140) == 280 and textlimit.over_by("あ" * 141, {"is_premium": 0}) == 2
+assert textlimit.over_by("あ" * 141, {"is_premium": 1}) == 0 and textlimit.limit_for({"is_premium": 1}) == 25000
+long_ja = "長い" * 80 + " @MyBrand"     # 320 + 9 = 329 单位
+# 没配 LLM：原样返回 + 提示
+t_, note_ = textlimit.fit(long_ja, acc, jobs.llm, ["@MyBrand"], "ja"); assert t_ == long_ja and "没配 LLM" in note_, note_
+# 配了 LLM：第一次还是超 → 纠正 → 第二次达标
+lc.httpx.Client = FakeCli; config.set_value("llm_base_url", "http://fake"); config.set_value("llm_api_key", "k")
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "' + "長い" * 75 + ' @MyBrand", "reason": "r"}'), FakeResp('{"text": "短い @MyBrand", "reason": "r2"}')]
+t_, note_ = textlimit.fit(long_ja, acc, jobs.llm, ["@MyBrand"], "ja")
+assert t_ == "短い @MyBrand" and "已让 AI 缩写" in note_ and len(FakeCli.calls) == 2 and "还是太长" in FakeCli.calls[1]["messages"][-1]["content"], (t_, note_)
+assert FakeCli.calls[0]["model"] == "gpt-4o" and "329 单位" in FakeCli.calls[0]["messages"][1]["content"]
+# AI 丢了必带项 → 纠正；两次都不行 → 原样返回 + ⚠
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "短い", "reason": "r"}'), FakeResp('{"text": "短い", "reason": "r"}')]
+t_, note_ = textlimit.fit(long_ja, acc, jobs.llm, ["@MyBrand"], "ja")
+assert t_ == long_ja and "⚠" in note_ and "缺少必须原样保留" in FakeCli.calls[1]["messages"][-1]["content"], note_
+# 会员账号：不缩写、不调 LLM
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET is_premium=1 WHERE id=?", (acc["id"],)); conn.commit()
+    acc_p = conn.execute("SELECT * FROM accounts WHERE id=?", (acc["id"],)).fetchone()
+FakeCli.calls = []
+t_, note_ = textlimit.fit(long_ja, acc_p, jobs.llm, ["@MyBrand"], "ja"); assert t_ == long_ja and note_ == "" and not FakeCli.calls
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET is_premium=0 WHERE id=?", (acc["id"],)); conn.commit()
+# 手动选素材 → 超限自动缩写进队列；AI 撰写的提示里带账号上限
+with get_conn() as conn:
+    conn.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply',?,'ja','active')", (long_ja,))
+    long_mat = conn.execute("SELECT id FROM materials WHERE text=?", (long_ja,)).fetchone()["id"]
+    t4 = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') "
+                      "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
+                      "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "縮めた @MyBrand", "reason": "r"}')]
+out4 = jobs.match.manual_match(t4["id"], long_mat, None, account=acc); assert out4.status == "queued", out4
+with get_conn() as conn:
+    row = conn.execute("SELECT final_text, llm_reason FROM review_queue WHERE id=?", (out4.queue_id,)).fetchone()
+assert row["final_text"] == "縮めた @MyBrand" and "已让 AI 缩写" in row["llm_reason"], dict(row)
+with get_conn() as conn:
+    t5 = conn.execute("SELECT id FROM target_tweets WHERE process_status IN ('filtered','no_match') "
+                      "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
+                      "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
+FakeCli.calls = []; FakeCli.script = [FakeResp('{"reply_text": "ok @MyBrand", "reason": "r"}')]
+out5 = jobs.match.ai_write(t5["id"], "推荐 @MyBrand", account=acc); assert out5.status == "queued", out5
+assert "不超过 280 个单位" in FakeCli.calls[0]["messages"][1]["content"], FakeCli.calls[0]["messages"][1]["content"][-120:]
+# 队列里硬塞一条超长的批准条目 → 分发器发送前拦下、不调发送
+with get_conn() as conn:
+    conn.execute("UPDATE review_queue SET status='skipped' WHERE status IN ('pending','approved')")
+    conn.execute("INSERT INTO review_queue(account_id, action_type, final_text, status, decided_at, created_at) VALUES (?,'post',?,'approved',?,?)",
+                 (acc["id"], "超" * 200, utcnow_iso(), utcnow_iso()))
+    over_id = conn.execute("SELECT id FROM review_queue WHERE final_text LIKE '超超超%'").fetchone()["id"]
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+client = factory.get_client(acc); posted = []
+orig_post = client.post; client.post = lambda text, media_ids=None: (posted.append(text), orig_post(text, media_ids))[1]
+r = jobs.dispatcher.tick()
+with get_conn() as conn:
+    row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (over_id,)).fetchone()
+assert row["status"] == "failed" and "400 单位" in row["error_msg"] and "上限 280" in row["error_msg"] and not posted, (dict(row), posted)
+client.post = orig_post
+lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
+print("[6f16] 推文长度：计数单位 / 免费账号超限 AI 缩写 / 会员不限 / 发送前拦截 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

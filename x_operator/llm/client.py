@@ -41,6 +41,7 @@ SCENE_TIERS: dict[str, tuple[str, str]] = {
     "material_gen": ("strong", "AI 生成素材"),
     "post_rewrite": ("strong", "定时发帖：在素材基础上改写出新变体（避开 X 的重复判定）"),
     "post_write":   ("strong", "定时发帖：AI 按主题要求现写一条推文"),
+    "shorten":      ("strong", "推文超过免费账号长度上限时缩写（要保住意思和必带的链接/@）"),
 }
 TIER_LABEL = {"light": "轻量模型", "strong": "强模型"}
 TIER_SETTING_KEY = {"light": "llm_model_light", "strong": "llm_model_strong"}
@@ -220,12 +221,12 @@ class LLMClient:
         if not self.configured:
             raise LLMError(f"{what}需要 LLM：请先到「设置 → LLM」填好网关 base_url 和 api_key")
 
-    def write_reply(self, tweet_text: str, tweet_lang: str, brief: str, must_include: list[str]) -> dict:
-        """按创作要求为一条推文写回复。返回 {reply_text, reason}；必须包含项缺失会重试一次。"""
+    def write_reply(self, tweet_text: str, tweet_lang: str, brief: str, must_include: list[str], limit: int = 280) -> dict:
+        """按创作要求为一条推文写回复。返回 {reply_text, reason}；必须包含项缺失会重试一次。limit：账号的长度上限（计数单位）。"""
         self._require("AI 撰写回复")
         messages = [
             {"role": "system", "content": prompts.WRITE_SYSTEM},
-            {"role": "user", "content": prompts.write_user(tweet_text, tweet_lang, brief, must_include)},
+            {"role": "user", "content": prompts.write_user(tweet_text, tweet_lang, brief, must_include) + prompts.length_line(limit)},
         ]
         for attempt in range(2):
             obj = self.chat_json("write", messages, required_keys=["reply_text", "reason"], temperature=0.8)
@@ -253,22 +254,42 @@ class LLMClient:
             ]
         raise LLMFormatError(f"{what}：AI 两次都没写出合格的正文" + (f"（缺少：{'、'.join(missing)}）" if missing else ""))
 
-    def rewrite_post(self, text: str, lang: str, recent: list[str] | None = None) -> dict:
+    def rewrite_post(self, text: str, lang: str, recent: list[str] | None = None, limit: int = 280) -> dict:
         """定时发帖：在素材基础上改写一个新变体，保留链接/@。返回 {text, reason}。"""
         self._require("AI 改写变体")
         from ..core.matcher import extract_must_include
         messages = [{"role": "system", "content": prompts.POST_REWRITE_SYSTEM},
-                    {"role": "user", "content": prompts.post_rewrite_user(text, lang, recent or [])}]
+                    {"role": "user", "content": prompts.post_rewrite_user(text, lang, recent or []) + prompts.length_line(limit)}]
         return self._generate_with_must("post_rewrite", messages, extract_must_include(text), "AI 改写变体")
 
-    def write_post(self, brief: str, lang: str, recent: list[str] | None = None) -> dict:
+    def write_post(self, brief: str, lang: str, recent: list[str] | None = None, limit: int = 280) -> dict:
         """定时发帖：按主题要求现写一条推文。返回 {text, reason}。"""
         self._require("AI 按主题创作推文")
         from ..core.matcher import extract_must_include
         must = extract_must_include(brief)
         messages = [{"role": "system", "content": prompts.POST_WRITE_SYSTEM},
-                    {"role": "user", "content": prompts.post_write_user(brief, lang, must, recent or [])}]
+                    {"role": "user", "content": prompts.post_write_user(brief, lang, must, recent or []) + prompts.length_line(limit)}]
         return self._generate_with_must("post_write", messages, must, "AI 按主题创作推文")
+
+    def shorten(self, text: str, lang: str, limit: int, must_include: list[str]) -> dict:
+        """把超长推文缩到 limit 个计数单位以内（中日韩每字 2、链接 23），必带项原样保留。返回 {text, reason}；两次都不达标抛 LLMFormatError。"""
+        self._require("AI 缩写")
+        from ..core.textlimit import weighted_len
+        n = weighted_len(text)
+        messages = [{"role": "system", "content": prompts.SHORTEN_SYSTEM},
+                    {"role": "user", "content": prompts.shorten_user(text, lang, limit, n, must_include)}]
+        for attempt in range(2):
+            obj = self.chat_json("shorten", messages, required_keys=["text", "reason"], temperature=0.4)
+            new = str(obj.get("text") or "").strip()
+            missing = [m for m in must_include if m and m not in new]
+            got = weighted_len(new)
+            if new and not missing and got <= limit:
+                return {"text": new, "reason": str(obj.get("reason") or "")}
+            problem = ("正文为空。" if not new else "") + (f"缺少必须原样保留的：{'、'.join(missing)}。" if missing else "") + \
+                      (f"还是太长：{got} 单位，上限 {limit}，再删掉至少 {got - limit + 10} 个单位。" if got > limit else "")
+            messages = messages + [{"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)},
+                                   {"role": "user", "content": problem + "请再缩，只输出 JSON。"}]
+        raise LLMFormatError(f"AI 两次都没缩到 {limit} 单位以内")
 
     def generate_search_rule(self, description: str) -> dict:
         """自然语言描述 → {name, keywords[], semantic_criteria, langs[]}。"""

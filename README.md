@@ -44,6 +44,7 @@ uv run python -m x_operator.main
   **所有数据（账号、LLM key、规则、素材、模板、抓取记录）都在这一个文件里**，浏览器只是显示窗口——换 IP、换浏览器打开都是同一份；
   换电脑跑要把 `data/` 一起带走。备份 = 复制这个文件。
 - 账号卡片还可设日发帖/回复上限、发送随机间隔、活跃时段与时区——分发器只在活跃时段内、间隔到了才发。
+- **「已订阅 X Premium（会员）」开关**：决定这个账号的推文长度上限（见下面「推文长度」）。请如实勾选。
 
 ## 一条推文的旅程
 
@@ -130,6 +131,17 @@ uv run python -m x_operator.main
     **每天固定时间点**如 `08:00, 20:00`，按所选时区；改完立即生效）、发送分发（每分钟，可单独关掉只手动发）、
     定时发帖计划检查 + 过期清扫（每分钟，始终开）。总开关默认关；表格里显示每项的状态和下次运行时间。
 
+### 推文长度（免费账号 280 单位 ≈ 140 个汉字）
+
+X 按「计数单位」算长度：英文字母/数字/标点每个 1 单位，中日韩文字和 emoji 每个 2 单位，每个链接固定 23 单位；
+**免费账号一条最多 280 单位**（140 个汉字/假名），订阅 Premium 的账号最多 25000。回复和主贴一样。
+
+- 所有生成内容的出口都过同一道检查：匹配素材、手动选素材、AI 撰写、定时发帖（固定素材 / 素材池 / AI 改写 / AI 主题）。
+  发送账号是免费账号且正文超限 → 自动让 AI 缩写（保留链接、@、产品名；两次不达标就原样保留并在说明里标 ⚠）；会员账号不缩写。
+- AI 写作类提示里会按发送账号写明上限，尽量一次写在范围内。
+- 审核队列每条显示「N/280 单位」（会员显示 /25000），换发送账号时上限随之变；超限时红字提示并出现「AI 缩写」按钮，**超限的条目批不了**。
+- 分发器发送前再查一次，超限直接标失败并写明原因，不会把注定被 X 拒绝的请求发出去。
+
 ### 发送保护（防重复、防误停）
 
 - 推文发到 X 之后，程序先把「已发出 + X 的推文 id」写死再做其他记账；程序中断时正在发送、结果未知的条目，重启后标为「失败，请到 X 上确认」，**不会自动重发**。
@@ -178,6 +190,7 @@ uv run python -m x_operator.main
 | AI 生成素材 | 强 | 要写东西 |
 | 定时发帖：AI 改写变体 | 强 | 要换说法还不能丢信息 |
 | 定时发帖：AI 按主题创作 | 强 | 要写东西 |
+| 超长缩写（免费账号超 280 单位时） | 强 | 要在保住意思和链接/@ 的前提下压缩 |
 
 这张表的唯一来源是代码 `x_operator/llm/client.py` 里的 `SCENE_TIERS`：所有 LLM 调用都按它取模型，**没登记的场景直接报错**，
 所以以后加新的 LLM 功能必须先在那里补一行——表不会过期。设置 → LLM 页会把它连同当前填的模型名一起显示出来。
@@ -195,10 +208,10 @@ uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q 
 
 ```
 x_operator/
-  db/         schema.py(DDL v11) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v13) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
-  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/发送前上传)
+  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/发送前上传) textlimit.py(X 计数单位/超限 AI 缩写)
   ui/         layout.py pickers.py(共用弹窗/回复方式字段) media_widget.py(附件上传/缩略图) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
 scripts/      smoke_test.py serve_check.sh ui_dialog_check.py

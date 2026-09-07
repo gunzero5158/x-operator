@@ -99,6 +99,15 @@ async def test_queue_legend(user: User):
     _pages()
     await user.open("/queue")
     await user.should_see("卡片上的标签是什么意思？")
+    await user.should_see("/280 单位")          # 免费账号按 280 单位计
+
+
+async def test_account_dialog_has_premium_switch(user: User):
+    _pages()
+    await user.open("/settings")
+    await user.should_see("免费账号 · 280 单位")
+    user.find("添加账号").click()
+    await user.should_see("已订阅 X Premium（会员）")
 
 
 async def test_account_dialog_methods_are_distinct(user: User):

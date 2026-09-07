@@ -19,7 +19,7 @@ from typing import Literal
 from .. import config
 from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
-from . import media
+from . import media, textlimit
 from .accounts import choose_reply_account
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
@@ -150,6 +150,9 @@ class MatchEngine:
                 "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + str(decision.get("reason") or "") + lang_note
         if acc_note:
             reason += f"｜{acc_note}"
+        reply_text, len_note = textlimit.fit(reply_text, account, self.llm, extract_must_include(reply_text), lang)
+        if len_note:
+            reason += f"｜{len_note}"
         qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match",
                             media_files=media.parse_files(chosen["media_files"]))
         return MatchOutcome("queued", qid, reason)
@@ -167,6 +170,9 @@ class MatchEngine:
             return MatchOutcome("no_match", None, "素材不存在或已在回收站")
         final = (text or "").strip() or mat["text"]
         reason = "人工选定素材" + (f"｜{acc_note}" if acc_note else "")
+        final, len_note = textlimit.fit(final, account, self.llm, extract_must_include(final), target["lang"] or "")
+        if len_note:
+            reason += f"｜{len_note}"
         qid = self._enqueue(account["id"], target["id"], mat["id"], final, reason, 1.0, origin="manual",
                             media_files=media.parse_files(mat["media_files"]))
         return MatchOutcome("queued", qid, f"已按你选的素材生成待审核条目（{acc_note}）" if acc_note else "已按你选的素材生成待审核条目")
@@ -183,14 +189,17 @@ class MatchEngine:
             return MatchOutcome("no_match", None, "请先写创作要求（主题、立场、必须带的链接或 @账号、语气）")
         must = extract_must_include(brief)
         try:
-            res = self.llm.write_reply(target["text"], target["lang"] or "und", brief, must)
+            res = self.llm.write_reply(target["text"], target["lang"] or "und", brief, must, textlimit.limit_for(account))
         except LLMError as e:
             self._mark_no_match(target["id"], f"AI 撰写失败：{e}")
             return MatchOutcome("no_match", None, f"AI 撰写失败：{e}")
         reason = "AI 按创作要求撰写" + (f"（已强制包含：{'、'.join(must)}）" if must else "") + "：" + (res.get("reason") or "")
         if acc_note:
             reason += f"｜{acc_note}"
-        qid = self._enqueue(account["id"], target["id"], None, res["reply_text"], reason, 0.9, origin=origin,
+        reply_text, len_note = textlimit.fit(res["reply_text"], account, self.llm, must, target["lang"] or "")
+        if len_note:
+            reason += f"｜{len_note}"
+        qid = self._enqueue(account["id"], target["id"], None, reply_text, reason, 0.9, origin=origin,
                             media_files=media_files)
         return MatchOutcome("queued", qid, reason)
 

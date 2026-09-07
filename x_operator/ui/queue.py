@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
-from ..core import media
+from ..core import media, textlimit
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
                      shell, tweet_link)
@@ -43,6 +43,10 @@ def _counts() -> dict[str, int]:
 def _approve(item_id: int, text: str, refresh):
     if not (text or "").strip():
         ui.notify("文案不能为空", type="negative"); return
+    with get_conn() as conn:
+        acc = conn.execute("SELECT a.* FROM accounts a JOIN review_queue rq ON rq.account_id=a.id WHERE rq.id=?", (item_id,)).fetchone()
+    if acc is not None and textlimit.over_by(text, acc):
+        ui.notify(textlimit.over_message(text, acc) + "。请删减，或点「AI 缩写」，或换一个 Premium 账号发", type="negative", multi_line=True, close_button=True, timeout=12000); return
     with get_conn() as conn:
         conn.execute("UPDATE review_queue SET final_text=?, status='approved', decided_at=? WHERE id=? AND status='pending'",
                      (text.strip(), utcnow_iso(), item_id))
@@ -92,8 +96,28 @@ def _set_account(item_id: int, account_id: int) -> bool:
 
 def _active_account_options() -> dict:
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, handle, is_primary FROM accounts WHERE status='active' ORDER BY is_primary DESC, id").fetchall()
-    return {a["id"]: f"@{a['handle']}" + ("（主号）" if a["is_primary"] else "") for a in rows}
+        rows = conn.execute("SELECT id, handle, is_primary, is_premium FROM accounts WHERE status='active' ORDER BY is_primary DESC, id").fetchall()
+    return {a["id"]: f"@{a['handle']}" + ("（主号）" if a["is_primary"] else "") + ("（会员）" if a["is_premium"] else "") for a in rows}
+
+
+def _account_limits() -> dict:
+    with get_conn() as conn:
+        return {a["id"]: textlimit.limit_for(a) for a in conn.execute("SELECT id, is_premium FROM accounts").fetchall()}
+
+
+def _shorten(jobs, item_id: int, text: str, account_id: int) -> tuple[str, str]:
+    """审核队列里手动点「AI 缩写」。返回 (新正文, 说明)；失败时新正文为空。"""
+    from ..core.matcher import extract_must_include
+    with get_conn() as conn:
+        acc = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+        lang = (conn.execute("SELECT tt.lang FROM review_queue rq LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id WHERE rq.id=?",
+                             (item_id,)).fetchone() or {"lang": ""})["lang"] or ""
+    new, note = textlimit.fit(text, acc, jobs.llm, extract_must_include(text), lang)
+    if new == text:
+        return "", note or "正文没有超出上限，不需要缩写"
+    with get_conn() as conn:
+        conn.execute("UPDATE review_queue SET final_text=? WHERE id=? AND status='pending'", (new, item_id)); conn.commit()
+    return new, note
 
 
 def _swap_material(item_id: int, material_id: int, text: str) -> None:
@@ -186,7 +210,7 @@ def register(jobs) -> None:
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, state["dirty"])
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"])
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -229,6 +253,15 @@ def register(jobs) -> None:
                     ui.notify("该条目已不是待审核状态", type="warning")
                 render()
 
+            async def shorten_cb(it, text: str, account_id: int):
+                if not jobs.llm.configured:
+                    ui.notify("AI 缩写需要先到「设置 → LLM」配置网关", type="warning"); return
+                ui.notify("AI 缩写中…", type="info")
+                new, note = await run.io_bound(_shorten, jobs, it["id"], text, account_id)
+                notify_long(note, ok=bool(new), kind=None if new else "warning")
+                if new:
+                    state["dirty"].discard(it["id"]); render()
+
             async def verify_cb(it):
                 ui.notify("正在到 X 上回查…", type="info")
                 st = await run.io_bound(jobs.dispatcher.verify_item, it["id"])
@@ -263,13 +296,6 @@ def _status_options() -> dict:
         ({"sending": f"发送中（{c['sending']}）"} if c.get("sending") else {})
 
 
-def _weighted_len(text: str) -> int:
-    n = 0
-    for ch in text:
-        n += 2 if ord(ch) > 0x1100 else 1
-    return n
-
-
 async def _attach_dialog(initial: list[str]):
     """改附件的弹窗。返回新列表，取消返回 None。"""
     with ui.dialog() as dlg, ui.card().classes("w-[640px] max-w-[95vw] max-h-[92vh] overflow-auto"):
@@ -288,8 +314,10 @@ async def _attach_dialog(initial: list[str]):
     return await dlg
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set):
     files = media.parse_files(it["final_media_files"])
+    limits = _account_limits()
+    cur_acc = {"id": it["account_id"]}
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
             if it["status"] == "pending":
@@ -298,8 +326,13 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
                     opts = {it["account_id"]: f"@{it['acc_handle']}（未启用）", **opts}
                 acc_sel = ui.select(opts, value=it["account_id"], label="发送账号").props("dense outlined").classes("w-44") \
                     .tooltip("这条由哪个账号发出；改了就按新账号的间隔/日上限/活跃时段发")
-                acc_sel.on("update:model-value", lambda e: ui.notify("已改用 " + opts.get(acc_sel.value, "") + " 发送", type="positive")
-                           if _set_account(it["id"], int(acc_sel.value)) else ui.notify("该条目已不是待审核状态", type="warning"))
+                def on_acc_change(e):
+                    if _set_account(it["id"], int(acc_sel.value)):
+                        cur_acc["id"] = int(acc_sel.value); update_len()
+                        ui.notify("已改用 " + opts.get(acc_sel.value, "") + " 发送", type="positive")
+                    else:
+                        ui.notify("该条目已不是待审核状态", type="warning")
+                acc_sel.on("update:model-value", on_acc_change)
             else:
                 ui.badge(f"@{it['acc_handle']}").classes("bg-slate-600")
             ui.badge("回复" if it["action_type"] == "reply" else "发帖").classes("bg-blue-600")
@@ -335,16 +368,21 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
         wl_label = ui.label("").classes("text-xs")
 
         def update_len():
-            wl = _weighted_len(ta.value or "")
-            wl_label.text = f"约 {wl}/280 字符"
-            wl_label.classes(replace="text-xs " + ("text-red-500" if wl > 280 else "text-gray-400"))
+            wl = textlimit.weighted_len(ta.value or "")
+            lim = limits.get(cur_acc["id"], textlimit.FREE_LIMIT)
+            over = wl > lim
+            wl_label.text = f"{wl}/{lim} 单位" + ("（会员账号）" if lim >= 1000 else "（中日韩每字 2、链接 23；≈140 个汉字）") + \
+                            ("  ⚠ 超出上限，批准前请删减或点「AI 缩写」" if over else "")
+            wl_label.classes(replace="text-xs " + ("text-red-500" if over else "text-gray-400"))
+            if editable and shorten_btn is not None:
+                shorten_btn.set_visibility(over)
             if editable:
                 if (ta.value or "") != (it["final_text"] or ""):
                     dirty.add(it["id"])
                 else:
                     dirty.discard(it["id"])
         ta.on("update:model-value", lambda e: update_len())
-        update_len()
+        shorten_btn = None
         media_strip(files)
 
         with ui.row().classes("gap-2 items-center flex-wrap"):
@@ -352,6 +390,8 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
                 ui.button("批准", icon="check", on_click=lambda: _approve(it["id"], ta.value, refresh)).props("color=primary")
                 ui.button("附件" if not files else f"附件（{len(files)}）", icon="attach_file", on_click=lambda: attach_cb(it)).props("outline") \
                     .tooltip("给这条加 / 换 / 去掉配图和视频")
+                shorten_btn = ui.button("AI 缩写", icon="compress", on_click=lambda: shorten_cb(it, ta.value or "", cur_acc["id"])).props("outline color=orange") \
+                    .tooltip("让 AI 把正文缩到这个账号的长度上限以内（保留链接和 @）")
                 if it["action_type"] == "reply":
                     ui.button("换素材", icon="swap_horiz", on_click=lambda: swap_cb(it)).props("outline").tooltip("从素材库另选一条替换当前文案")
                 ui.button("跳过", on_click=lambda: _skip(it["id"], refresh)).props("outline")
@@ -366,6 +406,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
                          + (f" · {it['skip_reason']}" if it["skip_reason"] else "")
                          + (f" · 错误：{it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-gray-500")
+        update_len()
         if it["status"] == "sent" and it["sent_tweet_id"]:
             with ui.row().classes("gap-2 items-center flex-wrap"):
                 sid = str(it["sent_tweet_id"])

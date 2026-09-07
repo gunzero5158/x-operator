@@ -67,6 +67,8 @@ _ADDED_COLUMNS = [
     ("materials", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
     ("review_queue", "final_media_files", "TEXT NOT NULL DEFAULT '[]'"),
     ("scheduled_posts", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
+    # v13：账号是否订阅 X Premium（会员不限推文长度；免费账号 280 单位 ≈ 140 个汉字）
+    ("accounts", "is_premium", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

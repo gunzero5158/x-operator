@@ -22,7 +22,7 @@ from ..adapters import factory
 from ..adapters.base import (AuthExpired, DuplicateContent, MediaError, NetworkError, PermissionDenied,
                              PostResult, RateLimited, TargetNotFound, XClientError)
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
-from . import media
+from . import media, textlimit
 from .compliance import ComplianceGuard
 
 log = logging.getLogger("x_operator.dispatcher")
@@ -159,6 +159,10 @@ class Dispatcher:
             if tgt is None:
                 self._set_status(item["id"], "failed", error_msg="目标推文记录已不存在")
                 return False
+        if textlimit.over_by(item["final_text"], account):
+            self._set_status(item["id"], "failed", error_msg=textlimit.over_message(item["final_text"], account)
+                             + "。请在审核队列删减正文或换 Premium 账号后重新处理")
+            return False
         files = media.parse_files(item["final_media_files"] if "final_media_files" in item.keys() else None)
         try:
             # 附件：发送前才用本账号上传（media_id 只对上传的账号有效且很快过期）
