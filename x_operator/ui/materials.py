@@ -1,7 +1,7 @@
 """素材库（design-v1.1 §8.3）：回复/发帖素材的增删改、启用/归档、回收站。
 
 删除 = 软删除进回收站（deleted_at 打时间戳），回收站里可恢复或彻底删除。
-进回收站的素材不会再被匹配引擎选中；引用它的定时计划到点时会自动暂停。
+进回收站的素材不会再被匹配引擎选中；引用它的定时发帖计划到点时会自动暂停。
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from .media_widget import MediaField, media_badge, media_strip
 
 # 标签配色：一眼分清「干什么用的」（类型）、「现在能不能用」（状态）、「谁写的」
 KIND_BADGE = {"reply": ("回复", "bg-indigo-600", "回复素材：用在别人的推文下面（自动匹配 / 换素材 时从这里挑）"),
-              "post": ("发帖", "bg-orange-600", "发帖素材：自己账号发的主贴（定时计划 从这里挑）")}
-STATUS_BADGE = {"active": ("启用", "bg-green-600", "启用：会被匹配 / 定时计划选中"),
+              "post": ("发帖", "bg-orange-600", "发帖素材：自己账号发的主贴（定时发帖计划 从这里挑）")}
+STATUS_BADGE = {"active": ("启用", "bg-green-600", "启用：会被匹配 / 定时发帖计划选中"),
                 "draft": ("草稿", "bg-amber-500", "草稿：还没启用，不会被选中"),
                 "archived": ("归档", "bg-gray-500", "归档：保留但不再参与匹配")}
 
@@ -71,11 +71,11 @@ def _restore(mid: int) -> None:
 
 
 def _hard_delete(mid: int) -> str:
-    """彻底删除。被定时计划引用则拒绝（返回原因）；审核队列里的引用置空后删除。"""
+    """彻底删除。被定时发帖计划引用则拒绝（返回原因）；审核队列里的引用置空后删除。"""
     with get_conn() as conn:
         n = conn.execute("SELECT COUNT(*) AS c FROM scheduled_posts WHERE material_id=?", (mid,)).fetchone()["c"]
         if n:
-            return f"有 {n} 个定时计划引用这条素材，请先到「定时计划」删除对应计划"
+            return f"有 {n} 个定时发帖计划引用这条素材，请先到「定时发帖计划」删除对应计划"
         try:
             conn.execute("UPDATE review_queue SET material_id=NULL WHERE material_id=?", (mid,))
             conn.execute("UPDATE materials SET translation_group_id=NULL WHERE translation_group_id=?", (mid,))
@@ -140,7 +140,7 @@ def register(jobs) -> None:
                     done, kept = _empty_trash()
                     msg = f"已彻底删除 {done} 条"
                     if kept:
-                        msg += f"，{kept} 条因被定时计划引用而保留"
+                        msg += f"，{kept} 条因被定时发帖计划引用而保留"
                     ui.notify(msg, type="positive")
                     render()
 
@@ -218,7 +218,7 @@ def register(jobs) -> None:
             lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").classes("w-full").props("outlined")
             text = ui.textarea("正文", value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
-            ui.label("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            ui.label("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时发帖计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。").classes("text-xs text-gray-400 -mt-2 mb-1")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
                                value=m["status"] if m else "active", label="状态").classes("w-full").props("outlined")
             mf = MediaField(media.parse_files(m["media_files"]) if m else [],

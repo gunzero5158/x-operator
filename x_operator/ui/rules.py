@@ -39,8 +39,8 @@ HINTS = {
 }
 
 
-def _hint(key: str):
-    ui.label(HINTS[key]).classes("text-xs text-gray-400 -mt-2 mb-1")
+def _hint(key: str, after_row: bool = False):
+    ui.label(HINTS[key]).classes("text-xs text-gray-400 mb-1" + ("" if after_row else " -mt-2"))
 
 
 def _save(rid, data: dict):
@@ -220,7 +220,7 @@ def register(jobs) -> None:
                 min_score = ui.number("达标分（0-10）", value=g("min_llm_score", 5), min=0, max=10, step=1).classes("flex-1").props("outlined")
                 max_results = ui.number("每次抓取条数（10-100）", value=g("max_results_per_run", 15), min=10, max=100, step=1).classes("flex-1").props("outlined")
                 lookback = ui.number("首次回溯（小时）", value=g("lookback_hours", 24), min=1, max=720, step=1).classes("flex-1").props("outlined")
-            _hint("min_score"); _hint("max_results"); _hint("lookback")
+            _hint("min_score", after_row=True); _hint("max_results"); _hint("lookback")
             min_views = ui.number("观看量门槛（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("w-full").props("outlined")
             _hint("min_views")
             mode, brief, polish, acc = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0),

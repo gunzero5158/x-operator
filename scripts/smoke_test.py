@@ -73,7 +73,7 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 11 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 12 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -888,6 +888,30 @@ lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); confi
 orphan = mediam.new_rel_path("o.png"); mediam.abs_path(orphan).write_bytes(b"x")
 assert mediam.sweep_orphans() == 1 and not mediam.abs_path(orphan).exists() and mediam.abs_path(rel1).exists()
 print("[6f14] 附件：规则校验 / 素材→队列 / 发送前上传 / 丢文件标失败 / AI 撰写与定时计划带附件 / 孤儿清理 OK")
+
+# [6f15] 定时发帖「每隔 N 小时/分钟」：解析、下次时间 = 现在 + 间隔、v12 后 CHECK 约束接受 interval、旧 cron 仍能算
+from x_operator.core.schedule_calc import compute_next_run, describe_interval, parse_interval  # noqa: E402
+assert parse_interval("6h") == (6, "h") and parse_interval("6") == (6, "h") and parse_interval("90m") == (90, "m") and parse_interval("2 小时") == (2, "h") and parse_interval("30分钟") == (30, "m")
+for bad in ("abc", "5m", "0h", "800h"):
+    try:
+        parse_interval(bad); raise SystemExit(f"应报错：{bad}")
+    except ValueError:
+        pass
+assert describe_interval("6h") == "每隔 6 小时" and describe_interval("90m") == "每隔 90 分钟"
+now_ = datetime(2026, 9, 7, 1, 0, tzinfo=timezone.utc)
+assert compute_next_run("interval", "6h", now_, "Asia/Tokyo") == now_ + timedelta(hours=6)
+assert compute_next_run("interval", "90m", now_, "Asia/Tokyo") == now_ + timedelta(minutes=90)
+assert compute_next_run("cron", "0 21 * * *", now_, "UTC") == now_.replace(hour=21)
+with get_conn() as conn:
+    conn.execute("INSERT INTO scheduled_posts(account_id, content_mode, pool_lang, schedule_type, schedule_expr, next_run_at) "
+                 "VALUES (?,'pool','ja','interval','6h','2020-01-01T00:00:00Z')", (acc["id"],))
+    iv_id = conn.execute("SELECT id FROM scheduled_posts WHERE schedule_type='interval'").fetchone()["id"]; conn.commit()
+before_ = datetime.now(timezone.utc)
+n = jobs.run_scheduled_posts(); assert n >= 1, n
+with get_conn() as conn:
+    nxt = parse_iso(conn.execute("SELECT next_run_at FROM scheduled_posts WHERE id=?", (iv_id,)).fetchone()["next_run_at"])
+assert nxt is not None and timedelta(hours=5, minutes=59) < (nxt - before_) < timedelta(hours=6, minutes=1), nxt
+print("[6f15] 定时发帖每隔 N 小时 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

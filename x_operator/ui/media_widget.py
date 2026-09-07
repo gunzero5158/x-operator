@@ -1,4 +1,4 @@
-"""附件（配图 / 视频）的界面组件：上传框 + 缩略图条，素材库 / 审核队列 / AI 撰写 / 定时计划共用。"""
+"""附件（配图 / 视频）的界面组件：上传框 + 缩略图条，素材库 / 审核队列 / AI 撰写 / 定时发帖计划共用。"""
 from __future__ import annotations
 
 from pathlib import Path

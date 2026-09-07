@@ -5,9 +5,9 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
-# 定时计划表单独拎出来：v9 要把 material_id 改成可空（素材池 / AI 主题模式不绑固定素材），SQLite 只能重建表
+# 定时发帖表单独拎出来：v9 把 material_id 改成可空、v12 计划类型加 interval（每隔 N 小时），改约束 SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
 CREATE TABLE IF NOT EXISTS scheduled_posts (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
     ai_rewrite     INTEGER NOT NULL DEFAULT 0 CHECK (ai_rewrite IN (0,1)),
     ai_brief       TEXT    NOT NULL DEFAULT '',
     media_files    TEXT    NOT NULL DEFAULT '[]',
-    schedule_type  TEXT    NOT NULL CHECK (schedule_type IN ('once','daily','weekly','cron')),
+    schedule_type  TEXT    NOT NULL CHECK (schedule_type IN ('once','daily','weekly','interval','cron')),
     schedule_expr  TEXT    NOT NULL,
     next_run_at    TEXT,
     auto_approve   INTEGER NOT NULL DEFAULT 0 CHECK (auto_approve IN (0,1)),

@@ -53,7 +53,7 @@ def register(jobs) -> None:
                          "AI 匹配素材时的信心低于此值，就不用 AI 选的那条，改为按规则给一条用得最少的素材（理由里会写明，照样进待审核，不会空手）。"
                          "推荐 0.4；想让 AI 的选择更多被采纳就填 0.3。", float, 0, 1),
                         ("grace_period_hours", "定时补发宽限（小时）",
-                         "程序没开着导致定时计划错过了，重启后如果错过还不到这么多小时就照常补发；超过就标为「错过」不补（周期计划跳到下一次）。推荐 2。", int, 0, 168),
+                         "程序没开着导致定时发帖计划错过了，重启后如果错过还不到这么多小时就照常补发；超过就标为「错过」不补（周期计划跳到下一次）。推荐 2。", int, 0, 168),
                         ("nurture_days", "养号期天数",
                          "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。", int, 0, 365),
                     ])
@@ -336,7 +336,7 @@ def _accounts_panel():
     ui.label("多账号分工：抓取（读）默认走小号通道、免费（设置 → 预算「抓取通道」可切到官方 API，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，审核队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
-             "发帖的账号在定时计划里选。").classes("text-xs text-gray-400")
+             "发帖的账号在定时发帖计划里选。").classes("text-xs text-gray-400")
     sys_proxy = detect_system_proxy()
     ui.label("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
              "。账号里代理留空时自动使用它。").classes("text-xs text-gray-400")
@@ -540,7 +540,7 @@ def _accounts_panel():
         ui.notify("已设为主号", type="positive"); render()
 
     async def del_account(a):
-        if not await confirm(f"删除账号 @{a['handle']}？", "凭据会一并删除。有发送记录/队列/定时计划关联的账号无法删除。"):
+        if not await confirm(f"删除账号 @{a['handle']}？", "凭据会一并删除。有发送记录/队列/定时发帖计划关联的账号无法删除。"):
             return
         try:
             with get_conn() as conn:

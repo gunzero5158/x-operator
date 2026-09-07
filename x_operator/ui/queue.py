@@ -14,7 +14,7 @@ from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, notify_long, run_job
 from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
 
-ORIGIN_LABEL = {"ai_match": "AI 匹配素材", "manual": "手动选素材", "ai_write": "AI 撰写", "scheduled": "定时计划"}
+ORIGIN_LABEL = {"ai_match": "AI 匹配素材", "manual": "手动选素材", "ai_write": "AI 撰写", "scheduled": "定时发帖计划"}
 VERIFY_LABEL = {"ok": ("已回查：X 上能查到 ✅", "text-green-600"),
                 "missing": ("⚠ 发送接口返回成功，但回查时在 X 上查不到——可能被限制/静默丢弃，请点链接确认", "text-red-600"),
                 "unknown": ("未能回查（网络/权限问题），请点链接确认", "text-gray-500")}
@@ -146,6 +146,16 @@ def register(jobs) -> None:
 
             ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
                      ).classes("text-xs text-gray-400")
+            with ui.expansion("卡片上的标签是什么意思？", icon="help_outline").classes("w-full text-sm"):
+                ui.markdown(
+                    "- **回复 / 发帖**：回复 = 回在别人推文下面；发帖 = 自己账号发主贴（来自定时发帖计划）。\n"
+                    "- **来源**：AI 匹配素材 / 手动选素材 / AI 撰写 / 定时发帖计划——这条文案是怎么来的。\n"
+                    "- **📎 附件**：发送时会随正文一起上传的配图 / 视频。\n"
+                    "- **含链接**：正文里有 http 链接。只是提醒，不是这条的实际扣费：官方 API 通道发含链接的推文按 X 的定价约 $0.20/条"
+                    "（小号 Cookie 通道免费）；而且在别人帖子下带外链容易被折叠或限流，回复类建议只 @ 不带链接。\n"
+                    "- **自动翻译，请重点检查**：文案是机器翻译过来的，发之前多看一眼。\n"
+                    "- **时效至**：待审核条目过了这个时间会自动标「已过期」（设置 → 合规参数「回复条目时效」）。"
+                ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-3")
             # dirty：正在改文案的条目 id；busy：有弹窗开着。两者任一非空时自动刷新只更新计数、不重绘卡片，
             # 免得把用户改到一半的文案或开着的弹窗冲掉
@@ -297,10 +307,10 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, dirty: set):
             ui.badge(ORIGIN_LABEL.get(origin, origin)).classes(
                 "bg-purple-600" if origin == "ai_write" else ("bg-teal-600" if origin == "manual" else "bg-slate-500"))
             if it["is_auto_translated"]:
-                ui.badge("自动翻译，请重点检查").classes("bg-yellow-600")
+                ui.badge("自动翻译").classes("bg-yellow-600").tooltip("文案是机器翻译过来的，发之前重点检查")
             media_badge(files)
             if "http://" in (it["final_text"] or "") or "https://" in (it["final_text"] or ""):
-                ui.badge("含链接（官方 API 计费约 $0.20；外链回复易被折叠）").classes("bg-gray-500")
+                ui.badge("含链接").classes("bg-gray-500").tooltip("正文里有外链。官方 API 通道发含链接推文约 $0.20/条（小号通道免费）；回复里带外链易被折叠。详见页顶「标签是什么意思」")
             ui.label(f"#{it['id']} · {fmt_time(it['created_at'])}").classes("text-xs text-gray-400")
             if it["expires_at"] and it["status"] == "pending":
                 ui.label(f"时效至 {fmt_time(it['expires_at'])}").classes("text-xs text-orange-400")

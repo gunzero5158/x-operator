@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from nicegui import run, ui
 
 from ..core import media
-from ..core.schedule_calc import compute_next_run
+from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
 from ..core.search import LANG_LABEL
 from ..db.database import get_conn, to_iso, utcnow_iso
@@ -18,7 +18,18 @@ from .layout import confirm, fmt_time, shell
 from .media_widget import MediaField, media_badge
 from .pickers import hint, template_controls
 
-_TYPE_LABEL = {"once": "一次", "daily": "每天", "weekly": "每周", "cron": "cron"}
+_TYPE_LABEL = {"once": "一次", "daily": "每天", "weekly": "每周", "interval": "每隔", "cron": "每天(cron)"}
+_TYPE_OPTIONS = {"daily": "每天固定时间", "weekly": "每周固定几天", "interval": "每隔 N 小时 / 分钟", "once": "只发一次"}
+_EXPR_DEFAULT = {"daily": "21:00", "weekly": "mon,thu 21:00", "interval": "6h", "once": "", "cron": "0 21 * * *"}
+_EXPR_LABEL = {"daily": "几点发（HH:MM）", "weekly": "星期几 几点（如 mon,thu 21:00）", "interval": "间隔（如 6h / 90m）",
+               "once": "日期时间（YYYY-MM-DDTHH:MM）", "cron": "cron（M H * * *）"}
+
+
+def _describe_when(sp) -> str:
+    t = sp["schedule_type"]
+    if t == "interval":
+        return describe_interval(sp["schedule_expr"])
+    return f"{_TYPE_LABEL.get(t, t)}: {sp['schedule_expr']}"
 _STATUS_LABEL = {"active": "进行中", "paused": "已暂停", "done": "已完成", "missed": "已错过"}
 
 HINTS = {
@@ -29,7 +40,7 @@ HINTS = {
     "rewrite": "开=每次发之前让 AI 在素材基础上改写一个新变体（意思不变、保留链接和 @、换措辞），并避开最近 30 天发过的内容。"
                "周期计划推荐开；AI 出错时会退回素材原文并在说明里注明。",
     "brief": "写清楚主题/立场、必须带的链接或 @账号（写在这里会强制原样出现）、语气。AI 会参考最近发过的内容换角度写。",
-    "expr": "一次性 → 2026-09-10T21:00 · 每天 → 21:00 · 每周 → mon,thu 21:00 · cron → 0 21 * * *（都按所选账号的时区）。",
+    "expr": "每天 → 21:00 · 每周 → mon,thu 21:00 · 每隔 → 6h（每 6 小时一条，从保存时算起；也可 90m）· 只发一次 → 2026-09-10T21:00。时间按所选账号的时区。",
     "auto": "开=到点直接进「待发送」由分发器发出，不经人工审核；关=先进待审核，你批准后才发。AI 生成的内容建议先关着看几次。",
 }
 
@@ -52,9 +63,9 @@ def register(jobs) -> None:
     def schedule_page():
         with shell("/schedule"):
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label("定时计划").classes("text-2xl font-bold")
-                ui.button("新建计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-            ui.label("到点后按计划的「内容来源」产出一条推文进审核队列（勾了自动批准则直接进待发送），"
+                ui.label("定时发帖").classes("text-2xl font-bold")
+                ui.button("新建发帖计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
+            ui.label("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进审核队列（勾了自动批准则直接进待发送），"
                      "再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。"
                      "周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。").classes("text-xs text-gray-400")
 
@@ -80,14 +91,14 @@ def register(jobs) -> None:
                         "LEFT JOIN materials m ON m.id=sp.material_id ORDER BY sp.id").fetchall()
                 with body:
                     if not rows:
-                        ui.label("暂无定时计划").classes("text-gray-400")
+                        ui.label("暂无定时发帖计划：点右上「新建发帖计划」，让账号按时间自动发主贴").classes("text-gray-400")
                         return
                     for sp in rows:
                         mode = sp["content_mode"] or "fixed"
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 flex-wrap"):
                                 ui.badge(f"@{sp['acc_handle']}").classes("bg-slate-600")
-                                ui.badge(f"{_TYPE_LABEL.get(sp['schedule_type'], sp['schedule_type'])}: {sp['schedule_expr']}").classes("bg-blue-600")
+                                ui.badge(_describe_when(sp)).classes("bg-blue-600")
                                 ui.badge(_STATUS_LABEL.get(sp["status"], sp["status"])).classes("bg-green-600" if sp["status"] == "active" else "bg-gray-500")
                                 ui.badge(POST_MODE_LABEL.get(mode, mode)).classes("bg-purple-600" if mode == "ai_topic" else "bg-teal-600")
                                 if sp["ai_rewrite"]:
@@ -129,7 +140,7 @@ def register(jobs) -> None:
             ui.notify("先到「设置 → 账号」添加一个账号", type="negative"); return
 
         with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-            ui.label("编辑定时计划" if sp else "新建定时计划").classes("text-lg font-bold")
+            ui.label("编辑定时发帖计划" if sp else "新建定时发帖计划").classes("text-lg font-bold")
             acc = ui.select({a["id"]: a["handle"] for a in accounts},
                             value=sp["account_id"] if sp else accounts[0]["id"], label="发帖账号").classes("w-full").props("outlined")
             ui.separator()
@@ -154,7 +165,7 @@ def register(jobs) -> None:
                     pool_lang = ui.select(_post_langs(), value=(sp["pool_lang"] if sp and sp["pool_lang"] in _post_langs() else ""),
                                           label="素材语言").classes("flex-1").props("outlined")
                     pool_tags = ui.input("场景标签（选填，逗号隔开）", value=sp["pool_tags"] if sp else "").classes("flex-1").props("outlined")
-                hint(HINTS["pool"])
+                hint(HINTS["pool"], after_row=True)
             rewrite = ui.switch("AI 改写变体（每次换个说法再发，需 LLM）", value=bool(sp["ai_rewrite"]) if sp else True)
             rw_hint = ui.label(HINTS["rewrite"]).classes("text-xs text-gray-400 -mt-2 mb-1")
             # AI 主题
@@ -176,10 +187,19 @@ def register(jobs) -> None:
 
             ui.separator()
             ui.label("什么时候发").classes("font-semibold text-sm")
-            stype = ui.select({"once": "一次性", "daily": "每天", "weekly": "每周", "cron": "cron(M H * * *)"},
-                              value=sp["schedule_type"] if sp else "daily", label="类型").classes("w-full").props("outlined")
-            expr = ui.input("表达式", value=sp["schedule_expr"] if sp else "21:00").classes("w-full").props("outlined")
+            type_opts = dict(_TYPE_OPTIONS)
+            if sp and sp["schedule_type"] == "cron":
+                type_opts["cron"] = "每天固定时间（旧 cron 写法）"
+            stype = ui.select(type_opts, value=sp["schedule_type"] if sp else "daily", label="节奏").classes("w-full").props("outlined")
+            expr = ui.input(_EXPR_LABEL.get(stype.value, "表达式"), value=sp["schedule_expr"] if sp else "21:00").classes("w-full").props("outlined")
             hint(HINTS["expr"])
+
+            def sync_type():
+                expr.props(f'label="{_EXPR_LABEL.get(stype.value, "表达式")}"')
+                # 换了节奏类型、原表达式是别的类型的默认值或空 → 换成新类型的默认值
+                if (expr.value or "").strip() in ("", *_EXPR_DEFAULT.values()):
+                    expr.value = _EXPR_DEFAULT.get(stype.value, "")
+            stype.on("update:model-value", lambda e: sync_type())
             auto = ui.switch("自动批准（到点直接进待发送，不经人工审核）", value=bool(sp["auto_approve"]) if sp else False)
             hint(HINTS["auto"])
 

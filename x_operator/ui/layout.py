@@ -16,7 +16,7 @@ NAV = [
     ("/materials", "素材库", "inventory_2"),
     ("/watched", "监控推主", "visibility"),
     ("/rules", "搜索规则", "manage_search"),
-    ("/schedule", "定时计划", "schedule"),
+    ("/schedule", "定时发帖", "schedule"),
     ("/settings", "设置", "settings"),
 ]
 

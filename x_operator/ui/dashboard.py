@@ -152,7 +152,7 @@ def _check(ok: bool, ok_text: str, bad_text: str, link: str):
 def _run_sched(jobs, refresh) -> None:
     try:
         n = jobs.run_scheduled_posts()
-        ui.notify(f"生成 {n} 条定时推文到审核队列" if n else "没有到点的定时计划（到「定时计划」页可「立即生成一次」）", type="positive" if n else "info")
+        ui.notify(f"生成 {n} 条定时推文到审核队列" if n else "没有到点的定时发帖计划（到「定时发帖计划」页可「立即生成一次」）", type="positive" if n else "info")
     except Exception as e:
         ui.notify(f"出错：{e}", type="negative")
     refresh()

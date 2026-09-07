@@ -107,8 +107,9 @@ REPLY_HINTS = {
 }
 
 
-def hint(text: str):
-    ui.label(text).classes("text-xs text-gray-400 -mt-2 mb-1")
+def hint(text: str, after_row: bool = False):
+    """输入框下面的小字说明。after_row：前面是一行并排的输入框时用（负边距会压到框上）。"""
+    ui.label(text).classes("text-xs text-gray-400 mb-1" + ("" if after_row else " -mt-2"))
 
 
 def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str,

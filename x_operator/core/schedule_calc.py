@@ -1,14 +1,39 @@
-"""定时计划下次运行时间计算（design-v1.1 §7.6，MVP 支持 once/daily/weekly）。
+"""定时发帖下次运行时间计算（design-v1.1 §7.6）：once / daily / weekly / interval（每隔 N 小时或分钟）。
 
-cron 类型 MVP 暂只支持 5 段里的简单 'M H * * *'（时分）解析，复杂表达式留待接 croniter。
+cron 类型只为兼容旧数据保留（只支持 'M H * * *'，等价于 daily），界面上不再提供。
 返回 UTC datetime；无后续则 None。表达式非法抛 ValueError（中文）。
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+MIN_INTERVAL_MINUTES = 10
+
+
+def parse_interval(expr: str) -> tuple[int, str]:
+    """「每隔」表达式：'6h' / '6 小时' / '6'（默认小时） / '90m' / '90 分钟'。返回 (数值, 'h'|'m')。"""
+    s = (expr or "").strip().lower().replace(" ", "")
+    m = re.match(r"^(\d+)(h|hour|hours|小时|m|min|minutes|分钟|分)?$", s)
+    if not m:
+        raise ValueError(f"「每隔」格式非法（例：6h = 每 6 小时，90m = 每 90 分钟）：{expr}")
+    n = int(m.group(1)); unit = "m" if (m.group(2) or "h").startswith(("m", "分")) else "h"
+    minutes = n if unit == "m" else n * 60
+    if minutes < MIN_INTERVAL_MINUTES:
+        raise ValueError(f"间隔太短：最少 {MIN_INTERVAL_MINUTES} 分钟")
+    if minutes > 24 * 60 * 30:
+        raise ValueError("间隔太长：最多 30 天，更长请用一次性计划")
+    return n, unit
+
+
+def describe_interval(expr: str) -> str:
+    try:
+        n, unit = parse_interval(expr)
+    except ValueError:
+        return expr
+    return f"每隔 {n} {'小时' if unit == 'h' else '分钟'}"
 
 
 def _tz(name: str) -> ZoneInfo:
@@ -68,6 +93,10 @@ def compute_next_run(schedule_type: str, schedule_expr: str, after: datetime, tz
                 best = cand
                 break
         return best.astimezone(timezone.utc) if best else None
+
+    if schedule_type == "interval":
+        n, unit = parse_interval(schedule_expr)
+        return (after + (timedelta(hours=n) if unit == "h" else timedelta(minutes=n))).astimezone(timezone.utc)
 
     if schedule_type == "cron":
         parts = schedule_expr.strip().split()

@@ -85,10 +85,20 @@ async def test_queue_attachment_button_and_dialog(user: User):
 async def test_schedule_dialog_has_media_field(user: User):
     _pages()
     await user.open("/schedule")
-    user.find("新建计划").click()
+    user.find("新建发帖计划").click()
     await user.should_see("内容来源")
     _choose(user, "每次发什么", "ai_topic")
     await user.should_see("每次随帖一起发的配图 / 视频（选填）")
+    sel = [e for e in user.find("节奏").elements if isinstance(e, ui.select)][0]
+    assert "interval" in sel.options and "cron" not in sel.options, sel.options   # 下拉里有「每隔」、没有 cron
+    _choose(user, "节奏", "interval")
+    assert [e for e in user.find(kind=ui.input).elements if e.value == "6h"], "选「每隔」后表达式应换成默认 6h"
+
+
+async def test_queue_legend(user: User):
+    _pages()
+    await user.open("/queue")
+    await user.should_see("卡片上的标签是什么意思？")
 
 
 async def test_account_dialog_methods_are_distinct(user: User):

@@ -2,7 +2,7 @@
 
 后台 job（monitor / search / scheduled_check / dispatcher_tick），均整体 try/except 隔离。
 自动搜索/自动监控受总开关 auto_jobs_enabled（默认关）+ 各自的单独开关控制，节奏可选「每隔 N 分钟」或
-「每天固定时间点」（AUTO_JOBS / build_trigger）；发送分发有自己的开关（默认开）；定时计划检查始终运行。
+「每天固定时间点」（AUTO_JOBS / build_trigger）；发送分发有自己的开关（默认开）；定时发帖计划检查始终运行。
 scheduled_check 顺带做「过期清扫」：待审核超时的条目标过期，对应抓取记录也标过期。
 """
 from __future__ import annotations
@@ -134,7 +134,7 @@ class Jobs:
         return text, mat["id"], "；".join(note_parts), files
 
     def enqueue_from_plan(self, conn: sqlite3.Connection, sp: sqlite3.Row) -> tuple[bool, str]:
-        """按定时计划生成一条「发帖」队列条目（不提交）。返回 (是否成功, 说明/错误)。"""
+        """按定时发帖计划生成一条「发帖」队列条目（不提交）。返回 (是否成功, 说明/错误)。"""
         text, mid, note, files = self.compose_post(conn, sp)
         if text is None:
             return False, note
@@ -195,7 +195,7 @@ class Jobs:
                     ok, msg = self.enqueue_from_plan(conn, sp)
                     if not ok:
                         # 固定素材被删 → 暂停计划（不发空内容）；其他失败（LLM 出错、素材池空）记下原因，下次到点再试
-                        log.warning("定时计划 #%s 未生成：%s", sp["id"], msg)
+                        log.warning("定时发帖计划 #%s 未生成：%s", sp["id"], msg)
                         pause = (_sp_get(sp, "content_mode", "fixed") or "fixed") == "fixed"
                         conn.execute("UPDATE scheduled_posts SET last_error=?" + (", status='paused'" if pause else "") + " WHERE id=?",
                                      (msg, sp["id"]))
@@ -244,7 +244,7 @@ AUTO_JOBS = {
 }
 ALWAYS_JOBS = {
     "dispatcher": ("发送分发", "每分钟检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
-    "scheduled_check": ("定时计划 + 过期清扫", "每分钟检查到点的定时发帖计划，生成到审核队列；顺带把超时的待审核条目标过期。始终开启", None),
+    "scheduled_check": ("定时发帖计划 + 过期清扫", "每分钟检查到点的定时发帖计划，生成到审核队列；顺带把超时的待审核条目标过期。始终开启", None),
 }
 
 
@@ -360,7 +360,7 @@ def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
 
 
 def run_startup_recovery(jobs: Jobs) -> list[str]:
-    """启动补扫：过期清扫 + 残留 sending 处理 + 定时计划补算/错过判定。"""
+    """启动补扫：过期清扫 + 残留 sending 处理 + 定时发帖计划补算/错过判定。"""
     msgs: list[str] = []
     now_dt = datetime.now(timezone.utc)
     n = expire_stale()
@@ -378,7 +378,7 @@ def run_startup_recovery(jobs: Jobs) -> list[str]:
             "WHERE status='sending'", (utcnow_iso(),))
         if cur.rowcount:
             msgs.append(f"恢复：{cur.rowcount} 条发送中断、结果未知的条目已标记失败（请到 X 上确认，勿盲目重发）")
-        # 定时计划：next_run_at 为空的 active 计划补算；错过太久（超过宽限）的按错过处理
+        # 定时发帖计划：next_run_at 为空的 active 计划补算；错过太久（超过宽限）的按错过处理
         grace_h = max(0, config.get_int("grace_period_hours", 2))
         rows = conn.execute(
             "SELECT sp.*, a.timezone AS acc_tz FROM scheduled_posts sp JOIN accounts a ON a.id=sp.account_id "
@@ -401,7 +401,7 @@ def run_startup_recovery(jobs: Jobs) -> list[str]:
                 conn.execute("UPDATE scheduled_posts SET next_run_at=? WHERE id=?", (to_iso(nxt), sp["id"]))
             conn.commit()
     if missed:
-        msgs.append(f"定时计划：{missed} 个到点超过 {grace_h} 小时宽限的计划按「错过」处理（一次性计划标为已错过，周期计划跳到下一次）")
+        msgs.append(f"定时发帖计划：{missed} 个到点超过 {grace_h} 小时宽限的计划按「错过」处理（一次性计划标为已错过，周期计划跳到下一次）")
     if not msgs:
         msgs.append("启动检查完成，无需恢复")
     return msgs

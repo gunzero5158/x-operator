@@ -90,23 +90,26 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
             logging.getLogger("x_operator.db").info("已放宽旧默认素材匹配门槛：%s", changed)
     if current < 9:
         _rebuild_scheduled_posts(conn)
+    if current < 12:
+        _rebuild_scheduled_posts(conn, reason="v12：计划类型新增 interval（每隔 N 小时）")
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
-def _rebuild_scheduled_posts(conn: sqlite3.Connection) -> None:
-    """v9：material_id 改可空 + 新增内容来源字段。SQLite 不能改列约束，只能建新表搬数据。
+def _rebuild_scheduled_posts(conn: sqlite3.Connection, reason: str = "v9：内容来源可选素材池 / AI 主题") -> None:
+    """按当前 DDL 重建 scheduled_posts（v9 material_id 改可空 + 内容来源字段；v12 计划类型加 interval）。
+    SQLite 不能改列约束，只能建新表、把两边都有的列搬过去。
     review_queue 里有指向 scheduled_posts(id) 的外键：关掉外键检查、用 legacy 改名方式，别的表里的引用文本不会被改写。"""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(scheduled_posts)").fetchall()}
-    if "content_mode" in cols:
+    ddl = (conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='scheduled_posts'").fetchone() or {"sql": ""})["sql"] or ""
+    if "content_mode" in cols and "'interval'" in ddl:
         return
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
         conn.execute(SCHEDULED_POSTS_TABLE.replace("IF NOT EXISTS scheduled_posts", "scheduled_posts_new"))
-        keep = ["id", "account_id", "material_id", "schedule_type", "schedule_expr", "next_run_at",
-                "auto_approve", "status", "last_run_at", "created_at"]
-        keep = [c for c in keep if c in cols]
+        new_cols = [r["name"] for r in conn.execute("PRAGMA table_info(scheduled_posts_new)").fetchall()]
+        keep = [c for c in new_cols if c in cols]
         cl = ", ".join(keep)
         conn.execute(f"INSERT INTO scheduled_posts_new ({cl}) SELECT {cl} FROM scheduled_posts")
         conn.execute("DROP TABLE scheduled_posts")
@@ -117,7 +120,7 @@ def _rebuild_scheduled_posts(conn: sqlite3.Connection) -> None:
         conn.commit()
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
-    logging.getLogger("x_operator.db").info("已重建 scheduled_posts 表（v9：内容来源可选素材池 / AI 主题）")
+    logging.getLogger("x_operator.db").info("已重建 scheduled_posts 表（%s）", reason)
 
 
 def _connect() -> sqlite3.Connection:
