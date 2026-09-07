@@ -55,12 +55,12 @@ def shell(active: str):
                     ui.icon(icon).classes("text-lg")
                     ui.label(name)
                     if path == "/queue" and pc:
-                        ui.badge(str(pc)).classes("bg-red-600 text-white ml-1")
+                        ui.badge(str(pc), color=None).classes("bg-red-600 text-white ml-1")
 
         # 右：账号告警
         ac = _alert_count()
         if ac:
-            ui.badge(f"⚠ {ac} 账号凭据失效").classes("bg-red-600 text-white shrink-0")
+            ui.badge(f"⚠ {ac} 账号凭据失效", color=None).classes("bg-red-600 text-white shrink-0")
     container = ui.column().classes("max-w-5xl mx-auto p-4 w-full")
     with container:
         yield container
@@ -223,7 +223,7 @@ TAG_LEGEND = [("来源", "source"), ("账号", "account"), ("回复", "reply"), 
 
 def tag(text: str, kind: str = "metric", tooltip: str | None = None):
     """统一样式的小标签。kind 见 TAG。"""
-    b = ui.badge(text).classes(TAG.get(kind, TAG["metric"]))
+    b = ui.badge(text, color=None).classes(TAG.get(kind, TAG["metric"]))
     if tooltip:
         b.tooltip(tooltip)
     return b
@@ -235,7 +235,7 @@ def tag_legend(kinds: list[str] | None = None):
     with ui.row().classes("items-center gap-1 flex-wrap") as row:
         ui.label("标签颜色：").classes("text-xs text-gray-500")
         for text, kind in items:
-            ui.badge(text).classes(TAG[kind] + " text-[10px]")
+            ui.badge(text, color=None).classes(TAG[kind] + " text-[10px]")
     return row
 
 

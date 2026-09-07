@@ -186,12 +186,12 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
                     sel = state["mid"] == m["id"]
                     with ui.card().classes("w-full cursor-pointer " + ("border-2 border-sky-500 bg-sky-50" if sel else "hover:bg-gray-50")).on("click", choose):
                         with ui.row().classes("items-center gap-2"):
-                            ui.badge(m["lang"]).classes("bg-slate-500")
+                            ui.badge(m["lang"], color=None).classes("bg-slate-500")
                             if m["scenario_tags"]:
                                 ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
                             ui.label(f"用过 {m['usage_count']} 次").classes("text-xs text-gray-400")
                             if m["created_by"] == "ai":
-                                ui.badge("AI").classes("bg-purple-600")
+                                ui.badge("AI", color=None).classes("bg-purple-600")
                             media_badge(media.parse_files(m["media_files"]))
                         ui.label(m["text"]).classes("text-sm whitespace-pre-wrap")
         all_sw.on("update:model-value", lambda e: render())

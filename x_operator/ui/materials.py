@@ -119,13 +119,13 @@ def register(jobs) -> None:
             with ui.row().classes("items-center gap-2 flex-wrap") as legend:
                 ui.label("标签说明：").classes("text-xs text-gray-500")
                 for _k, (_t, _c, _tip) in KIND_BADGE.items():
-                    ui.badge(_t).classes(_c).tooltip(_tip)
+                    ui.badge(_t, color=None).classes(_c).tooltip(_tip)
                 ui.label("= 用途").classes("text-xs text-gray-400 mr-2")
                 for _k, (_t, _c, _tip) in STATUS_BADGE.items():
-                    ui.badge(_t).classes(_c).tooltip(_tip)
+                    ui.badge(_t, color=None).classes(_c).tooltip(_tip)
                 ui.label("= 状态").classes("text-xs text-gray-400 mr-2")
-                ui.badge("AI").classes(TAG["ai"]); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
-                ui.badge("📎 附件").classes(TAG["media"]); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
+                ui.badge("AI", color=None).classes(TAG["ai"]); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
+                ui.badge("📎 附件", color=None).classes(TAG["media"]); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-2")
 
             def toggle_trash():
@@ -179,15 +179,15 @@ def register(jobs) -> None:
                             files = media.parse_files(m["media_files"])
                             with ui.row().classes("items-center gap-2"):
                                 kt, kc, ktip = KIND_BADGE.get(m["kind"], (m["kind"], "bg-slate-500", ""))
-                                ui.badge(kt).classes(kc).tooltip(ktip)
-                                ui.badge(m["lang"]).classes(TAG["metric"]).tooltip("语言")
+                                ui.badge(kt, color=None).classes(kc).tooltip(ktip)
+                                ui.badge(m["lang"], color=None).classes(TAG["metric"]).tooltip("语言")
                                 st, sc, stip = STATUS_BADGE.get(m["status"], (m["status"], "bg-gray-500", ""))
-                                ui.badge(st).classes(sc).tooltip(stip)
+                                ui.badge(st, color=None).classes(sc).tooltip(stip)
                                 if m["created_by"] == "ai":
-                                    ui.badge("AI").classes(TAG["ai"]).tooltip("由「AI 生成素材」写的")
+                                    ui.badge("AI", color=None).classes(TAG["ai"]).tooltip("由「AI 生成素材」写的")
                                 media_badge(files)
                                 if m["translation_group_id"]:
-                                    ui.badge(f"翻译组 #{m['translation_group_id']}").classes("bg-teal-600")
+                                    ui.badge(f"翻译组 #{m['translation_group_id']}", color=None).classes("bg-teal-600")
                                 ui.label(f"用 {m['usage_count']} 次").classes("text-xs text-gray-400")
                                 if m["scenario_tags"]:
                                     ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")

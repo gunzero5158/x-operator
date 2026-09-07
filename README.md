@@ -217,6 +217,9 @@ uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多�
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
 # 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材/队列/定时发帖计划的附件区、账号方式一二切换
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
+# 真渲染截图（需要 Playwright 的 Chromium）：先起样例服务，再截图并打印标签实际颜色
+timeout 60 uv run python scripts/shot_server.py &   # 端口 8099
+uv run --with playwright python scripts/shot_pages.py /tmp/shots
 ```
 
 ## 目录结构
@@ -229,7 +232,7 @@ x_operator/
   core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/发送前上传) textlimit.py(X 计数单位/超限 AI 缩写)
   ui/         layout.py pickers.py(共用弹窗/回复方式字段) media_widget.py(附件上传/缩略图) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
-scripts/      smoke_test.py serve_check.sh ui_dialog_check.py
+scripts/      smoke_test.py serve_check.sh ui_dialog_check.py shot_server.py shot_pages.py
 config/settings.toml   start.bat / start.sh
 data/         x_operator.db（所有数据） media/（附件文件）
 ```

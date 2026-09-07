@@ -45,7 +45,7 @@ def media_badge(files: list[str]) -> None:
     if not files:
         return
     lost = media.missing(files)
-    ui.badge(("📎 " + media.describe(files)) + ("（文件丢失）" if lost else "")) \
+    ui.badge(("📎 " + media.describe(files)) + ("（文件丢失）" if lost else ""), color=None) \
         .classes(TAG["media"] if not lost else TAG["bad"]) \
         .tooltip("发送时会随正文一起上传这些附件" if not lost else "附件文件在 data/media 里找不到了，发送会失败")
 

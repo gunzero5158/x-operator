@@ -598,14 +598,14 @@ def _accounts_panel():
                         ui.label(f"@{a['handle']}").classes("font-semibold")
                         if a["display_name"]:
                             ui.label(a["display_name"]).classes("text-xs text-gray-400")
-                        ui.badge("官方 API" if a["access_type"] == "official" else "非官方 Cookie").classes("bg-slate-500")
+                        ui.badge("官方 API" if a["access_type"] == "official" else "非官方 Cookie", color=None).classes("bg-slate-500")
                         if a["is_primary"]:
-                            ui.badge("主号 ★").classes("bg-amber-500")
-                        ui.badge("Premium 会员" if a["is_premium"] else "免费账号 · 280 单位").classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
+                            ui.badge("主号 ★", color=None).classes("bg-amber-500")
+                        ui.badge("Premium 会员" if a["is_premium"] else "免费账号 · 280 单位", color=None).classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
                             .tooltip("会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写")
-                        ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "凭据失效"}.get(a["status"], a["status"])) \
+                        ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "凭据失效"}.get(a["status"], a["status"]), color=None) \
                             .classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
-                        ui.badge("凭据已填" if cred_ok else "未填凭据").classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
+                        ui.badge("凭据已填" if cred_ok else "未填凭据", color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
                     ui.label(f"日发帖 {a['daily_post_limit']} / 日回复 {a['daily_reply_limit']} · "
                              f"间隔 {a['min_interval_sec']}-{a['max_interval_sec']}s · "
                              f"活跃 {a['active_hours_start']}-{a['active_hours_end']} {a['timezone']}"

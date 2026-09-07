@@ -107,6 +107,11 @@ async def test_tag_legends(user: User):
     await user.open("/targets")
     await user.should_see("标签颜色：")
     await user.should_see("已进审核队列")
+    # 颜色真的能生效：badge 不能带 Quasar 的 color 属性（它会加 !important 的主题蓝把 Tailwind 类压掉）
+    for b in [e for e in user.find(kind=ui.badge).elements]:
+        assert "color" not in b._props, (b.text, b._props)
+    st = [e for e in user.find("已进审核队列").elements if isinstance(e, ui.badge)][0]
+    assert "bg-green-600" in st._classes, st._classes
     await user.open("/queue")
     await user.should_see("标签颜色：")
     await user.should_see("来源：AI 匹配素材")
