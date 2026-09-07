@@ -197,6 +197,48 @@ QUEUE_STATUS_LABEL = {
 }
 
 
+# 标签配色约定（全站统一）：颜色 = 这个标签在说哪一类信息，各页面卡片都按这套来
+TAG = {
+    "source":  "bg-sky-700 text-white",                                   # 出处：来自哪条规则 / 哪个推主 / 文案怎么来的
+    "account": "bg-slate-700 text-white",                                 # 账号：@谁 / 用哪个号
+    "reply":   "bg-indigo-600 text-white",                                # 类型：回复（在别人推文下）
+    "post":    "bg-orange-600 text-white",                                # 类型：发帖（自己的主贴）
+    "ok":      "bg-green-600 text-white",                                 # 状态：好 / 已完成 / 启用
+    "wait":    "bg-blue-500 text-white",                                  # 状态：进行中 / 等待
+    "attn":    "bg-orange-500 text-white",                                # 状态：要人处理
+    "bad":     "bg-red-600 text-white",                                   # 状态：失败 / 危险
+    "off":     "bg-gray-400 text-white",                                  # 状态：停用 / 过期 / 跳过
+    "metric":  "bg-white text-gray-700 border border-gray-400",          # 数值 / 参数（相关性、观看量、语言、条数…）：白底描边
+    "metric_ok":  "bg-white text-emerald-700 border border-emerald-600",  # 数值达标
+    "metric_bad": "bg-white text-red-600 border border-red-500",          # 数值不达标
+    "mode":    "bg-teal-600 text-white",                                  # 处理方式：回复方式 / 内容来源模式
+    "ai":      "bg-purple-600 text-white",                                # AI 参与
+    "warn":    "bg-amber-500 text-white",                                 # 注意事项
+    "media":   "bg-pink-600 text-white",                                  # 附件
+}
+TAG_LEGEND = [("来源", "source"), ("账号", "account"), ("回复", "reply"), ("发帖", "post"), ("正常", "ok"), ("等待", "wait"),
+              ("待处理", "attn"), ("失败", "bad"), ("停用", "off"), ("数值 / 参数", "metric"), ("方式", "mode"), ("AI", "ai"),
+              ("注意", "warn"), ("附件", "media")]
+
+
+def tag(text: str, kind: str = "metric", tooltip: str | None = None):
+    """统一样式的小标签。kind 见 TAG。"""
+    b = ui.badge(text).classes(TAG.get(kind, TAG["metric"]))
+    if tooltip:
+        b.tooltip(tooltip)
+    return b
+
+
+def tag_legend(kinds: list[str] | None = None):
+    """页顶一行「标签颜色说明」。kinds 不传 = 全部；传了只显示这几类。"""
+    items = [(t, k) for t, k in TAG_LEGEND if kinds is None or k in kinds]
+    with ui.row().classes("items-center gap-1 flex-wrap") as row:
+        ui.label("标签颜色：").classes("text-xs text-gray-500")
+        for text, kind in items:
+            ui.badge(text).classes(TAG[kind] + " text-[10px]")
+    return row
+
+
 def fmt_views(n: int | None) -> str:
     """观看量的易读写法：1234 → 1234；12345 → 1.2万；1234567 → 123.5万。"""
     if n is None:

@@ -14,7 +14,7 @@ from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
 from ..core.search import LANG_LABEL
 from ..db.database import get_conn, to_iso, utcnow_iso
-from .layout import confirm, fmt_time, shell
+from .layout import confirm, fmt_time, shell, tag
 from .media_widget import MediaField, media_badge
 from .pickers import hint, template_controls
 
@@ -97,16 +97,17 @@ def register(jobs) -> None:
                         mode = sp["content_mode"] or "fixed"
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 flex-wrap"):
-                                ui.badge(f"@{sp['acc_handle']}").classes("bg-slate-600")
-                                ui.badge(_describe_when(sp)).classes("bg-blue-600")
-                                ui.badge(_STATUS_LABEL.get(sp["status"], sp["status"])).classes("bg-green-600" if sp["status"] == "active" else "bg-gray-500")
-                                ui.badge(POST_MODE_LABEL.get(mode, mode)).classes("bg-purple-600" if mode == "ai_topic" else "bg-teal-600")
+                                tag(f"@{sp['acc_handle']}", "account", "用哪个账号发")
+                                tag(_describe_when(sp), "metric", "什么时候发")
+                                tag(_STATUS_LABEL.get(sp["status"], sp["status"]),
+                                    {"active": "ok", "paused": "off", "done": "off", "missed": "attn"}.get(sp["status"], "off"), "计划状态")
+                                tag("内容：" + POST_MODE_LABEL.get(mode, mode), "ai" if mode == "ai_topic" else "mode", "每次发什么")
                                 if sp["ai_rewrite"]:
-                                    ui.badge("AI 改写变体").classes("bg-purple-500")
+                                    tag("AI 改写变体", "ai", "每次发之前让 AI 换个说法")
                                 if sp["auto_approve"]:
-                                    ui.badge("自动批准").classes("bg-red-600")
+                                    tag("自动批准", "warn", "到点直接进待发送，不经人工审核")
                                 if mode == "fixed" and sp["mat_deleted"]:
-                                    ui.badge("素材已在回收站").classes("bg-amber-500")
+                                    tag("素材已在回收站", "warn", "到点会暂停；请编辑计划换素材或恢复素材")
                                 media_badge(media.parse_files(sp["mat_media"] if mode == "fixed" else (sp["media_files"] if mode == "ai_topic" else None)))
                                 ui.label(f"下次 {fmt_time(sp['next_run_at']) if sp['next_run_at'] else '—'}"
                                          + (f" · 上次 {fmt_time(sp['last_run_at'])}" if sp["last_run_at"] else "")).classes("text-xs text-gray-400")

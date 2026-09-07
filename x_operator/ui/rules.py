@@ -13,7 +13,7 @@ from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule,
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell
+from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell, tag
 from .pickers import reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -136,19 +136,19 @@ def register(jobs) -> None:
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 w-full"):
                                 ui.label(r["name"]).classes("font-semibold")
-                                ui.badge(SOURCE_KIND_LABEL[rule_source_kind(r)]).classes("bg-indigo-600" if is_feed_rule(r) else "bg-slate-600")
-                                ui.badge(langs_label(rule_langs(r))).classes("bg-slate-500")
-                                ui.badge(f"达标分 ≥{r['min_llm_score']}").classes("bg-blue-600")
-                                ui.badge(f"每次 {r['max_results_per_run']} 条").classes("bg-slate-400")
-                                ui.badge(f"首次回溯 {r['lookback_hours']}h").classes("bg-slate-400")
+                                tag(SOURCE_KIND_LABEL[rule_source_kind(r)], "source", "推文来源：关键词搜索 / 某账号的推荐流 / 关注流")
+                                tag(langs_label(rule_langs(r)), "metric", "只要这些语言的推文")
+                                tag(f"达标分 ≥{r['min_llm_score']}", "metric", "AI 相关性打分达到这个分才进下一步")
+                                tag(f"每次 {r['max_results_per_run']} 条", "metric", "每次运行最多抓这么多条")
+                                tag(f"首次回溯 {r['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
                                 if r["min_views"]:
-                                    ui.badge(f"观看 ≥ {fmt_views(r['min_views'])}").classes("bg-amber-600")
-                                ui.badge(REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"])).classes(
-                                    "bg-purple-600" if r["reply_mode"] == "ai_write" else "bg-teal-600")
-                                ui.badge("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）"))
-                                         ).classes("bg-slate-500")
+                                    tag(f"观看 ≥ {fmt_views(r['min_views'])}", "metric", "观看量门槛，抓取端就过滤")
+                                tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
+                                    "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
+                                tag("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）")),
+                                    "account", "用哪个账号回")
                                 if not r["enabled"]:
-                                    ui.badge("已停用").classes("bg-gray-400")
+                                    tag("已停用", "off", "「运行所有规则」会跳过它；卡片上的「运行此规则」仍可单独跑")
                                 ui.label(f"上次运行 {fmt_time(r['last_run_at']) if r['last_run_at'] else '未运行'}"
                                          f" · 游标 {r['newest_id_cursor'] or '无（下次按首次回溯抓）'}").classes("text-xs text-gray-400")
                                 ui.space()

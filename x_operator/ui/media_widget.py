@@ -6,6 +6,7 @@ from pathlib import Path
 from nicegui import ui
 
 from ..core import media
+from .layout import TAG
 
 _THUMB = {"sm": "w-14 h-14", "md": "w-24 h-24"}
 
@@ -45,7 +46,7 @@ def media_badge(files: list[str]) -> None:
         return
     lost = media.missing(files)
     ui.badge(("📎 " + media.describe(files)) + ("（文件丢失）" if lost else "")) \
-        .classes("bg-pink-600" if not lost else "bg-red-600") \
+        .classes(TAG["media"] if not lost else TAG["bad"]) \
         .tooltip("发送时会随正文一起上传这些附件" if not lost else "附件文件在 data/media 里找不到了，发送会失败")
 
 

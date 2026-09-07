@@ -12,7 +12,7 @@ from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.monitor import get_primary_account
 from ..db.database import get_conn, utcnow_iso
-from .layout import confirm, fmt_time, run_job_with_progress, shell
+from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
 from .pickers import hint, reply_mode_fields, reply_mode_invalid
 
 HINTS = {
@@ -98,14 +98,14 @@ def register(jobs) -> None:
                                     with ui.row().classes("items-center gap-2"):
                                         ui.label(f"@{u['handle']}").classes("font-semibold")
                                         if u["include_replies"]:
-                                            ui.badge("含回复").classes("bg-slate-500")
-                                        ui.badge(f"首次回溯 {u['lookback_hours']}h").classes("bg-slate-400")
-                                        ui.badge(REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"])).classes(
-                                            "bg-purple-600" if u["reply_mode"] == "ai_write" else "bg-teal-600")
-                                        ui.badge("回复账号：" + ("自动轮流" if not u["reply_account_id"] else acc_opts.get(u["reply_account_id"], "（已删除→自动轮流）"))
-                                                 ).classes("bg-slate-500")
+                                            tag("含回复", "metric", "这个推主回复别人的推文也抓")
+                                        tag(f"首次回溯 {u['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
+                                        tag("回复方式：" + REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"]),
+                                            "ai" if u["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
+                                        tag("回复账号：" + ("自动轮流" if not u["reply_account_id"] else acc_opts.get(u["reply_account_id"], "（已删除→自动轮流）")),
+                                            "account", "用哪个账号回")
                                         if not u["enabled"]:
-                                            ui.badge("已停用").classes("bg-gray-400")
+                                            tag("已停用", "off")
                                     ui.label(f"命中 {u['hit_count']} 次 · 游标 {u['last_seen_tweet_id'] or '无（下次按首次回溯抓）'}"
                                              + f" · 添加于 {fmt_time(u['created_at'])}"
                                              + (f" · {u['note']}" if u['note'] else "")).classes("text-xs text-gray-400")

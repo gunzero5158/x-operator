@@ -10,7 +10,7 @@ from nicegui import run, ui
 
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
+from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job, tag, tag_legend,
                      run_job_with_progress, shell, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
@@ -115,6 +115,7 @@ def register(jobs) -> None:
                             ui.menu_item("清理已过滤 / 未匹配 / 已过期", on_click=lambda: clear(["filtered", "no_match", "expired"]))
                             ui.menu_item("清理全部抓取记录", on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
 
+            tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
             with ui.expansion("各状态是什么意思？为什么会被过滤？", icon="help_outline").classes("w-full text-sm"):
                 ui.markdown(
                     "- **已进审核队列**：达标且配到了素材，回复草稿已生成，去「审核队列」批准即可发送。\n"
@@ -214,8 +215,7 @@ def _status_options(source: str = "all", rule_id: int = 0) -> dict:
     return opts
 
 
-_STATUS_COLOR = {"queued": "bg-green-600", "no_match": "bg-orange-500", "filtered": "bg-gray-500",
-                 "new": "bg-blue-500", "expired": "bg-gray-400"}
+_STATUS_KIND = {"queued": "ok", "no_match": "attn", "filtered": "off", "new": "wait", "expired": "off"}
 
 
 def _card(t, rematch, delete_one, blacklist, pick, write):
@@ -224,17 +224,18 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
             kind_word = {"feed_for_you": "推荐流", "feed_following": "关注流"}.get(t["rule_kind"] or "", "搜索")
             src = f"监控 @{t['watched_handle']}" if t["source"] == "monitor" and t["watched_handle"] else \
                 (f"{kind_word}「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索（规则已删）"))
-            ui.badge(src).classes("bg-slate-600")
-            ui.badge(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"])).classes(_STATUS_COLOR.get(t["process_status"], "bg-gray-500"))
+            tag(src, "source", "这条推文是哪条规则 / 哪个推主抓来的")
+            tag(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"]), _STATUS_KIND.get(t["process_status"], "off"),
+                "处理状态（页顶「各状态是什么意思」有解释）")
             if t["llm_relevance_score"] is not None:
                 sc = t["llm_relevance_score"]
                 thr = t["rule_min"] if t["rule_min"] is not None else 7
-                ui.badge(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if t["source"] == "search" else "")) \
-                    .classes("bg-emerald-600" if sc >= thr else "bg-gray-500")
+                tag(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if t["source"] == "search" else ""),
+                    "metric_ok" if sc >= thr else "metric_bad", "AI 给的相关性分；绿 = 达到规则的达标分，红 = 没达到")
             if t["lang"]:
-                ui.badge(t["lang"]).classes("bg-slate-400")
+                tag(t["lang"], "metric", "推文语言")
             if t["view_count"] is not None:
-                ui.badge(f"👁 {fmt_views(t['view_count'])}").classes("bg-slate-400").tooltip("抓取时的观看量")
+                tag(f"👁 {fmt_views(t['view_count'])}", "metric", "抓取时的观看量")
             ui.label(f"抓取于 {fmt_time(t['fetched_at'])} · 发推于 {fmt_time(t['tweet_created_at'])}").classes("text-xs text-gray-400")
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_one(t["id"])).props("flat dense round color=negative").tooltip("删除此记录")

@@ -11,15 +11,15 @@ from nicegui import run, ui
 
 from ..core import media
 from ..db.database import get_conn, utcnow_iso
-from .layout import confirm, fmt_time, shell
+from .layout import TAG, confirm, fmt_time, shell
 from .media_widget import MediaField, media_badge, media_strip
 
 # 标签配色：一眼分清「干什么用的」（类型）、「现在能不能用」（状态）、「谁写的」
-KIND_BADGE = {"reply": ("回复", "bg-indigo-600", "回复素材：用在别人的推文下面（自动匹配 / 换素材 时从这里挑）"),
-              "post": ("发帖", "bg-orange-600", "发帖素材：自己账号发的主贴（定时发帖计划 从这里挑）")}
-STATUS_BADGE = {"active": ("启用", "bg-green-600", "启用：会被匹配 / 定时发帖计划选中"),
-                "draft": ("草稿", "bg-amber-500", "草稿：还没启用，不会被选中"),
-                "archived": ("归档", "bg-gray-500", "归档：保留但不再参与匹配")}
+KIND_BADGE = {"reply": ("回复", TAG["reply"], "回复素材：用在别人的推文下面（自动匹配 / 换素材 时从这里挑）"),
+              "post": ("发帖", TAG["post"], "发帖素材：自己账号发的主贴（定时发帖计划 从这里挑）")}
+STATUS_BADGE = {"active": ("启用", TAG["ok"], "启用：会被匹配 / 定时发帖计划选中"),
+                "draft": ("草稿", TAG["warn"], "草稿：还没启用，不会被选中"),
+                "archived": ("归档", TAG["off"], "归档：保留但不再参与匹配")}
 
 
 def _load(kind_filter: str, status_filter: str, trash: bool):
@@ -124,8 +124,8 @@ def register(jobs) -> None:
                 for _k, (_t, _c, _tip) in STATUS_BADGE.items():
                     ui.badge(_t).classes(_c).tooltip(_tip)
                 ui.label("= 状态").classes("text-xs text-gray-400 mr-2")
-                ui.badge("AI").classes("bg-purple-600"); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
-                ui.badge("📎 附件").classes("bg-pink-600"); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
+                ui.badge("AI").classes(TAG["ai"]); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
+                ui.badge("📎 附件").classes(TAG["media"]); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-2")
 
             def toggle_trash():
@@ -180,11 +180,11 @@ def register(jobs) -> None:
                             with ui.row().classes("items-center gap-2"):
                                 kt, kc, ktip = KIND_BADGE.get(m["kind"], (m["kind"], "bg-slate-500", ""))
                                 ui.badge(kt).classes(kc).tooltip(ktip)
-                                ui.badge(m["lang"]).classes("bg-slate-500").tooltip("语言")
+                                ui.badge(m["lang"]).classes(TAG["metric"]).tooltip("语言")
                                 st, sc, stip = STATUS_BADGE.get(m["status"], (m["status"], "bg-gray-500", ""))
                                 ui.badge(st).classes(sc).tooltip(stip)
                                 if m["created_by"] == "ai":
-                                    ui.badge("AI").classes("bg-purple-600").tooltip("由「AI 生成素材」写的")
+                                    ui.badge("AI").classes(TAG["ai"]).tooltip("由「AI 生成素材」写的")
                                 media_badge(files)
                                 if m["translation_group_id"]:
                                     ui.badge(f"翻译组 #{m['translation_group_id']}").classes("bg-teal-600")

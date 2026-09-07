@@ -102,6 +102,16 @@ async def test_queue_legend(user: User):
     await user.should_see("/280 单位")          # 免费账号按 280 单位计
 
 
+async def test_tag_legends(user: User):
+    _pages()
+    await user.open("/targets")
+    await user.should_see("标签颜色：")
+    await user.should_see("已进审核队列")
+    await user.open("/queue")
+    await user.should_see("标签颜色：")
+    await user.should_see("来源：AI 匹配素材")
+
+
 async def test_account_dialog_has_premium_switch(user: User):
     _pages()
     await user.open("/settings")
