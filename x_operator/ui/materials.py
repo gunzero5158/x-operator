@@ -190,7 +190,7 @@ def register(jobs) -> None:
                                     ui.badge(f"翻译组 #{m['translation_group_id']}").classes("bg-teal-600")
                                 ui.label(f"用 {m['usage_count']} 次").classes("text-xs text-gray-400")
                                 if m["scenario_tags"]:
-                                    ui.label("#" + m["scenario_tags"]).classes("text-xs text-gray-400")
+                                    ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
                                 if trash:
                                     ui.label(f"删除于 {fmt_time(m['deleted_at'])}").classes("text-xs text-red-400")
                             ui.label(m["text"]).classes("text-sm whitespace-pre-wrap")
@@ -218,6 +218,7 @@ def register(jobs) -> None:
             lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").classes("w-full").props("outlined")
             text = ui.textarea("正文", value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
+            ui.label("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。").classes("text-xs text-gray-400 -mt-2 mb-1")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
                                value=m["status"] if m else "active", label="状态").classes("w-full").props("outlined")
             mf = MediaField(media.parse_files(m["media_files"]) if m else [],
@@ -294,7 +295,7 @@ def register(jobs) -> None:
                             with ui.column().classes("flex-1 gap-0"):
                                 ta = ui.textarea(value=it["text"]).classes("w-full").props("outlined autogrow dense")
                                 ta.on("update:model-value", lambda e, i=i: items_holder["items"][i].__setitem__("text", e.args))
-                                ui.label("#" + (it["scenario_tags"] or "")).classes("text-xs text-gray-400")
+                                ui.label("场景：" + (it["scenario_tags"] or "").replace(",", ", ")).classes("text-xs text-gray-400")
 
             def save_all():
                 items = items_holder["items"]
