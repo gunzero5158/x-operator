@@ -24,14 +24,14 @@ ALL_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
 MAX_ITEMS = 4
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 GIF_MAX_BYTES = 15 * 1024 * 1024
-VIDEO_MAX_BYTES = 512 * 1024 * 1024
+VIDEO_MAX_BYTES = 1024 * 1024 * 1024
 ACCEPT = ".jpg,.jpeg,.png,.webp,.gif,.mp4,.mov"
 
 KIND_LABEL = {"image": "图片", "gif": "GIF", "video": "视频"}
 MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
         ".gif": "image/gif", ".mp4": "video/mp4", ".mov": "video/quicktime"}
 
-RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB）合计最多 4 个，可以混搭。"
+RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤1024MB）合计最多 4 个，可以混搭。"
 
 
 def media_dir() -> Path:
@@ -196,3 +196,59 @@ def sweep_orphans() -> int:
                 except OSError:
                     pass
     return n
+
+
+# ---------- 占用空间统计 / 让用户自己去目录里清理 ----------
+
+def fmt_size(n: int) -> str:
+    """字节数的易读写法：850KB / 12.3MB / 1.2GB。"""
+    for unit, div in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= div:
+            return f"{n / div:.1f}{unit}".replace(".0" + unit, unit)
+    return f"{n}B"
+
+
+def referenced_files() -> set[str]:
+    """库里（素材含回收站、审核队列、定时发帖）还在引用的附件相对路径。"""
+    refs: set[str] = set()
+    with database.get_conn() as conn:
+        for table, col in (("materials", "media_files"), ("review_queue", "final_media_files"), ("scheduled_posts", "media_files")):
+            for row in conn.execute(f"SELECT {col} AS f FROM {table} WHERE {col} != '[]'").fetchall():
+                refs.update(f.replace("\\", "/") for f in parse_files(row["f"]))
+    return refs
+
+
+def storage_stats() -> dict:
+    """data/media/ 的占用：文件数、总大小，以及其中已没有任何素材/条目引用的「孤儿」文件（可以放心删）。"""
+    d = media_dir()
+    refs = referenced_files()
+    total = count = orphan_bytes = 0
+    orphans: list[tuple[str, int]] = []
+    for p in d.rglob("*"):
+        if not p.is_file():
+            continue
+        size = p.stat().st_size
+        count += 1; total += size
+        rel = p.relative_to(d).as_posix()
+        if rel not in refs:
+            orphans.append((rel, size)); orphan_bytes += size
+    orphans.sort(key=lambda x: -x[1])
+    return {"dir": d, "count": count, "bytes": total, "orphans": orphans, "orphan_bytes": orphan_bytes}
+
+
+def open_dir() -> str:
+    """在本机的文件管理器里打开 data/media/（程序跑在用户自己电脑上，所以能直接弹资源管理器）。返回错误原因，空串 = 已打开。"""
+    import subprocess
+    import sys
+    d = media_dir()
+    try:
+        if sys.platform.startswith("win"):
+            import os
+            os.startfile(str(d))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(d)])
+        else:
+            subprocess.Popen(["xdg-open", str(d)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ""
+    except Exception as ex:  # noqa: BLE001
+        return f"打不开文件管理器：{ex}。请手动打开这个目录：{d}"

@@ -183,3 +183,21 @@ def _card_text(el) -> str:
                 walk(c)
     walk(node)
     return " ".join(out)
+
+
+async def test_settings_media_storage_panel(user: User):
+    """设置 → 数据：能看到素材附件占用统计、孤儿文件列表和「前往清理」按钮；视频上限已是 1024MB。"""
+    _pages()
+    # 造一个没人引用的孤儿文件
+    orphan = media.abs_path(media.new_rel_path("z.mp4"))
+    orphan.parent.mkdir(parents=True, exist_ok=True); orphan.write_bytes(b"0" * 2048)
+    st = media.storage_stats()
+    assert st["count"] >= 2 and any(rel.endswith(".mp4") for rel, _ in st["orphans"]), st
+    assert media.VIDEO_MAX_BYTES == 1024 * 1024 * 1024
+    assert media.check_one("big.mp4", 1000 * 1024 * 1024) == ""
+    assert "1024MB" in media.check_one("huge.mp4", 1100 * 1024 * 1024)
+    await user.open("/settings")
+    user.find("数据").click()
+    await user.should_see("素材附件占用空间")
+    await user.should_see("前往清理（打开目录）")
+    await user.should_see("已没有任何素材 / 条目引用")

@@ -10,6 +10,7 @@ from .. import config
 from ..adapters import factory
 from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
                              parse_credentials, validate_unofficial_credentials)
+from ..core import media
 from ..core.monitor import READ_CHANNEL_LABEL, read_channel
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
@@ -735,3 +736,46 @@ def _data_panel():
 
     with ui.row().classes("gap-2"):
         ui.button("清空全部抓取记录与审核队列", icon="delete_forever", on_click=clear_all).props("outline color=negative")
+
+    ui.separator()
+    _media_storage_panel()
+
+
+def _media_storage_panel():
+    """素材附件占用空间：只统计、不代删。给一个按钮打开目录，让用户自己去删。"""
+    ui.label("素材附件占用空间").classes("font-semibold")
+    ui.label("图片 / 视频上传后都复制存在下面这个目录里（数据库只记路径）。程序不会自动删文件；素材删到回收站、审核条目删掉后，"
+             "文件还留着。点「前往清理」在文件管理器里打开目录，自己挑着删。").classes("text-xs text-gray-400")
+    path_lbl = ui.label("").classes("text-xs text-gray-500 font-mono break-all")
+    info = ui.label("").classes("text-sm")
+    orphan_box = ui.column().classes("w-full gap-0")
+
+    def refresh():
+        st = media.storage_stats()
+        path_lbl.text = f"目录：{st['dir']}"
+        info.text = f"共 {st['count']} 个文件 · 合计 {media.fmt_size(st['bytes'])}"
+        orphan_box.clear()
+        with orphan_box:
+            if st["orphans"]:
+                with ui.expansion(f"其中 {len(st['orphans'])} 个已没有任何素材 / 条目引用（{media.fmt_size(st['orphan_bytes'])}），删掉不影响功能",
+                                  icon="cleaning_services").classes("w-full text-sm"):
+                    ui.label("按大小从大到小排；其余文件仍被素材库（含回收站）、审核队列或定时发帖引用，删了会导致发送时找不到附件。").classes("text-xs text-gray-400")
+                    for rel, size in st["orphans"][:200]:
+                        ui.label(f"{rel}　{media.fmt_size(size)}").classes("text-xs font-mono")
+                    if len(st["orphans"]) > 200:
+                        ui.label(f"…还有 {len(st['orphans']) - 200} 个").classes("text-xs text-gray-400")
+            elif st["count"]:
+                ui.label("所有文件都还被素材 / 条目引用着，没有可以放心删的。").classes("text-xs text-gray-400")
+    refresh()
+
+    def go():
+        err = media.open_dir()
+        if err:
+            ui.notify(err, type="warning", multi_line=True)
+        else:
+            ui.notify("已在文件管理器里打开素材目录", type="positive")
+
+    with ui.row().classes("gap-2 items-center"):
+        ui.button("前往清理（打开目录）", icon="folder_open", on_click=go).props("outline color=primary") \
+            .tooltip("在本机文件管理器里打开 data/media/，自己挑文件删")
+        ui.button("刷新统计", icon="refresh", on_click=refresh).props("flat dense")
