@@ -905,10 +905,21 @@ assert mediam.check_set(["a.png"] * 5) and not mediam.check_set(["a.png"] * 5, m
 with get_conn() as conn:
     conn.execute("UPDATE scheduled_posts SET media_files=?, media_mode='fixed' WHERE id=?", (mediam.dump_files([rel1]), topic_id)); conn.commit()
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
+# 上传内容去重：同样内容再传一次 → 复用已有路径、临时文件删掉；不同内容 → 新路径；空临时目录不影响孤儿清理
+import shutil as _sh
+t1 = mediam.new_tmp_path("again.png"); _sh.copyfile(mediam.abs_path(rel1), t1)
+rel_dup, reused = mediam.commit_upload(t1, "again.png")
+assert reused and rel_dup == rel1 and not t1.exists(), (rel_dup, reused, t1.exists())
+t2 = mediam.new_tmp_path("new.png"); t2.write_bytes(b"different-bytes")
+rel_new, reused2 = mediam.commit_upload(t2, "new.png")
+assert not reused2 and rel_new != rel1 and mediam.is_safe_rel(rel_new) and mediam.abs_path(rel_new).exists() and not t2.exists(), (rel_new, reused2)
+assert mediam.find_same_content(mediam.abs_path(rel_new)) is None      # 自己不算
+mediam.abs_path(rel_new).unlink()
+t3 = mediam.new_tmp_path("stale.png"); t3.write_bytes(b"stale")         # 模拟上传中途断掉留下的临时文件，启动清理时一并删
 # 孤儿清理：没被任何记录引用的文件才删
 orphan = mediam.new_rel_path("o.png"); mediam.abs_path(orphan).write_bytes(b"x")
-assert mediam.sweep_orphans() == 1 and not mediam.abs_path(orphan).exists() and mediam.abs_path(rel1).exists()
-print("[6f14] 附件：规则校验 / 素材→队列 / 发送前上传 / 丢文件标失败 / AI 撰写与定时计划带附件 / 附件素材池随机轮换 / 孤儿清理 OK")
+assert mediam.sweep_orphans() == 2 and not mediam.abs_path(orphan).exists() and not t3.exists() and mediam.abs_path(rel1).exists()
+print("[6f14] 附件：规则校验 / 素材→队列 / 发送前上传 / 丢文件标失败 / AI 撰写与定时计划带附件 / 附件素材池随机轮换 / 上传内容去重 / 孤儿清理 OK")
 
 # [6f15] 定时发帖「每隔 N 小时/分钟」：解析、下次时间 = 现在 + 间隔、v12 后 CHECK 约束接受 interval、旧 cron 仍能算
 from x_operator.core.schedule_calc import compute_next_run, describe_interval, parse_interval  # noqa: E402

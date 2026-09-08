@@ -106,14 +106,22 @@ class MediaField:
             ui.notify(err, type="negative", multi_line=True)
             self.upload.reset()
             return
-        rel = media.new_rel_path(name)
+        tmp = media.new_tmp_path(name)
         try:
-            await e.file.save(media.abs_path(rel))
+            await e.file.save(tmp)
+            rel, reused = media.commit_upload(tmp, name)
         except Exception as ex:
+            tmp.unlink(missing_ok=True)
             ui.notify(f"保存文件失败：{ex}", type="negative")
             self.upload.reset()
             return
-        self.files.append(rel)
         self.upload.reset()
+        if rel in self.files:
+            ui.notify(f"{Path(name).name} 已经在附件里了（内容相同），没有重复添加", type="info", multi_line=True)
+            return
+        if reused:
+            self._initial.add(rel)   # 复用的是别处也在用的文件，从这里移除时不能删盘上的文件
+        self.files.append(rel)
         self.render()
-        ui.notify(f"已添加 {Path(name).name}", type="positive")
+        ui.notify(f"已添加 {Path(name).name}" + ("（和已有附件内容相同，直接复用，不重复占空间）" if reused else ""),
+                  type="positive", multi_line=reused)

@@ -8,6 +8,7 @@ X 的附件规则（回复和主贴一样）：图片、GIF、视频合计最多
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -124,12 +125,67 @@ def pick_from_pool(pool: list[str], recent_used: list[str]) -> list[str]:
     return [random.choice(fresh)]
 
 
+def _ext_of(original_name: str) -> str:
+    ext = Path(original_name).suffix.lower()
+    return ".jpg" if ext == ".jpeg" else ext
+
+
 def new_rel_path(original_name: str) -> str:
     """生成存放用的相对路径：YYYYMM/uuid.ext。原文件名只保留扩展名，避免奇怪字符。"""
-    ext = Path(original_name).suffix.lower()
-    if ext == ".jpeg":
-        ext = ".jpg"
-    return f"{datetime.now(timezone.utc):%Y%m}/{uuid.uuid4().hex}{ext}"
+    return f"{datetime.now(timezone.utc):%Y%m}/{uuid.uuid4().hex}{_ext_of(original_name)}"
+
+
+def new_tmp_path(original_name: str) -> Path:
+    """上传先落到 data/media/tmp/ 里（不在正式命名规则内，不会被当成附件），查重后再决定复用还是转正。"""
+    d = media_dir() / "tmp"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{uuid.uuid4().hex}{_ext_of(original_name)}"
+
+
+def file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def find_same_content(path: Path) -> str | None:
+    """在 data/media/ 里找一个内容完全相同的已有附件（先比大小，大小一样再比 sha256）。返回相对路径，没有返回 None。
+    不同场景（素材库 / 回复 / 定时发帖）共用同一个附件目录，同一张图重复上传时直接复用，不再多存一份。"""
+    size = path.stat().st_size
+    root = media_dir()
+    target: str | None = None
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.resolve() == path.resolve():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if not is_safe_rel(rel):
+            continue
+        try:
+            if p.stat().st_size != size:
+                continue
+        except OSError:
+            continue
+        if target is None:
+            target = file_hash(path)
+        if file_hash(p) == target:
+            return rel
+    return None
+
+
+def commit_upload(tmp: Path, original_name: str) -> tuple[str, bool]:
+    """把临时上传文件转正：内容和已有附件相同 → 删掉临时文件、返回已有的相对路径 (rel, True)；
+    否则移到正式位置 YYYYMM/uuid.ext，返回 (rel, False)。"""
+    existing = find_same_content(tmp)
+    if existing:
+        tmp.unlink(missing_ok=True)
+        return existing, True
+    rel = new_rel_path(original_name)
+    dst = abs_path(rel)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp.replace(dst)
+    return rel, False
 
 
 def describe(files: list[str]) -> str:
@@ -189,16 +245,6 @@ def delete_file(rel: str) -> None:
         pass
 
 
-def referenced_files() -> set[str]:
-    """库里所有还被引用的附件，用来清理孤儿文件。"""
-    refs: set[str] = set()
-    with database.get_conn() as conn:
-        for tbl, col in (("materials", "media_files"), ("review_queue", "final_media_files"), ("scheduled_posts", "media_files")):
-            for r in conn.execute(f"SELECT {col} AS v FROM {tbl}").fetchall():
-                refs.update(parse_files(r["v"]))
-    return refs
-
-
 def sweep_orphans() -> int:
     """删除没有任何记录引用的附件文件。返回删除数。"""
     refs = referenced_files()
@@ -213,6 +259,13 @@ def sweep_orphans() -> int:
                     n += 1
                 except OSError:
                     pass
+    # 上传中途断掉留下的临时文件（启动时跑，此刻没有正在进行的上传）
+    for p in (root / "tmp").glob("*"):
+        if p.is_file():
+            try:
+                p.unlink(); n += 1
+            except OSError:
+                pass
     return n
 
 
