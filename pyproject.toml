@@ -9,7 +9,7 @@ dependencies = [
     "httpx>=0.27",
     # 真实 X 适配器：official=tweepy（X API v2）/ unofficial=twifork（twikit 分支）
     "tweepy>=4.14,<5",
-    "twifork>=2.3.5",
+    "twifork>=2.4.0",
 ]
 
 [build-system]

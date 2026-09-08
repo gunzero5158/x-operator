@@ -1590,7 +1590,7 @@ wheels = [
 
 [[package]]
 name = "twifork"
-version = "2.3.5"
+version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -1602,9 +1602,9 @@ dependencies = [
     { name = "pyotp" },
     { name = "webvtt-py" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/3a/f794d6bb63604fac6774c6b398d0687ef677cfa33757b874213c8d55f720/twifork-2.3.5.tar.gz", hash = "sha256:43c7f2ce0a359f51c5d1a68f1f471fdd43e94dca5519ed421e141ccfec000828", size = 74709, upload-time = "2026-07-05T22:23:21.329Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/2f/b6e46d7c1afb9f5cc384a228c679fbd5ac966dc9ddf06319fd54c620a89b/twifork-2.4.0.tar.gz", hash = "sha256:cd8b70a484a94b64d00fc0b111983a976b59cbfe378260432544c00d562c1794", size = 133871, upload-time = "2026-08-30T15:52:07.142Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/9e/57ad45735d8ffd55ac4eecd6a6b91bf9cc598a2fc83be0c9a45e8d413fa5/twifork-2.3.5-py3-none-any.whl", hash = "sha256:1da58ac3dd0172c0656797fefe542dc67d26fb433fdfbfd0da122c4fbd316357", size = 88118, upload-time = "2026-07-05T22:23:19.975Z" },
+    { url = "https://files.pythonhosted.org/packages/51/05/088df0268236832d5b7672f148baf71c8bb6ad65c73f4885850de71ddbfc/twifork-2.4.0-py3-none-any.whl", hash = "sha256:3957d7dd6c957053aa654a9bacffb804e82d2e3e0c7ab8a79cf2f62bed170c32", size = 147565, upload-time = "2026-08-30T15:52:05.727Z" },
 ]
 
 [[package]]
@@ -1986,7 +1986,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "nicegui", specifier = ">=2.0" },
     { name = "tweepy", specifier = ">=4.14,<5" },
-    { name = "twifork", specifier = ">=2.3.5" },
+    { name = "twifork", specifier = ">=2.4.0" },
 ]
 
 [[package]]
