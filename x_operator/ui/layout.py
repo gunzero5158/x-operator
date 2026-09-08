@@ -57,10 +57,13 @@ def shell(active: str):
                     if path == "/queue" and pc:
                         ui.badge(str(pc), color=None).classes("bg-red-600 text-white ml-1")
 
-        # 右：账号告警
-        ac = _alert_count()
-        if ac:
-            ui.badge(f"⚠ {ac} 账号凭据失效", color=None).classes("bg-red-600 text-white shrink-0")
+        # 右：显示时区 + 账号告警
+        with ui.row().classes("items-center gap-2 shrink-0"):
+            ui.label(f"🕒 {display_tz_name()}").classes("text-xs text-slate-400") \
+                .tooltip("页面上所有时间按这个时区显示，可在「设置 → 自动运行」里改；不影响账号活跃时段 / 定时计划的判断")
+            ac = _alert_count()
+            if ac:
+                ui.badge(f"⚠ {ac} 账号凭据失效", color=None).classes("bg-red-600 text-white")
     container = ui.column().classes("max-w-5xl mx-auto p-4 w-full")
     with container:
         yield container
@@ -248,14 +251,40 @@ def fmt_views(n: int | None) -> str:
     return str(n)
 
 
-def fmt_time(iso: str | None) -> str:
-    """UTC ISO → 本地易读（浏览器所在时区不可知，这里按账号常用的东京时间显示）。"""
-    from ..db.database import parse_iso
+DEFAULT_DISPLAY_TZ = "Asia/Tokyo"
+_display_tz_cache: dict = {"name": None, "zone": None}
+
+
+def display_tz_name() -> str:
+    """设置 → 自动运行 里选的「界面显示时区」。"""
+    from .. import config
+    return (config.get("display_timezone") or DEFAULT_DISPLAY_TZ).strip() or DEFAULT_DISPLAY_TZ
+
+
+def display_tz():
+    """显示用的 ZoneInfo。列表页每行都要转一次，按名字缓存，设置页改完调 refresh_display_tz()。"""
     from zoneinfo import ZoneInfo
+    if _display_tz_cache["zone"] is None:
+        name = display_tz_name()
+        try:
+            zone = ZoneInfo(name)
+        except Exception:
+            zone = ZoneInfo(DEFAULT_DISPLAY_TZ)
+        _display_tz_cache.update(name=name, zone=zone)
+    return _display_tz_cache["zone"]
+
+
+def refresh_display_tz() -> None:
+    _display_tz_cache.update(name=None, zone=None)
+
+
+def fmt_time(iso: str | None) -> str:
+    """UTC ISO → 易读（浏览器所在时区不可知，按设置里的「界面显示时区」显示，默认东京）。"""
+    from ..db.database import parse_iso
     dt = parse_iso(iso)
     if not dt:
         return "—"
     try:
-        return dt.astimezone(ZoneInfo("Asia/Tokyo")).strftime("%m-%d %H:%M")
+        return dt.astimezone(display_tz()).strftime("%m-%d %H:%M")
     except Exception:
         return iso or "—"

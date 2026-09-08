@@ -8,7 +8,7 @@ from ..core import budget
 from ..core.monitor import READ_CHANNEL_LABEL, get_read_account, read_channel, read_is_billed
 from ..core.scheduler import AUTO_JOBS, describe_schedule, job_enabled, next_runs
 from ..db.database import get_conn
-from .layout import fmt_time, run_job, run_job_with_progress, shell
+from .layout import fmt_time, run_job, run_job_with_progress, shell, display_tz
 
 
 def _stats() -> dict:
@@ -102,7 +102,7 @@ def register(jobs) -> None:
                         nr = next_runs(jobs.scheduler)
                         parts = []
                         for jid, (jname, _d, _k, _dm, _dt) in AUTO_JOBS.items():
-                            parts.append(f"{jname}：" + (("开，下次 " + nr[jid].strftime("%m-%d %H:%M") + "，" + describe_schedule(jid)) if nr.get(jid) else "关"))
+                            parts.append(f"{jname}：" + (("开，下次 " + nr[jid].astimezone(display_tz()).strftime("%m-%d %H:%M") + "，" + describe_schedule(jid)) if nr.get(jid) else "关"))
                         parts.append("发送分发：" + ("开（每分钟）" if job_enabled("dispatcher") else "关"))
                         ui.label("自动运行状态 · " + "；".join(parts)).classes("text-xs text-gray-500")
                         with ui.row().classes("gap-2 flex-wrap"):

@@ -15,7 +15,7 @@ from ..core.monitor import READ_CHANNEL_LABEL, read_channel
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           LLMClient)
-from .layout import confirm, shell
+from .layout import confirm, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
                "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin"]
@@ -101,10 +101,23 @@ def _run_panel(jobs):
     ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
              "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。").classes("text-xs text-gray-400")
 
+    cur_disp = display_tz_name()
+    disp_tz = ui.select(_TZ_CHOICES if cur_disp in _TZ_CHOICES else [cur_disp] + _TZ_CHOICES, value=cur_disp,
+                        label="界面显示时区").classes("w-72").props("outlined dense")
+    ui.label("审核队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
+             "每日上限、定时计划到点时间仍按各账号自己的时区判断。").classes("text-xs text-gray-400 -mt-1 mb-1")
+
     status_box = ui.column().classes("w-full gap-0")
 
     def fmt_next(dt):
-        return dt.strftime("%m-%d %H:%M") if dt else "—"
+        return dt.astimezone(display_tz()).strftime("%m-%d %H:%M") if dt else "—"
+
+    def on_disp_tz(e):
+        config.set_value("display_timezone", disp_tz.value or DEFAULT_DISPLAY_TZ)
+        refresh_display_tz()
+        ui.notify(f"界面时间改为按 {display_tz_name()} 显示（其他页面刷新后生效）", type="positive", multi_line=True)
+        render_status()
+    disp_tz.on("update:model-value", on_disp_tz)
 
     def render_status():
         status_box.clear()

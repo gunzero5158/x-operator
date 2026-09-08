@@ -28,6 +28,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # 自动轮询（总开关默认关；每个 job 有单独开关，节奏可选 interval=每隔 N 分钟 / daily=每天固定时间点）
     "auto_jobs_enabled": "0",
     "auto_jobs_timezone": "Asia/Shanghai",
+    # 界面上所有时间（创建 / 发送 / 下次运行……）按哪个时区显示；只影响显示，不影响活跃时段 / 定时计划的判断
+    "display_timezone": "Asia/Tokyo",
     "search_auto_enabled": "1",
     "search_schedule_mode": "interval",
     "search_interval_minutes": "720",

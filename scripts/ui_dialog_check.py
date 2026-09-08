@@ -167,6 +167,30 @@ async def test_schedule_media_pool_mode(user: User):
     await user.should_see("合计最多 4 个")
 
 
+async def test_display_timezone_setting(user: User):
+    """设置 → 自动运行 里改「界面显示时区」：头部显示当前时区，fmt_time 按新时区转；账号自己的时区不受影响。"""
+    from x_operator import config
+    from x_operator.ui.layout import fmt_time, refresh_display_tz
+    _pages()
+    with get_conn() as conn:
+        acc_tz_before = conn.execute("SELECT timezone FROM accounts WHERE id=1").fetchone()["timezone"]
+    config.set_value("display_timezone", "Asia/Tokyo"); refresh_display_tz()
+    assert fmt_time("2026-09-08T12:00:00Z") == "09-08 21:00"
+    await user.open("/settings")
+    await user.should_see("🕒 Asia/Tokyo")
+    user.find("自动运行").click()
+    await user.should_see("界面显示时区")
+    _choose(user, "界面显示时区", "Asia/Taipei")
+    await user.should_see("改为按 Asia/Taipei 显示")
+    assert config.get("display_timezone") == "Asia/Taipei"
+    assert fmt_time("2026-09-08T12:00:00Z") == "09-08 20:00"
+    with get_conn() as conn:
+        assert conn.execute("SELECT timezone FROM accounts WHERE id=1").fetchone()["timezone"] == acc_tz_before  # 账号自己的时区不被改动
+    await user.open("/queue")
+    await user.should_see("🕒 Asia/Taipei")
+    config.set_value("display_timezone", "Asia/Tokyo"); refresh_display_tz()
+
+
 async def test_queue_legend(user: User):
     _pages()
     await user.open("/queue")
