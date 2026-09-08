@@ -53,19 +53,30 @@ def media_badge(files: list[str]) -> None:
 class MediaField:
     """带上传的附件编辑区。用法：f = MediaField(initial)；保存时取 f.files。"""
 
-    def __init__(self, initial: list[str] | None = None, label: str = "配图 / 视频（选填）", note: str = ""):
+    def __init__(self, initial: list[str] | None = None, label: str = "配图 / 视频（选填）", note: str = "",
+                 max_items: int = media.MAX_ITEMS):
         self.files: list[str] = list(initial or [])
         self._initial = set(self.files)
+        self.max_items = max_items
         with ui.column().classes("w-full gap-1"):
-            ui.label(label).classes("text-sm font-semibold")
+            self.title = ui.label(label).classes("text-sm font-semibold")
             self.strip = ui.row().classes("gap-2 items-center flex-wrap min-h-4")
             self.upload = ui.upload(auto_upload=True, multiple=True, on_upload=self._on_upload,
                                     on_rejected=lambda e: ui.notify("文件被拒收：太大或类型不对。" + media.RULE_TEXT, type="negative", multi_line=True),
                                     max_file_size=media.VIDEO_MAX_BYTES,
                                     label="点这里选文件，或把图片 / 视频拖进来（上传完自动出现在上面）") \
                 .props(f'accept="{media.ACCEPT}" flat bordered').classes("w-full")
-            ui.label(media.RULE_TEXT + (" " + note if note else "")).classes("text-xs text-gray-400")
+            self.note = ui.label().classes("text-xs text-gray-400")
+        self.set_limit(max_items, note)
         self.render()
+
+    def set_limit(self, max_items: int, note: str = "", label: str | None = None) -> None:
+        """切换数量上限和下面的说明（定时发帖在「固定附件 / 附件素材池」之间切换时用）。已超上限的文件不动，保存时再拦。"""
+        self.max_items = max_items
+        rule = media.RULE_TEXT if max_items == media.MAX_ITEMS else media.POOL_RULE_TEXT
+        self.note.set_text(rule + (" " + note if note else ""))
+        if label is not None:
+            self.title.set_text(label)
 
     def render(self) -> None:
         self.strip.clear()
@@ -90,7 +101,7 @@ class MediaField:
             size = e.file.size()
         except Exception:
             size = 0
-        err = media.check_one(name, size) or media.can_add(self.files, name)
+        err = media.check_one(name, size) or media.can_add(self.files, name, self.max_items)
         if err:
             ui.notify(err, type="negative", multi_line=True)
             self.upload.reset()

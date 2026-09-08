@@ -9,6 +9,7 @@ X 的附件规则（回复和主贴一样）：图片、GIF、视频合计最多
 from __future__ import annotations
 
 import json
+import random
 import re
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ VIDEO_EXT = {".mp4", ".mov"}
 ALL_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
 
 MAX_ITEMS = 4
+POOL_MAX_ITEMS = 30   # 定时发帖「附件素材池」最多放多少个文件（每次发帖只随机挑 1 个）
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 GIF_MAX_BYTES = 15 * 1024 * 1024
 VIDEO_MAX_BYTES = 512 * 1024 * 1024
@@ -32,6 +34,7 @@ MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp
         ".gif": "image/gif", ".mp4": "video/mp4", ".mov": "video/quicktime"}
 
 RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB）合计最多 4 个，可以混搭。"
+POOL_RULE_TEXT = f"图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB），素材池最多放 {POOL_MAX_ITEMS} 个；每次发帖从里面随机挑 1 个。"
 
 
 def media_dir() -> Path:
@@ -91,19 +94,34 @@ def check_one(name: str, size: int) -> str:
     return ""
 
 
-def check_set(files: list[str]) -> str:
-    """一组附件合不合 X 的规则。返回错误原因，空串 = 可以。"""
+def check_set(files: list[str], max_items: int = MAX_ITEMS) -> str:
+    """一组附件合不合 X 的规则。返回错误原因，空串 = 可以。max_items：素材池模式可以放得比一条推文能带的多。"""
     kinds = [media_kind(f) for f in files]
     if any(k is None for k in kinds):
         return "附件里有不支持的文件类型"
-    if len(files) > MAX_ITEMS:
-        return f"附件合计最多 {MAX_ITEMS} 个"
+    if len(files) > max_items:
+        return f"附件合计最多 {max_items} 个"
     return ""
 
 
-def can_add(files: list[str], name: str) -> str:
+def can_add(files: list[str], name: str, max_items: int = MAX_ITEMS) -> str:
     """再加一个文件行不行（给上传框用）。"""
-    return check_set(list(files) + [name])
+    return check_set(list(files) + [name], max_items)
+
+
+def pick_from_pool(pool: list[str], recent_used: list[str]) -> list[str]:
+    """从附件素材池里随机挑 1 个：优先挑最近没用过的；全用过一轮就避开最近一次用的那个再随机。
+    recent_used 按「最近的在前」排。池子为空返回 []。"""
+    pool = [f for f in (pool or []) if f]
+    if not pool:
+        return []
+    if len(pool) == 1:
+        return [pool[0]]
+    used = [f for f in recent_used if f in pool]
+    fresh = [f for f in pool if f not in used]
+    if not fresh:
+        fresh = [f for f in pool if f != used[0]] if used else list(pool)
+    return [random.choice(fresh)]
 
 
 def new_rel_path(original_name: str) -> str:

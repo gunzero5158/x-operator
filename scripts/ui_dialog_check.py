@@ -152,6 +152,21 @@ async def test_schedule_dialog_has_media_field(user: User):
     assert [e for e in user.find(kind=ui.input).elements if e.value == "6h"], "选「每隔」后表达式应换成默认 6h"
 
 
+async def test_schedule_media_pool_mode(user: User):
+    """定时发帖（AI 主题）：附件默认「固定」、上限 4；切到「素材池」后上限变 30、标题和说明跟着换。"""
+    _pages()
+    await user.open("/schedule")
+    user.find("新建发帖计划").click()
+    _choose(user, "每次发什么", "ai_topic")
+    await user.should_see("每次随帖一起发的配图 / 视频（选填）")
+    await user.should_see("合计最多 4 个")
+    _choose(user, "配图 / 视频怎么带", "pool")
+    await user.should_see("配图 / 视频素材池（选填，每次随机挑 1 个）")
+    await user.should_see("素材池最多放 30 个")
+    _choose(user, "配图 / 视频怎么带", "fixed")
+    await user.should_see("合计最多 4 个")
+
+
 async def test_queue_legend(user: User):
     _pages()
     await user.open("/queue")

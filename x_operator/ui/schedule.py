@@ -32,6 +32,10 @@ def _describe_when(sp) -> str:
     return f"{_TYPE_LABEL.get(t, t)}: {sp['schedule_expr']}"
 _STATUS_LABEL = {"active": "进行中", "paused": "已暂停", "done": "已完成", "missed": "已错过"}
 
+MEDIA_MODE_LABEL = {"fixed": "固定：每次都带下面这几个", "pool": "素材池：每次从下面随机挑 1 个"}
+MEDIA_FIELD_LABEL = {"fixed": "每次随帖一起发的配图 / 视频（选填）", "pool": "配图 / 视频素材池（选填，每次随机挑 1 个）"}
+MEDIA_FIELD_NOTE = "固定素材 / 素材池轮流模式的附件跟着素材走，在素材库里给素材加。"
+
 HINTS = {
     "mode": "固定一条素材=每次都发这条（周期计划要配合「AI 改写变体」，否则第二次起 X 会判重复拒发）；"
             "素材池轮流=在符合语言/标签的启用中发帖素材里，每次挑用得最少、最近 30 天没发过的一条，最省心；"
@@ -40,6 +44,8 @@ HINTS = {
     "rewrite": "开=每次发之前让 AI 在素材基础上改写一个新变体（意思不变、保留链接和 @、换措辞），并避开最近 30 天发过的内容。"
                "周期计划推荐开；AI 出错时会退回素材原文并在说明里注明。",
     "brief": "写清楚主题/立场、必须带的链接或 @账号（写在这里会强制原样出现）、语气。AI 会参考最近发过的内容换角度写。",
+    "media_mode": "固定=下面放的几个附件每次都一起发（最多 4 个）；素材池=下面放一批图片 / 视频（最多 30 个），"
+                  "每次发帖随机挑 1 个，优先挑最近没发过的，不会连着两次用同一个。",
     "expr": "每天 → 21:00 · 每周 → mon,thu 21:00 · 每隔 → 6h（每 6 小时一条，从保存时算起；也可 90m）· 只发一次 → 2026-09-10T21:00。时间按所选账号的时区。",
     "auto": "开=到点直接进「待发送」由分发器发出，不经人工审核；关=先进待审核，你批准后才发。AI 生成的内容建议先关着看几次。",
 }
@@ -108,7 +114,13 @@ def register(jobs) -> None:
                                     tag("自动批准", "warn", "到点直接进待发送，不经人工审核")
                                 if mode == "fixed" and sp["mat_deleted"]:
                                     tag("素材已在回收站", "warn", "到点会暂停；请编辑计划换素材或恢复素材")
-                                media_badge(media.parse_files(sp["mat_media"] if mode == "fixed" else (sp["media_files"] if mode == "ai_topic" else None)))
+                                if mode == "ai_topic" and sp["media_mode"] == "pool" and media.parse_files(sp["media_files"]):
+                                    pool_files = media.parse_files(sp["media_files"])
+                                    lost = media.missing(pool_files)
+                                    tag(f"🎲 附件素材池 {len(pool_files)} 个" + ("（有文件丢失）" if lost else ""), "media" if not lost else "bad",
+                                        "每次发帖从这批图片 / 视频里随机挑 1 个" if not lost else "素材池里有文件在 data/media 找不到了，挑到它会发送失败")
+                                else:
+                                    media_badge(media.parse_files(sp["mat_media"] if mode == "fixed" else (sp["media_files"] if mode == "ai_topic" else None)))
                                 ui.label(f"下次 {fmt_time(sp['next_run_at']) if sp['next_run_at'] else '—'}"
                                          + (f" · 上次 {fmt_time(sp['last_run_at'])}" if sp["last_run_at"] else "")).classes("text-xs text-gray-400")
                             if mode == "fixed":
@@ -175,10 +187,18 @@ def register(jobs) -> None:
                 write_lang = ui.select(_write_langs(), value=(sp["pool_lang"] if sp and sp["pool_lang"] in _write_langs() else "ja"),
                                        label="推文语言").classes("w-60").props("outlined")
                 brief = ui.textarea("主题要求", value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow")
-                hint(HINTS["brief"])
+                hint(HINTS["brief"], after_row=True)   # ai_box 是 gap-1 的紧凑列，负边距会压到文本框上
                 template_controls(brief)
-                mf = MediaField(media.parse_files(sp["media_files"]) if sp else [], label="每次随帖一起发的配图 / 视频（选填）",
-                                note="固定素材 / 素材池模式的附件跟着素材走，在素材库里给素材加。")
+                media_mode = ui.select(MEDIA_MODE_LABEL, value=(sp["media_mode"] if sp and sp["media_mode"] in MEDIA_MODE_LABEL else "fixed"),
+                                       label="配图 / 视频怎么带").classes("w-full").props("outlined")
+                hint(HINTS["media_mode"], after_row=True)
+                mf = MediaField(media.parse_files(sp["media_files"]) if sp else [], label=MEDIA_FIELD_LABEL["fixed"],
+                                note=MEDIA_FIELD_NOTE)
+
+                def sync_media_mode():
+                    pool = media_mode.value == "pool"
+                    mf.set_limit(media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS, MEDIA_FIELD_NOTE, label=MEDIA_FIELD_LABEL[media_mode.value])
+                media_mode.on("update:model-value", lambda e: sync_media_mode()); sync_media_mode()
 
             def sync():
                 m = mode.value
@@ -210,8 +230,10 @@ def register(jobs) -> None:
                     ui.notify("固定素材模式要选一条发帖素材", type="negative"); return
                 if m == "ai_topic" and not (brief.value or "").strip():
                     ui.notify("AI 按主题创作要填主题要求", type="negative"); return
-                if m == "ai_topic" and media.check_set(mf.files):
-                    ui.notify(media.check_set(mf.files), type="negative"); return
+                media_max = media.POOL_MAX_ITEMS if media_mode.value == "pool" else media.MAX_ITEMS
+                if m == "ai_topic" and media.check_set(mf.files, media_max):
+                    ui.notify(media.check_set(mf.files, media_max) + ("（想放更多请把「配图 / 视频怎么带」改成素材池）" if media_mode.value != "pool" else ""),
+                              type="negative", multi_line=True); return
                 if (m == "ai_topic" or (rewrite.value and m in ("fixed", "pool"))) and not jobs.llm.configured:
                     ui.notify("AI 创作 / AI 改写需要先到「设置 → LLM」配置网关（或先关掉「AI 改写变体」）", type="negative", multi_line=True); return
                 if m == "pool":
@@ -252,20 +274,21 @@ def register(jobs) -> None:
                             ai_rewrite=1 if (rewrite.value and m in ("fixed", "pool")) else 0,
                             ai_brief=(brief.value or "").strip() if m == "ai_topic" else "",
                             media_files=media.dump_files(mf.files if m == "ai_topic" else []),
+                            media_mode=media_mode.value if m == "ai_topic" else "fixed",
                             schedule_type=stype.value, schedule_expr=expr.value.strip(), next_run_at=nxt_s,
                             auto_approve=1 if auto.value else 0)
                 with get_conn() as conn:
                     if sp:
                         conn.execute(
                             "UPDATE scheduled_posts SET account_id=:account_id, material_id=:material_id, content_mode=:content_mode, "
-                            "pool_lang=:pool_lang, pool_tags=:pool_tags, ai_rewrite=:ai_rewrite, ai_brief=:ai_brief, media_files=:media_files, "
+                            "pool_lang=:pool_lang, pool_tags=:pool_tags, ai_rewrite=:ai_rewrite, ai_brief=:ai_brief, media_files=:media_files, media_mode=:media_mode, "
                             "schedule_type=:schedule_type, schedule_expr=:schedule_expr, next_run_at=:next_run_at, "
                             "auto_approve=:auto_approve, status='active', last_error=NULL WHERE id=:id", {**data, "id": sp["id"]})
                     else:
                         conn.execute(
-                            "INSERT INTO scheduled_posts(account_id, material_id, content_mode, pool_lang, pool_tags, ai_rewrite, ai_brief, media_files, "
+                            "INSERT INTO scheduled_posts(account_id, material_id, content_mode, pool_lang, pool_tags, ai_rewrite, ai_brief, media_files, media_mode, "
                             "schedule_type, schedule_expr, next_run_at, auto_approve, status, created_at) "
-                            "VALUES (:account_id, :material_id, :content_mode, :pool_lang, :pool_tags, :ai_rewrite, :ai_brief, :media_files, "
+                            "VALUES (:account_id, :material_id, :content_mode, :pool_lang, :pool_tags, :ai_rewrite, :ai_brief, :media_files, :media_mode, "
                             ":schedule_type, :schedule_expr, :next_run_at, :auto_approve, 'active', :created_at)",
                             {**data, "created_at": utcnow_iso()})
                     conn.commit()

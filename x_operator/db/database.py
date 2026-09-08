@@ -69,6 +69,8 @@ _ADDED_COLUMNS = [
     ("scheduled_posts", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
     # v13：账号是否订阅 X Premium（会员不限推文长度；免费账号 280 单位 ≈ 140 个汉字）
     ("accounts", "is_premium", "INTEGER NOT NULL DEFAULT 0"),
+    # v14：定时发帖（AI 按主题创作）的附件方式——fixed=每次都带这几个；pool=从素材池里每次随机挑一个
+    ("scheduled_posts", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
 ]
 
 

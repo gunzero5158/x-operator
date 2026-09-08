@@ -37,6 +37,18 @@ POST_MODE_LABEL = {"fixed": "固定一条素材", "pool": "素材池轮流", "ai
 RECENT_POST_DAYS = 30
 
 
+
+def recent_plan_media(conn: sqlite3.Connection, sp_id: int, limit: int) -> list[str]:
+    """这个计划最近几次生成的发帖条目带过哪些附件（最近的在前，去重），给附件素材池避免连续重复用。"""
+    rows = conn.execute("SELECT final_media_files FROM review_queue WHERE scheduled_post_id=? AND status<>'failed' "
+                        "ORDER BY id DESC LIMIT ?", (sp_id, max(limit, 1))).fetchall()
+    out: list[str] = []
+    for r in rows:
+        for f in media.parse_files(r["final_media_files"]):
+            if f not in out:
+                out.append(f)
+    return out
+
 def recent_post_texts(conn: sqlite3.Connection, account_id: int, limit: int = 20) -> list[str]:
     """这个账号最近发过 / 排着要发的推文正文——用来避开重复。"""
     cutoff = to_iso(datetime.now(timezone.utc) - timedelta(days=RECENT_POST_DAYS))
@@ -100,6 +112,13 @@ class Jobs:
         if mode == "ai_topic":
             brief = (_sp_get(sp, "ai_brief", "") or "").strip()
             plan_files = media.parse_files(_sp_get(sp, "media_files", "[]"))
+            media_note = ""
+            if plan_files and (_sp_get(sp, "media_mode", "fixed") or "fixed") == "pool":
+                # 附件素材池：每次随机挑 1 个，优先挑这个计划最近没发过的
+                recent_used = recent_plan_media(conn, sp["id"], len(plan_files))
+                picked = media.pick_from_pool(plan_files, recent_used)
+                media_note = f"配图从素材池（{len(plan_files)} 个）里随机挑了 1 个"
+                plan_files = picked
             if not brief:
                 return None, None, "计划选了「AI 按主题创作」但没填主题要求，请编辑计划补上", plan_files
             lang = (_sp_get(sp, "pool_lang", "") or "ja").strip() or "ja"
@@ -109,7 +128,8 @@ class Jobs:
                 return None, None, f"AI 按主题创作失败：{e}", plan_files
             text, len_note = textlimit.fit(res["text"], account, self.llm, extract_must_include(brief), lang)
             return text, None, "AI 按主题创作：" + (res.get("reason") or "") + (
-                f"（带{media.describe(plan_files)}）" if plan_files else "") + (f"；{len_note}" if len_note else ""), plan_files
+                f"（带{media.describe(plan_files)}）" if plan_files else "") + (f"；{media_note}" if media_note else "") + (
+                f"；{len_note}" if len_note else ""), plan_files
         if mode == "pool":
             mat, note = pick_pool_material(conn, sp, recent)
             if mat is None:

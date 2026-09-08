@@ -73,7 +73,7 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 13 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 14 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -883,11 +883,32 @@ ok, msg = jobs.fire_plan_now(fixed_id); assert ok and "带1 张图片" in msg, m
 with get_conn() as conn:
     q = conn.execute("SELECT final_media_files FROM review_queue WHERE scheduled_post_id=? ORDER BY id DESC LIMIT 1", (fixed_id,)).fetchone()
     assert mediam.parse_files(q["final_media_files"]) == [rel1]
+# 附件素材池：计划挂 3 个文件、media_mode=pool → 每次只带 1 个，三次发帖把 3 个都轮一遍，第四次避开上一次用的
+rel_p2 = mediam.new_rel_path("p2.png"); mediam.abs_path(rel_p2).write_bytes(b"x")
+rel_p3 = mediam.new_rel_path("p3.png"); mediam.abs_path(rel_p3).write_bytes(b"x")
+pool_set = {rel1, rel_p2, rel_p3}
+with get_conn() as conn:
+    conn.execute("UPDATE scheduled_posts SET media_files=?, media_mode='pool' WHERE id=?", (mediam.dump_files(sorted(pool_set)), topic_id)); conn.commit()
+picked_seq = []
+for _ in range(4):
+    FakeCli.calls = []; FakeCli.script = [FakeResp('{"text": "素材池主贴 @MyBrand", "reason": "r"}')]
+    ok, msg = jobs.fire_plan_now(topic_id); assert ok and "素材池（3 个）里随机挑了 1 个" in msg and "带1 张图片" in msg, msg
+    with get_conn() as conn:
+        q = conn.execute("SELECT final_media_files FROM review_queue WHERE scheduled_post_id=? ORDER BY id DESC LIMIT 1", (topic_id,)).fetchone()
+    got = mediam.parse_files(q["final_media_files"]); assert len(got) == 1 and got[0] in pool_set, got
+    picked_seq.append(got[0])
+assert set(picked_seq[:3]) == pool_set, picked_seq          # 前三次不重复，把池子轮完
+assert picked_seq[3] != picked_seq[2], picked_seq            # 第四次不和上一次一样
+assert mediam.pick_from_pool([], []) == [] and mediam.pick_from_pool(["a"], ["a"]) == ["a"]
+assert mediam.pick_from_pool(["a", "b"], ["a"]) == ["b"] and mediam.pick_from_pool(["a", "b"], ["b", "a"]) == ["a"]
+assert mediam.check_set(["a.png"] * 5) and not mediam.check_set(["a.png"] * 5, mediam.POOL_MAX_ITEMS) and mediam.check_set(["a.png"] * 31, mediam.POOL_MAX_ITEMS)
+with get_conn() as conn:
+    conn.execute("UPDATE scheduled_posts SET media_files=?, media_mode='fixed' WHERE id=?", (mediam.dump_files([rel1]), topic_id)); conn.commit()
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 # 孤儿清理：没被任何记录引用的文件才删
 orphan = mediam.new_rel_path("o.png"); mediam.abs_path(orphan).write_bytes(b"x")
 assert mediam.sweep_orphans() == 1 and not mediam.abs_path(orphan).exists() and mediam.abs_path(rel1).exists()
-print("[6f14] 附件：规则校验 / 素材→队列 / 发送前上传 / 丢文件标失败 / AI 撰写与定时计划带附件 / 孤儿清理 OK")
+print("[6f14] 附件：规则校验 / 素材→队列 / 发送前上传 / 丢文件标失败 / AI 撰写与定时计划带附件 / 附件素材池随机轮换 / 孤儿清理 OK")
 
 # [6f15] 定时发帖「每隔 N 小时/分钟」：解析、下次时间 = 现在 + 间隔、v12 后 CHECK 约束接受 interval、旧 cron 仍能算
 from x_operator.core.schedule_calc import compute_next_run, describe_interval, parse_interval  # noqa: E402
