@@ -24,14 +24,14 @@ ALL_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
 MAX_ITEMS = 4
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 GIF_MAX_BYTES = 15 * 1024 * 1024
-VIDEO_MAX_BYTES = 1024 * 1024 * 1024
+VIDEO_MAX_BYTES = 512 * 1024 * 1024
 ACCEPT = ".jpg,.jpeg,.png,.webp,.gif,.mp4,.mov"
 
 KIND_LABEL = {"image": "图片", "gif": "GIF", "video": "视频"}
 MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
         ".gif": "image/gif", ".mp4": "video/mp4", ".mov": "video/quicktime"}
 
-RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤1024MB）合计最多 4 个，可以混搭。"
+RULE_TEXT = "图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB）合计最多 4 个，可以混搭。"
 
 
 def media_dir() -> Path:

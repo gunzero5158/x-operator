@@ -186,16 +186,16 @@ def _card_text(el) -> str:
 
 
 async def test_settings_media_storage_panel(user: User):
-    """设置 → 数据：能看到素材附件占用统计、孤儿文件列表和「前往清理」按钮；视频上限已是 1024MB。"""
+    """设置 → 数据：能看到素材附件占用统计、孤儿文件列表和「前往清理」按钮；视频单文件上限为 512MB。"""
     _pages()
     # 造一个没人引用的孤儿文件
     orphan = media.abs_path(media.new_rel_path("z.mp4"))
     orphan.parent.mkdir(parents=True, exist_ok=True); orphan.write_bytes(b"0" * 2048)
     st = media.storage_stats()
     assert st["count"] >= 2 and any(rel.endswith(".mp4") for rel, _ in st["orphans"]), st
-    assert media.VIDEO_MAX_BYTES == 1024 * 1024 * 1024
-    assert media.check_one("big.mp4", 1000 * 1024 * 1024) == ""
-    assert "1024MB" in media.check_one("huge.mp4", 1100 * 1024 * 1024)
+    assert media.VIDEO_MAX_BYTES == 512 * 1024 * 1024   # 与 X 官方 API 单个视频上限一致
+    assert media.check_one("big.mp4", 500 * 1024 * 1024) == ""
+    assert "512MB" in media.check_one("huge.mp4", 600 * 1024 * 1024)
     await user.open("/settings")
     user.find("数据").click()
     await user.should_see("素材附件占用空间")
