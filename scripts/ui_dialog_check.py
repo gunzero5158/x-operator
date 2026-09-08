@@ -49,6 +49,13 @@ def _choose(user: User, label, key, kind=ui.select) -> None:
     UserInteraction(user, {el}, None).trigger("update:modelValue", {"value": idx} if kind is ui.select else idx)
 
 
+def _click_button(user: User, label: str) -> None:
+    """只点按钮：user.find(文字) 是子串匹配，页面上别的小字含同样的词时会点错。"""
+    btns = [e for e in user.find(kind=ui.button).elements if e.text == label]
+    assert btns, f"没有文字为「{label}」的按钮"
+    UserInteraction(user, {btns[0]}, None).click()
+
+
 def _pages() -> None:
     """user fixture 每个测试前会清空页面注册，所以在测试里注册。"""
     for mod in (materials, queue, schedule, settings_page, targets):
@@ -64,6 +71,55 @@ async def test_materials_legend_and_dialog(user: User):
     await user.should_see("配图 / 视频（选填）")
     await user.should_see("没有附件（纯文字）")
     await user.should_see(kind=ui.upload)
+
+
+async def test_material_new_defaults_to_auto_lang_and_saves_detected(user: User):
+    """新建素材：语言默认「自动判断」，输入正文后小字实时显示识别结果，保存落库为识别出的语言码。"""
+    _pages()
+    await user.open("/materials")
+    user.find("新建素材").click()
+    await user.should_see("自动判断：输入正文后会按内容识别语言")
+    sel = [e for e in user.find("语言").elements if isinstance(e, ui.select)][0]
+    assert sel.value == "auto" and "auto" in sel.options and "ja" in sel.options and "ko" in sel.options, (sel.value, sel.options)
+    ta = [e for e in user.find(kind=ui.textarea).elements][0]
+    ta.set_value("今日は新しいツールを試してみました")
+    await user.should_see("识别为「日语」")
+    ta.set_value("This tool is great for your team")
+    await user.should_see("识别为「英语」")
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    with get_conn() as conn:
+        row = conn.execute("SELECT lang FROM materials WHERE text=?", ("This tool is great for your team",)).fetchone()
+    assert row and row["lang"] == "en", dict(row) if row else row
+
+
+async def test_material_manual_lang_overrides_auto(user: User):
+    """手选托底：语言下拉手选「中文」后，即使正文是英文也按手选存；判不出语言且没手选时会拦下来。"""
+    _pages()
+    await user.open("/materials")
+    user.find("新建素材").click()
+    ta = [e for e in user.find(kind=ui.textarea).elements][0]
+    ta.set_value("🎉🎉 https://example.com")
+    await user.should_see("暂时判不出语言")
+    _click_button(user, "保存")
+    await user.should_see("请在「语言」里手选一个")
+    _choose(user, "语言", "zh")
+    await user.should_see("手选：中文")
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    with get_conn() as conn:
+        row = conn.execute("SELECT lang FROM materials WHERE text=?", ("🎉🎉 https://example.com",)).fetchone()
+    assert row and row["lang"] == "zh", dict(row) if row else row
+
+
+async def test_material_edit_keeps_stored_lang(user: User):
+    """编辑已有素材：语言下拉显示原来存的语言（不是自动），小字提示手选。"""
+    _pages()
+    await user.open("/materials")
+    user.find("编辑").click()
+    sel = [e for e in user.find("语言").elements if isinstance(e, ui.select)][0]
+    assert sel.value == "ja", sel.value
+    await user.should_see("手选：日语")
 
 
 async def test_material_edit_shows_existing_attachment(user: User):

@@ -20,12 +20,11 @@ from ..adapters.base import TweetData, XClientError
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import budget
+from .langdetect import LANG_LABEL  # noqa: F401  规则页等处仍从 search 取
 from .matcher import MatchEngine
 from .monitor import (FILTER_REASONS, _log_read, _row_int, get_read_account,
                       precheck, read_is_billed, store_target)
 
-LANG_LABEL = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "es": "西班牙语",
-              "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
 
 # X 官方「最近搜索」只能查 7 天；规则里填得再大也只能抓到这么多
 OFFICIAL_SEARCH_MAX_HOURS = 168

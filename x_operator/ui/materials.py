@@ -9,7 +9,8 @@ import sqlite3
 
 from nicegui import run, ui
 
-from ..core import media
+from ..core import langdetect, media
+from ..core.langdetect import LANG_LABEL
 from ..db.database import get_conn, utcnow_iso
 from .layout import TAG, confirm, fmt_time, shell
 from .media_widget import MediaField, media_badge, media_strip
@@ -20,6 +21,27 @@ KIND_BADGE = {"reply": ("回复", TAG["reply"], "回复素材：用在别人的�
 STATUS_BADGE = {"active": ("启用", TAG["ok"], "启用：会被匹配 / 定时发帖计划选中"),
                 "draft": ("草稿", TAG["warn"], "草稿：还没启用，不会被选中"),
                 "archived": ("归档", TAG["off"], "归档：保留但不再参与匹配")}
+
+AUTO_LANG = "auto"  # 语言下拉里「自动判断」这一项的值，保存前会落成具体语言码
+
+
+def resolve_lang(selected: str, text: str) -> str:
+    """下拉选的是「自动判断」就按正文识别，否则用手选的；识别不出返回 ""。"""
+    if selected and selected != AUTO_LANG:
+        return selected
+    return langdetect.detect(text)
+
+
+def lang_hint_text(selected: str, text: str) -> str:
+    """语言下拉下面那行小字：自动模式下实时告诉用户识别成了什么，方便发现误判后手选。"""
+    if selected and selected != AUTO_LANG:
+        return f"手选：{LANG_LABEL.get(selected, selected)}。想改回自动请选「自动判断」。"
+    if not (text or "").strip():
+        return "自动判断：输入正文后会按内容识别语言；识别不准可在上面手选。"
+    code = langdetect.detect(text)
+    if not code:
+        return "自动判断：暂时判不出语言（只有表情 / 链接 / 数字？），保存前请手选一个。"
+    return f"自动判断：识别为「{LANG_LABEL.get(code, code)}」，保存时按这个存；不对请在上面手选。"
 
 
 def _load(kind_filter: str, status_filter: str, trash: bool):
@@ -215,8 +237,18 @@ def register(jobs) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-[640px] max-w-[95vw] max-h-[92vh] overflow-auto"):
             ui.label("编辑素材" if m else "新建素材").classes("text-lg font-bold")
             kind = ui.select({"reply": "回复", "post": "发帖"}, value=m["kind"] if m else "reply", label="类型").classes("w-full").props("outlined")
-            lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文"}, value=m["lang"] if m else "ja", label="语言").classes("w-full").props("outlined")
+            lang_opts = {AUTO_LANG: "自动判断（按正文内容）", **LANG_LABEL}
+            lang_init = (m["lang"] if m and m["lang"] in LANG_LABEL else AUTO_LANG)
+            lang = ui.select(lang_opts, value=lang_init, label="语言").classes("w-full").props("outlined")
             text = ui.textarea("正文", value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
+            lang_hint = ui.label().classes("text-xs text-gray-400 -mt-2 mb-1")
+
+            def refresh_lang_hint():
+                lang_hint.set_text(lang_hint_text(lang.value, text.value))
+
+            text.on_value_change(lambda e: refresh_lang_hint())
+            lang.on_value_change(lambda e: refresh_lang_hint())
+            refresh_lang_hint()
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
             ui.label("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时发帖计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。").classes("text-xs text-gray-400 -mt-2 mb-1")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
@@ -227,10 +259,13 @@ def register(jobs) -> None:
             def do_save():
                 if not text.value.strip():
                     ui.notify("正文不能为空", type="negative"); return
+                final_lang = resolve_lang(lang.value, text.value)
+                if not final_lang:
+                    ui.notify("没能从正文判断出语言（只有表情 / 链接 / 数字？），请在「语言」里手选一个", type="negative", multi_line=True); return
                 err = media.check_set(mf.files)
                 if err:
                     ui.notify(err, type="negative"); return
-                _save(m["id"] if m else None, kind.value, text.value.strip(), lang.value,
+                _save(m["id"] if m else None, kind.value, text.value.strip(), final_lang,
                       tags.value.strip(), status.value, mf.files)
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 
