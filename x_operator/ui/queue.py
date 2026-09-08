@@ -9,7 +9,7 @@ from nicegui import run, ui
 
 from ..core import media, textlimit
 from ..db.database import get_conn, utcnow_iso
-from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, notify_long, run_job,
+from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
                      shell, tag, tag_legend, tweet_link)
 from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
@@ -27,9 +27,12 @@ def _load(status: str):
     with get_conn() as conn:
         items = conn.execute(
             "SELECT rq.*, a.handle AS acc_handle, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
-            "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang "
+            "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang, tt.view_count AS tgt_views, "
+            "tt.llm_relevance_score AS tgt_score, tt.tweet_created_at AS tgt_created_at, tt.source AS tgt_source, "
+            "sr.min_llm_score AS rule_min "
             "FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
+            "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
             f"WHERE rq.status=? ORDER BY rq.created_at ASC LIMIT {_LIMIT}", (status,)).fetchall()
     return items
 
@@ -353,7 +356,20 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
 
         if it["action_type"] == "reply" and it["tgt_text"]:
             with ui.card().classes("bg-slate-50 w-full"):
-                ui.label(f"@{it['author_handle']} 的推文").classes("text-xs text-gray-500")
+                with ui.row().classes("items-center gap-2 w-full"):
+                    ui.label(f"@{it['author_handle']} 的推文").classes("text-xs text-gray-500")
+                    # 与「抓取记录」页的卡片保持同一套小标签：相关性 / 语言 / 观看量 / 发推时间
+                    if it["tgt_score"] is not None:
+                        sc = it["tgt_score"]
+                        thr = it["rule_min"] if it["rule_min"] is not None else 7
+                        tag(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if it["tgt_source"] == "search" else ""),
+                            "metric_ok" if sc >= thr else "metric_bad", "AI 给的相关性分；绿 = 达到规则的达标分，红 = 没达到")
+                    if it["tgt_lang"]:
+                        tag(it["tgt_lang"], "metric", "推文语言")
+                    if it["tgt_views"] is not None:
+                        tag(f"👁 {fmt_views(it['tgt_views'])}", "metric", "抓取时的观看量")
+                    if it["tgt_created_at"]:
+                        ui.label(f"发推于 {fmt_time(it['tgt_created_at'])}").classes("text-xs text-gray-400")
                 ui.label(it["tgt_text"]).classes("text-sm whitespace-pre-wrap")
                 if it["text_zh"]:
                     ui.label("中文：" + it["text_zh"]).classes("text-xs text-gray-500")

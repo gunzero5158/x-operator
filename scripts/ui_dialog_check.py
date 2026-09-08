@@ -1,7 +1,8 @@
 """界面弹窗冒烟：用 NiceGUI 的 User 模拟器打开各页面、点开弹窗，确认附件区 / 方式一二分区 / 标签图例都能渲染。
 
 运行（不改项目依赖，临时装 pytest）：
-    uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto
+    uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file=
+（新版 NiceGUI 的 user 模拟器默认找根目录 main.py，本项目没有，用 -o main_file= 关掉）
 """
 from __future__ import annotations
 
@@ -100,6 +101,21 @@ async def test_queue_legend(user: User):
     await user.open("/queue")
     await user.should_see("卡片上的标签是什么意思？")
     await user.should_see("/280 单位")          # 免费账号按 280 单位计
+
+
+async def test_queue_shows_target_tweet_metrics(user: User):
+    """审核队列里引用的原推文，要带上和「抓取记录」一样的相关性 / 语言 / 观看量小标签。"""
+    _pages()
+    with get_conn() as c:
+        c.execute("UPDATE target_tweets SET view_count=15000, llm_relevance_score=8 WHERE id=1")
+        c.commit()
+    await user.open("/queue")
+    await user.should_see("👁 1.5万")
+    await user.should_see("相关性 8/10")
+    await user.should_see("发推于")
+    await user.open("/targets")
+    await user.should_see("👁 1.5万")
+    await user.should_see("相关性 8/10")
 
 
 async def test_tag_legends(user: User):
