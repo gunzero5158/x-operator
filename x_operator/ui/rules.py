@@ -197,12 +197,12 @@ def register(jobs) -> None:
                             label="推文来源").classes("w-full").props("outlined")
             _hint("source")
             feed_opts = {0: "自动（用抓取通道选出来的号）", **{k: v for k, v in account_options().items() if k}}
-            feed_box = ui.column().classes("w-full gap-1")
+            feed_box = ui.column().classes("w-full gap-4")  # 与卡片默认间距一致，否则 _hint 的 -mt-2 会压到输入框上
             with feed_box:
                 feed_acc = ui.select(feed_opts, value=g("feed_account_id", 0) if g("feed_account_id", 0) in feed_opts else 0,
                                      label="读哪个账号的时间线").classes("w-full").props("outlined")
                 _hint("feed_account")
-            kq_box = ui.column().classes("w-full gap-1")
+            kq_box = ui.column().classes("w-full gap-4")
             with kq_box:
                 kq = ui.textarea("关键词（逗号隔开 = 命中任意一个即可）", value=g("keyword_query", "")).classes("w-full").props("outlined autogrow")
                 _hint("keywords")
