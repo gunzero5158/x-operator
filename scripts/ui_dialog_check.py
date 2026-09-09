@@ -191,6 +191,29 @@ async def test_display_timezone_setting(user: User):
     config.set_value("display_timezone", "Asia/Tokyo"); refresh_display_tz()
 
 
+async def test_queue_skipped_recheck(user: User):
+    """审核队列「已跳过」：原因显示中文、有「重新判断」按钮；顶部「重新判断全部已跳过」只在该筛选下出现；点了能放回待审核。"""
+    _pages()
+    with get_conn() as conn:
+        conn.execute("INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, tweet_created_at, source, process_status) "
+                     "VALUES ('sk1','77','skipper','hey','en',?, 'search','queued')", (utcnow_iso(),))
+        tt = conn.execute("SELECT id FROM target_tweets WHERE tweet_id='sk1'").fetchone()["id"]
+        conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, skip_reason, created_at) "
+                     "VALUES (1,'reply',?,'skipped reply','skipped','author_in_cooldown',?)", (tt, utcnow_iso()))
+        rq = conn.execute("SELECT id FROM review_queue WHERE final_text='skipped reply'").fetchone()["id"]
+        conn.commit()
+    await user.open("/queue")
+    status_sel = [e for e in user.find(kind=ui.select).elements if "skipped" in e.options][0]   # 顶部状态筛选（没有 label）
+    UserInteraction(user, {status_sel}, None).trigger("update:modelValue", {"value": list(status_sel.options).index("skipped")})
+    await user.should_see("作者冷却期内")
+    await user.should_see("重新判断全部已跳过")
+    _click_button(user, "重新判断")
+    await user.should_see("已放回待审核")
+    with get_conn() as conn:
+        assert conn.execute("SELECT status FROM review_queue WHERE id=?", (rq,)).fetchone()["status"] == "pending"
+        conn.execute("DELETE FROM review_queue WHERE id=?", (rq,)); conn.execute("DELETE FROM target_tweets WHERE id=?", (tt,)); conn.commit()
+
+
 async def test_queue_legend(user: User):
     _pages()
     await user.open("/queue")

@@ -8,6 +8,7 @@ from __future__ import annotations
 from nicegui import run, ui
 
 from ..core import media, textlimit
+from ..core.compliance import SKIP_REASON_LABEL
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
                      shell, tag, tag_legend, tweet_link)
@@ -167,6 +168,8 @@ def register(jobs) -> None:
                 ui.label("审核队列").classes("text-2xl font-bold")
                 with ui.row().classes("items-center gap-2"):
                     status_sel = ui.select(_status_options(), value="pending").props("dense outlined")
+                    recheck_btn = ui.button("重新判断全部已跳过", icon="refresh").props("outline dense") \
+                        .tooltip("逐条再查黑名单 / 是否已回复过 / 作者冷却；都不成立的放回待审核")
                     clear_btn = ui.button("清空此状态", icon="delete_sweep").props("outline color=negative dense")
                     ui.button("触发发送", icon="send",
                               on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
@@ -214,7 +217,7 @@ def register(jobs) -> None:
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"])
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb)
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -272,6 +275,24 @@ def register(jobs) -> None:
                 notify_long(VERIFY_LABEL.get(st, ("未知", ""))[0], ok=(st == "ok"), kind=None if st == "ok" else ("negative" if st == "missing" else "warning"))
                 render()
 
+            def recheck_cb(it):
+                ok, detail = jobs.guard.recheck_skipped(it["id"])
+                ui.notify(("已放回待审核，可在「待审核」里批准" if ok else f"仍不通过：{detail}"),
+                          type="positive" if ok else "warning", multi_line=True)
+                render()
+
+            def recheck_all():
+                n = _counts().get("skipped", 0)
+                if not n:
+                    ui.notify("没有已跳过的条目", type="info"); return
+                res = jobs.guard.recheck_all_skipped()
+                parts = [f"放回待审核 {res['restored']} 条", f"仍跳过 {res['still']} 条"]
+                if res["reasons"]:
+                    parts.append("；".join(f"{k} {v} 条" for k, v in res["reasons"].items()))
+                notify_long("重新判断完成：" + "，".join(parts), ok=res["restored"] > 0, kind=None if res["restored"] else "info")
+                render()
+            recheck_btn.on_click(recheck_all)
+
             async def clear_all():
                 st = status_sel.value
                 n = _counts().get(st, 0)
@@ -289,7 +310,11 @@ def register(jobs) -> None:
                     render()
             clear_btn.on_click(clear_all)
 
-            status_sel.on("update:model-value", lambda e: render())
+            def on_status_change():
+                recheck_btn.set_visibility(status_sel.value == "skipped")
+                render()
+            status_sel.on("update:model-value", lambda e: on_status_change())
+            recheck_btn.set_visibility(False)
             render()
             ui.timer(5.0, lambda: render(force=False))
 
@@ -318,7 +343,7 @@ async def _attach_dialog(initial: list[str]):
     return await dlg
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set):
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None):
     files = media.parse_files(it["final_media_files"])
     limits = _account_limits()
     cur_acc = {"id": it["account_id"]}
@@ -419,6 +444,11 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
             elif it["status"] == "approved":
                 ui.label("已批准，等待分发器发送").classes("text-sm text-gray-500")
                 ui.button("撤回到待审核", on_click=lambda: _revert_to_pending(it["id"], refresh)).props("flat")
+            elif it["status"] == "skipped":
+                reason = it["skip_reason"] or ""
+                ui.label("已跳过 · " + SKIP_REASON_LABEL.get(reason, reason or "未记录原因")).classes("text-sm text-gray-500")
+                ui.button("重新判断", icon="refresh", on_click=lambda: recheck_cb(it)).props("outline dense") \
+                    .tooltip("按现在的情况再查一遍黑名单 / 是否已回复过 / 作者冷却；都不成立就放回待审核")
             else:
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
                          + (f" · {it['skip_reason']}" if it["skip_reason"] else "")

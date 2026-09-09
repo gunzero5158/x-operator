@@ -26,6 +26,18 @@ class GuardCode(str, Enum):
     TARGET_EXPIRED = "target_expired"              # 硬
 
 
+# 审核队列「已跳过」条目上 skip_reason 的中文；分发器写 GuardCode.value，人工跳过写 manual_skip / blacklist
+SKIP_REASON_LABEL = {
+    GuardCode.AUTHOR_IN_COOLDOWN.value: "作者冷却期内（最近刚回过这个作者）",
+    GuardCode.ALREADY_REPLIED.value: "该推文已回复过（去重账本）",
+    GuardCode.BLACKLISTED.value: "作者在黑名单",
+    GuardCode.TARGET_EXPIRED.value: "条目已过时效",
+    "manual_skip": "手动跳过",
+    "blacklist": "手动跳过并拉黑作者",
+    "guard": "合规拦截",
+}
+
+
 _HARD = {GuardCode.ALREADY_REPLIED, GuardCode.AUTHOR_IN_COOLDOWN,
          GuardCode.BLACKLISTED, GuardCode.TARGET_EXPIRED}
 
@@ -113,7 +125,13 @@ class ComplianceGuard:
             return GuardResult(False, GuardCode.DAILY_LIMIT_REACHED, False,
                                f"今日{'发帖' if action == 'post' else '回复'}已达上限（{used}/{limit}）")
 
-        # 以下为硬违规（仅 reply 相关）
+        return self.check_hard(item, now)
+
+    def check_hard(self, item: sqlite3.Row, now: datetime | None = None, ignore_expiry: bool = False) -> GuardResult:
+        """硬违规：黑名单 / 已回复过 / 作者冷却 / 条目过时效。和账号状态、时段、间隔、日上限无关，
+        所以「已跳过」条目的「重新判断」只跑这一段。ignore_expiry：人工重新判断时不把过时效当拦截。"""
+        now = now or datetime.now(timezone.utc)
+        action = item["action_type"]
         if action == "reply" and item["target_tweet_id"] is not None:
             with get_conn() as conn:
                 tgt = conn.execute("SELECT * FROM target_tweets WHERE id=?", (item["target_tweet_id"],)).fetchone()
@@ -139,7 +157,48 @@ class ComplianceGuard:
 
         # 队列条目过期（reply 类）
         expires = parse_iso(item["expires_at"])
-        if expires and now >= expires:
+        if expires and now >= expires and not ignore_expiry:
             return GuardResult(False, GuardCode.TARGET_EXPIRED, True, "该回复条目已过时效")
 
         return GuardResult(True, None, False, "通过")
+
+    def recheck_skipped(self, item_id: int, now: datetime | None = None) -> tuple[bool, str]:
+        """「已跳过」条目重新判断：硬违规都不再成立 → 放回待审核（时效按当前设置从现在重新计时）；
+        仍不通过 → 保持已跳过，skip_reason 更新成现在的原因。返回 (是否放回, 说明)。"""
+        now = now or datetime.now(timezone.utc)
+        with get_conn() as conn:
+            item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                return False, "条目不存在"
+            if item["status"] != "skipped":
+                return False, "只有「已跳过」的条目能重新判断"
+            gr = self.check_hard(item, now, ignore_expiry=True)
+            if not gr.ok:
+                code = gr.code.value if gr.code else "guard"
+                if code != item["skip_reason"]:
+                    conn.execute("UPDATE review_queue SET skip_reason=? WHERE id=?", (code, item_id))
+                    conn.commit()
+                return False, gr.detail
+            ttl_hours = config.get_int("reply_ttl_hours", 48)
+            expires = to_iso(now + timedelta(hours=ttl_hours)) if item["expires_at"] else None
+            conn.execute("UPDATE review_queue SET status='pending', skip_reason=NULL, decided_at=NULL, expires_at=? WHERE id=?",
+                         (expires, item_id))
+            if item["target_tweet_id"]:
+                conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=? AND process_status IN ('expired','no_match','filtered')",
+                             (item["target_tweet_id"],))
+            conn.commit()
+        return True, "已放回待审核"
+
+    def recheck_all_skipped(self, now: datetime | None = None) -> dict:
+        """批量重新判断所有「已跳过」条目。返回 {restored, still, reasons:{原因: 条数}}。"""
+        with get_conn() as conn:
+            ids = [r["id"] for r in conn.execute("SELECT id FROM review_queue WHERE status='skipped' ORDER BY created_at").fetchall()]
+        out = {"restored": 0, "still": 0, "reasons": {}}
+        for i in ids:
+            ok, detail = self.recheck_skipped(i, now)
+            if ok:
+                out["restored"] += 1
+            else:
+                out["still"] += 1
+                out["reasons"][detail] = out["reasons"].get(detail, 0) + 1
+        return out

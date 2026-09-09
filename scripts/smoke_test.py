@@ -1008,5 +1008,43 @@ client.post = orig_post
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 print("[6f16] 推文长度：计数单位 / 免费账号超限 AI 缩写 / 会员不限 / 发送前拦截 OK")
 
+# [6f17] 审核队列「已跳过」重新判断：作者冷却期内 → 仍跳过；冷却过了 → 放回待审核并重算时效；黑名单 → 仍跳过且原因更新；批量统计
+from datetime import timedelta as _td
+from x_operator.core.compliance import ComplianceGuard as _CG
+_g = _CG()
+with get_conn() as conn:
+    acc_row = conn.execute("SELECT id FROM accounts WHERE status='active' ORDER BY id LIMIT 1").fetchone()
+    conn.execute("INSERT INTO target_tweets(tweet_id,author_id,author_handle,text,tweet_created_at,source,process_status) "
+                 "VALUES ('rc_t1','rc_author','rc_author','hello','2026-09-01T00:00:00Z','search','queued')")
+    tt_rc = conn.execute("SELECT id FROM target_tweets WHERE tweet_id='rc_t1'").fetchone()["id"]
+    conn.execute("INSERT INTO target_tweets(tweet_id,author_id,author_handle,text,tweet_created_at,source,process_status) "
+                 "VALUES ('rc_t2','rc_black','rc_black','hi','2026-09-01T00:00:00Z','search','queued')")
+    tt_bl = conn.execute("SELECT id FROM target_tweets WHERE tweet_id='rc_t2'").fetchone()["id"]
+    old_exp = to_iso(datetime.now(timezone.utc) - _td(hours=1))
+    conn.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final_text,status,skip_reason,expires_at,created_at) "
+                 "VALUES (?,'reply',?,'r1','skipped','author_in_cooldown',?,?)", (acc_row["id"], tt_rc, old_exp, utcnow_iso()))
+    rq_rc = conn.execute("SELECT id FROM review_queue WHERE final_text='r1'").fetchone()["id"]
+    conn.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final_text,status,skip_reason,created_at) "
+                 "VALUES (?,'reply',?,'r2','skipped','manual_skip',?)", (acc_row["id"], tt_bl, utcnow_iso()))
+    rq_bl = conn.execute("SELECT id FROM review_queue WHERE final_text='r2'").fetchone()["id"]
+    # 冷却：最近刚回过这个作者的另一条推文
+    conn.execute("INSERT INTO interactions(account_id,action,tweet_id,author_id,sent_at) VALUES (?,'reply','rc_other','rc_author',?)",
+                 (acc_row["id"], utcnow_iso()))
+    conn.execute("INSERT INTO blacklist(x_user_id,handle,reason,created_at) VALUES ('rc_black','rc_black','t',?)", (utcnow_iso(),))
+    conn.commit()
+ok, why = _g.recheck_skipped(rq_rc); assert not ok and "冷却" in why, (ok, why)
+res = _g.recheck_all_skipped(); assert res["still"] >= 2 and any("冷却" in k for k in res["reasons"]) and any("黑名单" in k for k in res["reasons"]), res
+with get_conn() as conn:
+    sts = {r["id"]: (r["status"], r["skip_reason"]) for r in conn.execute("SELECT id, status, skip_reason FROM review_queue WHERE id IN (?,?)", (rq_rc, rq_bl))}
+    assert sts[rq_rc] == ("skipped", "author_in_cooldown") and sts[rq_bl] == ("skipped", "blacklisted"), sts   # 手动跳过 → 现在的原因是黑名单
+    conn.execute("UPDATE interactions SET sent_at=? WHERE tweet_id='rc_other'", (to_iso(datetime.now(timezone.utc) - _td(days=8)),)); conn.commit()
+ok, why = _g.recheck_skipped(rq_rc); assert ok, (ok, why)
+with get_conn() as conn:
+    row = conn.execute("SELECT status, skip_reason, expires_at FROM review_queue WHERE id=?", (rq_rc,)).fetchone()
+    assert row["status"] == "pending" and row["skip_reason"] is None and row["expires_at"] > utcnow_iso(), dict(row)
+    assert conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (tt_rc,)).fetchone()["process_status"] == "queued"
+ok, why = _g.recheck_skipped(rq_rc); assert not ok and "已跳过" in why, (ok, why)       # 不是已跳过状态就拒绝
+print("[6f17] 已跳过重新判断：冷却中仍跳过 / 冷却过放回待审核并重算时效 / 黑名单原因更新 / 批量统计 OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")
