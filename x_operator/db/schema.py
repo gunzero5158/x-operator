@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # 定时发帖表单独拎出来：v9 把 material_id 改成可空、v12 计划类型加 interval（每隔 N 小时），改约束 SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS review_queue (
     status            TEXT    NOT NULL DEFAULT 'pending'
                       CHECK (status IN ('pending','approved','sending','sent',
                                         'failed','skipped','expired')),
+    force_send          INTEGER NOT NULL DEFAULT 0 CHECK (force_send IN (0,1)),
     skip_reason       TEXT,
     auto_approve      INTEGER NOT NULL DEFAULT 0 CHECK (auto_approve IN (0,1)),
     retry_count       INTEGER NOT NULL DEFAULT 0,

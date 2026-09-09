@@ -144,6 +144,47 @@ class Dispatcher:
             return False, f"条目 #{item['id']} 未发出、已回置待发：{row['error_msg'] or '稍后重试'}"
         return False, f"条目 #{item['id']} 发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
 
+    def send_now(self, item_id: int) -> tuple[bool, str]:
+        """「立即发送」：人工指定一条「待发送」条目马上发，不等活跃时段和发送间隔（账号状态、日上限、硬违规照查）。
+        走和自动分发同一把账号锁、同一套发送 / 记账 / 回查逻辑，发完照常推进 next_allowed_at。"""
+        with get_conn() as conn:
+            item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                return False, "条目不存在"
+            if item["status"] != "approved":
+                return False, "只有「待发送」（已批准）的条目能立即发送"
+            account = conn.execute("SELECT * FROM accounts WHERE id=?", (item["account_id"],)).fetchone()
+        lock = self._account_lock(account["id"])
+        if not lock.acquire(blocking=False):
+            return False, "该账号正有另一次发送在进行中，稍后再试"
+        try:
+            now = datetime.now(timezone.utc)
+            with get_conn() as conn:
+                cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved'", (item_id,))
+                conn.commit()
+                if cur.rowcount == 0:
+                    return False, "条目状态刚变了（可能已被自动分发拿走），请刷新"
+                item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
+            gr = self.guard.check(account, item, now, skip_timing=True)
+            if not gr.ok:
+                if gr.hard:
+                    self._set_status(item_id, "skipped", skip_reason=gr.code.value if gr.code else "guard")
+                    return False, f"被合规拦截并跳过：{gr.detail}"
+                self._set_status(item_id, "approved")
+                return False, f"暂不能发：{gr.detail}"
+            if self.send_item(account, item):
+                with get_conn() as conn:
+                    vs = conn.execute("SELECT verify_status FROM review_queue WHERE id=?", (item_id,)).fetchone()["verify_status"]
+                tail = {"ok": "，已回查确认存在 ✅", "missing": "，⚠ 但回查时在 X 上查不到（可能被限制/静默丢弃）"}.get(vs, "")
+                return True, f"已发出：{self.last_sent_url}{tail}"
+            with get_conn() as conn:
+                row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (item_id,)).fetchone()
+            if row["status"] == "approved":
+                return False, f"未发出、已回置待发：{row['error_msg'] or '稍后重试'}"
+            return False, f"发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
+        finally:
+            lock.release()
+
     # ------------------------------------------------------------------ 发送
     def send_item(self, account: sqlite3.Row, item: sqlite3.Row) -> bool:
         try:

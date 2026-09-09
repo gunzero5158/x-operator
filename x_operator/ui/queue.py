@@ -217,7 +217,7 @@ def register(jobs) -> None:
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb)
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb)
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -279,6 +279,27 @@ def register(jobs) -> None:
                 ok, detail = jobs.guard.recheck_skipped(it["id"])
                 ui.notify(("已放回待审核，可在「待审核」里批准" if ok else f"仍不通过：{detail}"),
                           type="positive" if ok else "warning", multi_line=True)
+                render()
+
+            async def force_cb(it):
+                reason = SKIP_REASON_LABEL.get(it["skip_reason"] or "", it["skip_reason"] or "未记录原因")
+                state["busy"] += 1
+                try:
+                    ok = await confirm("强制放回待审核？",
+                                       f"当前跳过原因：{reason}。放行后这条会绕过作者冷却 / 黑名单 / 时效检查，批准即发；"
+                                       "请确认你清楚为什么要这么做。", ok_label="放行", color="warning")
+                finally:
+                    state["busy"] -= 1
+                if not ok:
+                    return
+                done, detail = jobs.guard.force_restore(it["id"])
+                ui.notify(detail, type="positive" if done else "negative", multi_line=True)
+                render()
+
+            async def send_now_cb(it):
+                ui.notify("正在发送…", type="info")
+                ok, detail = await run.io_bound(jobs.dispatcher.send_now, it["id"])
+                notify_long(detail, ok=ok, kind=None if ok else "warning")
                 render()
 
             def recheck_all():
@@ -343,7 +364,7 @@ async def _attach_dialog(initial: list[str]):
     return await dlg
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None):
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None, force_cb=None, send_now_cb=None):
     files = media.parse_files(it["final_media_files"])
     limits = _account_limits()
     cur_acc = {"id": it["account_id"]}
@@ -370,6 +391,8 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
             tag("来源：" + ORIGIN_LABEL.get(origin, origin), "ai" if origin == "ai_write" else "source", "这条文案是怎么来的")
             if it["is_auto_translated"]:
                 tag("自动翻译", "warn", "文案是机器翻译过来的，发之前重点检查")
+            if it["force_send"]:
+                tag("人工放行", "warn", "从「已跳过」强制放回来的：发送时不按作者冷却 / 黑名单 / 时效拦，也不会自动过期")
             media_badge(files)
             if "http://" in (it["final_text"] or "") or "https://" in (it["final_text"] or ""):
                 tag("含链接", "metric").tooltip("正文里有外链。官方 API 通道发含链接推文约 $0.20/条（小号通道免费）；回复里带外链易被折叠。详见页顶「标签是什么意思」")
@@ -443,12 +466,16 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                               ).props("color=negative outline")
             elif it["status"] == "approved":
                 ui.label("已批准，等待分发器发送").classes("text-sm text-gray-500")
+                ui.button("立即发送", icon="bolt", on_click=lambda: send_now_cb(it)).props("outline dense color=orange") \
+                    .tooltip("不等活跃时段和发送间隔，现在就发这一条（账号日上限和合规检查照常）")
                 ui.button("撤回到待审核", on_click=lambda: _revert_to_pending(it["id"], refresh)).props("flat")
             elif it["status"] == "skipped":
                 reason = it["skip_reason"] or ""
                 ui.label("已跳过 · " + SKIP_REASON_LABEL.get(reason, reason or "未记录原因")).classes("text-sm text-gray-500")
                 ui.button("重新判断", icon="refresh", on_click=lambda: recheck_cb(it)).props("outline dense") \
-                    .tooltip("按现在的情况再查一遍黑名单 / 是否已回复过 / 作者冷却；都不成立就放回待审核")
+                    .tooltip("按现在的情况把跳过规则再查一遍（黑名单 / 是否已回复过 / 作者冷却 / 时效）；都不成立就放回待审核")
+                ui.button("强制放回待审核", icon="lock_open", on_click=lambda: force_cb(it)).props("outline dense color=orange") \
+                    .tooltip("人工放行：不管跳过原因直接放回待审核，发送时也不再按冷却 / 黑名单 / 时效拦（已回复过的除外）")
             else:
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
                          + (f" · {it['skip_reason']}" if it["skip_reason"] else "")

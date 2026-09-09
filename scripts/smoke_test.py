@@ -73,7 +73,7 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 14 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 15 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -383,6 +383,23 @@ r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
 print("[6d] 账号级发送锁 OK")
 with get_conn() as conn:
     conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+
+# [6d2] 立即发送：间隔没到 + 不在活跃时段时自动分发不发，「立即发送」照发；发完 next_allowed_at 照常推进；非待发送状态拒绝
+qid3, _ = _fresh_pending_item()
+with get_conn() as conn:
+    conn.execute("UPDATE review_queue SET status='approved' WHERE id=?", (qid3,))
+    conn.execute("UPDATE accounts SET next_allowed_at=?, active_hours_start='03:00', active_hours_end='03:01' WHERE id=?",
+                 (to_iso(datetime.now(timezone.utc) + timedelta(hours=1)), acc["id"])); conn.commit()
+r = jobs.dispatcher.tick(); assert r.sent == 0 and ("活跃时段" in r.as_msg() or "可发时间" in r.as_msg()), r.as_msg()
+ok, msg = jobs.dispatcher.send_now(qid3); assert ok and "已发出" in msg, (ok, msg)
+with get_conn() as conn:
+    row = conn.execute("SELECT status, sent_tweet_id FROM review_queue WHERE id=?", (qid3,)).fetchone()
+    na = conn.execute("SELECT next_allowed_at FROM accounts WHERE id=?", (acc["id"],)).fetchone()["next_allowed_at"]
+assert row["status"] == "sent" and row["sent_tweet_id"] and na, (dict(row), na)   # 测试账号间隔为 0，next_allowed_at = 发送时刻
+ok, msg = jobs.dispatcher.send_now(qid3); assert not ok and "待发送" in msg, (ok, msg)
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL, active_hours_start='00:00', active_hours_end='00:00' WHERE id=?", (acc["id"],)); conn.commit()
+print("[6d2] 立即发送突破时段 / 间隔 OK")
 
 # [6e] 黑名单按 @handle 也能拦
 with get_conn() as conn:
@@ -897,8 +914,9 @@ for _ in range(4):
         q = conn.execute("SELECT final_media_files FROM review_queue WHERE scheduled_post_id=? ORDER BY id DESC LIMIT 1", (topic_id,)).fetchone()
     got = mediam.parse_files(q["final_media_files"]); assert len(got) == 1 and got[0] in pool_set, got
     picked_seq.append(got[0])
-assert set(picked_seq[:3]) == pool_set, picked_seq          # 前三次不重复，把池子轮完
-assert picked_seq[3] != picked_seq[2], picked_seq            # 第四次不和上一次一样
+# 上一节固定模式已经用 rel1 发过一次，所以它算「最近用过」：前两次一定先把另外两张没用过的轮完，之后不和上一次重复
+assert set(picked_seq[:2]) == pool_set - {rel1}, picked_seq
+assert all(a != b for a, b in zip(picked_seq, picked_seq[1:])), picked_seq
 assert mediam.pick_from_pool([], []) == [] and mediam.pick_from_pool(["a"], ["a"]) == ["a"]
 assert mediam.pick_from_pool(["a", "b"], ["a"]) == ["b"] and mediam.pick_from_pool(["a", "b"], ["b", "a"]) == ["a"]
 assert mediam.check_set(["a.png"] * 5) and not mediam.check_set(["a.png"] * 5, mediam.POOL_MAX_ITEMS) and mediam.check_set(["a.png"] * 31, mediam.POOL_MAX_ITEMS)
@@ -1038,13 +1056,34 @@ with get_conn() as conn:
     sts = {r["id"]: (r["status"], r["skip_reason"]) for r in conn.execute("SELECT id, status, skip_reason FROM review_queue WHERE id IN (?,?)", (rq_rc, rq_bl))}
     assert sts[rq_rc] == ("skipped", "author_in_cooldown") and sts[rq_bl] == ("skipped", "blacklisted"), sts   # 手动跳过 → 现在的原因是黑名单
     conn.execute("UPDATE interactions SET sent_at=? WHERE tweet_id='rc_other'", (to_iso(datetime.now(timezone.utc) - _td(days=8)),)); conn.commit()
+# 冷却过了，但条目时效也过了 → 仍跳过，原因更新成「过时效」（重新判断不动时效规则）
+ok, why = _g.recheck_skipped(rq_rc); assert not ok and "时效" in why, (ok, why)
+with get_conn() as conn:
+    assert conn.execute("SELECT skip_reason FROM review_queue WHERE id=?", (rq_rc,)).fetchone()["skip_reason"] == "target_expired"
+    conn.execute("UPDATE review_queue SET expires_at=? WHERE id=?", (to_iso(datetime.now(timezone.utc) + _td(days=1)), rq_rc)); conn.commit()
+# 冷却过 + 时效没过 → 放回待审核，时效原样保留
 ok, why = _g.recheck_skipped(rq_rc); assert ok, (ok, why)
 with get_conn() as conn:
-    row = conn.execute("SELECT status, skip_reason, expires_at FROM review_queue WHERE id=?", (rq_rc,)).fetchone()
-    assert row["status"] == "pending" and row["skip_reason"] is None and row["expires_at"] > utcnow_iso(), dict(row)
+    row = conn.execute("SELECT status, skip_reason, expires_at, force_send FROM review_queue WHERE id=?", (rq_rc,)).fetchone()
+    assert row["status"] == "pending" and row["skip_reason"] is None and row["force_send"] == 0 and row["expires_at"] > utcnow_iso(), dict(row)
     assert conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (tt_rc,)).fetchone()["process_status"] == "queued"
 ok, why = _g.recheck_skipped(rq_rc); assert not ok and "已跳过" in why, (ok, why)       # 不是已跳过状态就拒绝
-print("[6f17] 已跳过重新判断：冷却中仍跳过 / 冷却过放回待审核并重算时效 / 黑名单原因更新 / 批量统计 OK")
+# 人工放行：黑名单条目重新判断过不了，强制放回 → 待审核 + force_send=1 + 时效清空；发送前校验不再拦黑名单 / 冷却 / 时效
+ok, why = _g.recheck_skipped(rq_bl); assert not ok and "黑名单" in why, (ok, why)
+ok, why = _g.force_restore(rq_bl); assert ok, (ok, why)
+with get_conn() as conn:
+    row = conn.execute("SELECT * FROM review_queue WHERE id=?", (rq_bl,)).fetchone()
+    assert row["status"] == "pending" and row["force_send"] == 1 and row["expires_at"] is None and row["skip_reason"] is None, dict(row)
+    acc_full = conn.execute("SELECT * FROM accounts WHERE id=?", (acc_row["id"],)).fetchone()
+gr = _g.check_hard(row); assert gr.ok and "人工放行" in gr.detail, gr
+ok, why = _g.force_restore(rq_bl); assert not ok, (ok, why)                            # 已经不是已跳过了
+# 已回复过的推文：人工放行也不行（去重账本唯一）
+with get_conn() as conn:
+    conn.execute("INSERT INTO interactions(account_id,action,tweet_id,author_id,sent_at) VALUES (?,'reply','rc_t1','rc_author',?)", (acc_row["id"], utcnow_iso()))
+    conn.execute("UPDATE review_queue SET status='skipped', skip_reason='manual_skip' WHERE id=?", (rq_rc,)); conn.commit()
+ok, why = _g.force_restore(rq_rc); assert not ok and "已回复过" in why, (ok, why)
+ok, why = _g.recheck_skipped(rq_rc); assert not ok and "已回复过" in why, (ok, why)
+print("[6f17] 已跳过重新判断：冷却中仍跳过 / 过时效仍跳过 / 都不成立放回待审核且时效不动 / 人工放行绕过黑名单冷却时效 / 已回复过谁也放不了 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")
