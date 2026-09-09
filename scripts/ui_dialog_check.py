@@ -19,7 +19,7 @@ from nicegui.testing.user_interaction import UserInteraction  # noqa: E402
 from x_operator.core import media  # noqa: E402
 from x_operator.core.scheduler import Jobs  # noqa: E402
 from x_operator.db.database import get_conn, init_db, utcnow_iso  # noqa: E402
-from x_operator.ui import materials, queue, schedule, settings_page, targets  # noqa: E402
+from x_operator.ui import materials, queue, rules, schedule, settings_page, targets  # noqa: E402
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
@@ -58,7 +58,7 @@ def _click_button(user: User, label: str) -> None:
 
 def _pages() -> None:
     """user fixture 每个测试前会清空页面注册，所以在测试里注册。"""
-    for mod in (materials, queue, schedule, settings_page, targets):
+    for mod in (materials, queue, rules, schedule, settings_page, targets):
         mod.register(JOBS)
 
 
@@ -319,3 +319,30 @@ async def test_settings_media_storage_panel(user: User):
     await user.should_see("素材附件占用空间")
     await user.should_see("前往清理（打开目录）")
     await user.should_see("已没有任何素材 / 条目引用")
+
+
+async def test_rule_dialog_read_media_switch(user: User):
+    """规则弹窗：「读取附图打分」默认关、说明里点明成本与多模态要求；打开时弹警告；保存后落库；抓取记录页显示附件标签。"""
+    _pages()
+    await user.open("/rules")
+    _click_button(user, "新建规则")
+    await user.should_see("读取附图 / 视频封面一起打分")
+    await user.should_see("token 消耗明显增加")
+    sw = [e for e in user.find(kind=ui.switch).elements if e.text == "读取附图 / 视频封面一起打分"][0]
+    assert sw.value is False
+    UserInteraction(user, {sw}, None).trigger("update:modelValue", True)
+    await user.should_see("必须是支持图片输入的多模态模型")
+    [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0].set_value("带图规则")
+    [e for e in user.find(kind=ui.textarea).elements][0].set_value("kw")
+    [e for e in user.find("语义筛选条件").elements if isinstance(e, ui.textarea)][0].set_value("找人")
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    await user.should_see("🖼 读附图打分")
+    with get_conn() as c:
+        assert c.execute("SELECT read_media FROM search_rules WHERE name='带图规则'").fetchone()["read_media"] == 1
+        c.execute("UPDATE target_tweets SET media=? WHERE id=1",
+                  ('[{"kind":"photo","preview_url":"u"},{"kind":"video","preview_url":"u","duration_ms":42000}]',))
+        c.commit()
+    await user.open("/targets")
+    await user.should_see("🖼 1")
+    await user.should_see("🎬 0:42")

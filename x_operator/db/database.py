@@ -73,6 +73,9 @@ _ADDED_COLUMNS = [
     ("scheduled_posts", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
     # v15：审核队列条目人工放行——从「已跳过」强制放回待审核，发送时不再按冷却 / 黑名单 / 时效拦
     ("review_queue", "force_send", "INTEGER NOT NULL DEFAULT 0"),
+    # v16：抓取记录保存附件元信息（图片直链 / 视频封面，JSON 列表）；规则可选把它们一并送给打分模型
+    ("target_tweets", "media", "TEXT NOT NULL DEFAULT '[]'"),
+    ("search_rules", "read_media", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

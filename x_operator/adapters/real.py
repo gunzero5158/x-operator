@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .base import (AuthExpired, CredentialMissing, DuplicateContent, FetchResult,
-                   MediaError, NetworkError, PermissionDenied, PostResult, RateLimited,
+                   MediaData, MediaError, NetworkError, PermissionDenied, PostResult, RateLimited,
                    TargetNotFound, TweetData, UserData, XClient, XClientError)
 
 log = logging.getLogger("x_operator.adapters")
@@ -225,13 +225,31 @@ class OfficialXClient(XClient):
             return None
         return bool(resp and resp.data)
 
-    _TWEET_FIELDS = ["created_at", "lang", "referenced_tweets", "author_id", "in_reply_to_user_id", "public_metrics"]
+    _TWEET_FIELDS = ["created_at", "lang", "referenced_tweets", "author_id", "in_reply_to_user_id", "public_metrics", "attachments"]
+    # 附件元信息和推文同一次请求带回，不另计费
+    _EXPANSIONS = ["author_id", "attachments.media_keys"]
+    _MEDIA_FIELDS = ["media_key", "type", "url", "preview_image_url", "duration_ms", "alt_text"]
+
+    @staticmethod
+    def _media_of(m) -> MediaData | None:
+        kind = {"photo": "photo", "video": "video", "animated_gif": "gif"}.get(getattr(m, "type", None) or "")
+        preview = getattr(m, "url", None) or getattr(m, "preview_image_url", None)
+        if not kind or not preview:
+            return None
+        dur = getattr(m, "duration_ms", None)
+        return MediaData(kind=kind, preview_url=str(preview), duration_ms=int(dur) if dur is not None else None,
+                         alt_text=getattr(m, "alt_text", None) or None)
 
     def _to_tweets(self, resp) -> list[TweetData]:
         users = {}
+        media_by_key: dict[str, MediaData] = {}
         try:
             for u in (resp.includes or {}).get("users", []):
                 users[str(u.id)] = u.username
+            for m in (resp.includes or {}).get("media", []):
+                md = self._media_of(m)
+                if md is not None:
+                    media_by_key[str(getattr(m, "media_key", ""))] = md
         except Exception:
             pass
         out: list[TweetData] = []
@@ -248,11 +266,13 @@ class OfficialXClient(XClient):
                 views = int(v) if v is not None else None
             except Exception:
                 views = None
+            keys = ((getattr(tw, "attachments", None) or {}).get("media_keys") or []) if media_by_key else []
+            media = tuple(media_by_key[str(k)] for k in keys if str(k) in media_by_key)
             out.append(TweetData(
                 tweet_id=str(tw.id), author_id=str(tw.author_id),
                 author_handle=users.get(str(tw.author_id), ""),
                 text=tw.text or "", lang=tw.lang, created_at=created,
-                is_retweet=is_rt, in_reply_to_tweet_id=reply_to, view_count=views,
+                is_retweet=is_rt, in_reply_to_tweet_id=reply_to, view_count=views, media=media,
             ))
         out.sort(key=lambda t: int(t.tweet_id))
         return out
@@ -263,7 +283,7 @@ class OfficialXClient(XClient):
         exclude = ["retweets"] + ([] if include_replies else ["replies"])
         params: dict[str, Any] = dict(
             max_results=max(5, min(100, max_results)), exclude=exclude,
-            tweet_fields=self._TWEET_FIELDS, expansions=["author_id"], user_fields=["username"],
+            tweet_fields=self._TWEET_FIELDS, expansions=self._EXPANSIONS, user_fields=["username"], media_fields=self._MEDIA_FIELDS,
             user_auth=True,
         )
         if since_id:
@@ -299,7 +319,7 @@ class OfficialXClient(XClient):
                       min_views: int = 0, scan_limit: int = 0) -> FetchResult:
         params: dict[str, Any] = dict(
             max_results=max(10, min(100, max_results)),
-            tweet_fields=self._TWEET_FIELDS, expansions=["author_id"], user_fields=["username"],
+            tweet_fields=self._TWEET_FIELDS, expansions=self._EXPANSIONS, user_fields=["username"], media_fields=self._MEDIA_FIELDS,
             user_auth=True,
         )
         if since_id:
@@ -345,7 +365,7 @@ class OfficialXClient(XClient):
                                "或把来源改成「关注流」")
         params: dict[str, Any] = dict(
             max_results=max(1, min(100, max_results)), exclude=["retweets", "replies"],
-            tweet_fields=self._TWEET_FIELDS, expansions=["author_id"], user_fields=["username"], user_auth=True,
+            tweet_fields=self._TWEET_FIELDS, expansions=self._EXPANSIONS, user_fields=["username"], media_fields=self._MEDIA_FIELDS, user_auth=True,
         )
         if max_age_h:
             params["start_time"] = datetime.now(timezone.utc) - timedelta(hours=max_age_h)
@@ -724,6 +744,33 @@ class UnofficialXClient(XClient):
 
     # ---- 数据转换 ----
     @staticmethod
+    def _media_of(tw) -> tuple[MediaData, ...]:
+        """twifork 的 tweet.media：Photo / Video / AnimatedGif，media_url 对图片是原图、对视频 / GIF 是封面图。"""
+        out: list[MediaData] = []
+        try:
+            items = tw.media or []
+        except Exception:
+            return ()
+        for m in items:
+            kind = {"photo": "photo", "video": "video", "animated_gif": "gif"}.get(str(getattr(m, "type", "") or ""))
+            preview = getattr(m, "media_url", None)
+            if not kind or not preview:
+                continue
+            dur = None
+            if kind == "video":
+                try:
+                    dur = int(m.duration_millis) if m.duration_millis is not None else None
+                except Exception:
+                    dur = None
+            alt = None
+            try:
+                alt = (m._data.get("ext_alt_text") or None) if isinstance(getattr(m, "_data", None), dict) else None
+            except Exception:
+                alt = None
+            out.append(MediaData(kind=kind, preview_url=str(preview), duration_ms=dur, alt_text=alt))
+        return tuple(out)
+
+    @staticmethod
     def _to_tweet(tw) -> TweetData:
         created = getattr(tw, "created_at_datetime", None) or datetime.now(timezone.utc)
         if created.tzinfo is None:
@@ -745,6 +792,7 @@ class UnofficialXClient(XClient):
             is_retweet=getattr(tw, "retweeted_tweet", None) is not None,
             in_reply_to_tweet_id=str(reply_to) if reply_to else None,
             view_count=views,
+            media=UnofficialXClient._media_of(tw),
         )
 
     @staticmethod

@@ -96,7 +96,11 @@ uv run python -m x_operator.main
   **首次回溯小时数** + **观看量门槛** + **回复方式**；观看量门槛在**抓取端**生效——改按 X 的「热门」排序
   （小号通道 Top / 官方 API relevancy，刚发的推文观看量都低，按时间倒序凑不到）在时间窗内找，一页不够就继续翻页，直到凑够
   「每次抓取条数」或扫到上限（条数 × 10，最多 500，且不超过当日剩余读额度），低于门槛的当场丢掉不入库，
-  不会出现"抓 15 条全被过滤"的情况（官方 API 按扫描条数计费，运行结果里会写扫了多少、丢了多少、最高观看量是多少）；**「AI 生成规则」**：用大白话描述想找谁，AI 给出关键词、语义条件、语言，检查后保存。
+  不会出现"抓 15 条全被过滤"的情况（官方 API 按扫描条数计费，运行结果里会写扫了多少、丢了多少、最高观看量是多少）；
+  **读取附图 / 视频封面一起打分**（默认关）：抓回的推文都会记下附件元信息（图片直链、视频封面和时长，两条通道都不额外计费，
+  抓取记录页显示 🖼 / 🎬 标签），打开这个开关才会把它们（低清、每条最多 2 张，视频只能看封面）一起送给打分 AI——
+  截图 / 配图能说明作者处境时有用。代价：token 消耗明显增加，且「设置 → LLM」的轻量模型必须支持图片输入（多模态），
+  否则打分失败、退回关键词粗估，运行结果里会提示；**「AI 生成规则」**：用大白话描述想找谁，AI 给出关键词、语义条件、语言，检查后保存。
   每个参数旁边都有说明和推荐值。右上「运行所有规则」跑所有启用的规则；每张卡片上「运行此规则」只跑这一条（停用的也能跑）——
   两者都是正式运行：结果进抓取记录、推进游标（没有只看不存的试运行）。运行时弹进度框，实时显示到第几条规则、在抓取/打分/生成哪一步。
 - **定时发帖计划**（自己账号发帖）：每个计划选账号 + **内容来源** + 时间：
@@ -226,7 +230,7 @@ X 按「计数单位」算长度：英文字母/数字/标点每个 1 单位，�
 ```bash
 uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
-# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换
+# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
 # 真渲染截图（需要 Playwright 的 Chromium）：先起样例服务，再截图并打印标签实际颜色
 timeout 60 uv run python scripts/shot_server.py &   # 端口 8099
@@ -237,7 +241,7 @@ uv run --with playwright python scripts/shot_pages.py /tmp/shots
 
 ```
 x_operator/
-  db/         schema.py(DDL v15) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v16) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
   core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(素材语言自动判断) textlimit.py(X 计数单位/超限 AI 缩写)

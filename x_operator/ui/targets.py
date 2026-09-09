@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
+import json
+
+from ..adapters.base import MEDIA_KIND_LABEL
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
 from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job, tag, tag_legend,
@@ -216,6 +219,27 @@ def _status_options(source: str = "all", rule_id: int = 0) -> dict:
 
 
 _STATUS_KIND = {"queued": "ok", "no_match": "attn", "filtered": "off", "new": "wait", "expired": "off"}
+_MEDIA_ICON = {"photo": "🖼", "video": "🎬", "gif": "🎞"}
+
+
+def media_tags(media_json: str | None) -> list[tuple[str, str]]:
+    """抓取记录里的附件元信息 → [(标签文字, 提示)]，按类型合并计数，例：🖼 2 / 🎬 0:42。"""
+    try:
+        items = json.loads(media_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    out: list[tuple[str, str]] = []
+    for kind in ("photo", "video", "gif"):
+        hits = [m for m in items if isinstance(m, dict) and m.get("kind") == kind]
+        if not hits:
+            continue
+        label = f"{_MEDIA_ICON[kind]} {len(hits)}" if kind != "video" else _MEDIA_ICON[kind]
+        dur = hits[0].get("duration_ms") if kind == "video" else None
+        if dur:
+            label += f" {int(dur) // 60000}:{(int(dur) // 1000) % 60:02d}"
+        tip = f"推文带 {len(hits)} 个{MEDIA_KIND_LABEL[kind]}" + ("；规则开了「读取附图打分」才会送给 AI" if kind != "video" else "（AI 最多只能看封面图）")
+        out.append((label, tip))
+    return out
 
 
 def _card(t, rematch, delete_one, blacklist, pick, write):
@@ -236,6 +260,8 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
                 tag(t["lang"], "metric", "推文语言")
             if t["view_count"] is not None:
                 tag(f"👁 {fmt_views(t['view_count'])}", "metric", "抓取时的观看量")
+            for label, tip in media_tags(t["media"]):
+                tag(label, "metric", tip)
             ui.label(f"抓取于 {fmt_time(t['fetched_at'])} · 发推于 {fmt_time(t['tweet_created_at'])}").classes("text-xs text-gray-400")
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_one(t["id"])).props("flat dense round color=negative").tooltip("删除此记录")

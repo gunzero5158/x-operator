@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -133,10 +134,11 @@ def store_target(t: TweetData, source: str, source_rule_id: int | None,
     with get_conn() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, view_count, "
+                "INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, view_count, media, "
                 "tweet_created_at, source, source_rule_id, llm_relevance_score, llm_relevance_reason, "
-                "process_status, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "process_status, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (t.tweet_id, t.author_id, t.author_handle, t.text, t.lang, t.view_count,
+                 json.dumps([m.as_dict() for m in t.media], ensure_ascii=False),
                  to_iso(t.created_at), source, source_rule_id,
                  score, reason, process_status, utcnow_iso()),
             )

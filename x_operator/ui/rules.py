@@ -32,6 +32,9 @@ HINTS = {
     "max_results": "每次运行最多拉多少条。推荐 15~30；官方 API 按条计费（约 $0.005/条），小号 Cookie 通道建议 ≤50 防风控。",
     "lookback": "首次运行（或重置游标后）往回抓多少小时内的推文；之后每次只抓上次之后的新内容。推荐 24；冷门词可 72~168。"
                 "官方 API 最多只能搜最近 7 天（168 小时），填得再大也按 168 抓。",
+    "read_media": "默认关。打开后把推文的附图、视频封面（低清）一起送给打分 AI，能看懂截图 / 配图里的信息。"
+                  "代价：token 消耗明显增加（一张图约等于一条推文正文），而且「设置 → LLM」里的轻量模型必须支持图片输入（多模态），"
+                  "否则打分会失败、退回关键词粗估。附件元信息（有没有图 / 视频）不管开不开都会记录。",
     "min_views": "只要观看量 ≥ 此值的推文，0 = 不限。开了门槛后改按 X 的「热门」排序、在「首次回溯」时间窗内找（刚发的推文观看量都低，按时间倒序凑不到），"
                  "一页不够会继续翻页，直到凑够「每次抓取条数」或扫到上限（每次抓取条数 × 10，最多 500 条，且不超过当日剩余读额度）；"
                  "低于门槛的当场丢掉、不入库。运行结果会告诉你这次扫到的最高观看量，0 条时按它调门槛。官方 API 按扫描到的条数计费。"
@@ -48,17 +51,17 @@ def _save(rid, data: dict):
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
                          "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
-                         "source_kind=?, feed_account_id=? WHERE id=?",
+                         "source_kind=?, feed_account_id=?, read_media=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
                           data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
-                          data["source_kind"], data["feed_account_id"], rid))
+                          data["source_kind"], data["feed_account_id"], data["read_media"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id) "
-                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id, "
+                         "read_media) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
                           data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
-                          data["source_kind"], data["feed_account_id"]))
+                          data["source_kind"], data["feed_account_id"], data["read_media"]))
         conn.commit()
 
 
@@ -143,6 +146,8 @@ def register(jobs) -> None:
                                 tag(f"首次回溯 {r['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
                                 if r["min_views"]:
                                     tag(f"观看 ≥ {fmt_views(r['min_views'])}", "metric", "观看量门槛，抓取端就过滤")
+                                if r["read_media"]:
+                                    tag("🖼 读附图打分", "metric", "附图 / 视频封面会一起送给打分 AI（token 消耗更高，需要多模态模型）")
                                 tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
                                     "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
                                 tag("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）")),
@@ -223,6 +228,14 @@ def register(jobs) -> None:
             _hint("min_score", after_row=True); _hint("max_results"); _hint("lookback")
             min_views = ui.number("观看量门槛（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("w-full").props("outlined")
             _hint("min_views")
+            read_media = ui.switch("读取附图 / 视频封面一起打分", value=bool(g("read_media", 0)))
+            _hint("read_media", after_row=True)
+
+            def warn_media(e):
+                if e.args:   # 新值为 True（打开）时提醒
+                    ui.notify("已打开「读取附图打分」：每条带图推文的 token 消耗会明显增加；并且「设置 → LLM」的轻量模型必须是支持图片输入的多模态模型，"
+                              "否则这条规则的打分会失败", type="warning", multi_line=True, timeout=8000)
+            read_media.on("update:model-value", warn_media)
             mode, brief, polish, acc = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0),
                                                          "抓到达标推文后", g("reply_account_id", 0))
 
@@ -240,7 +253,7 @@ def register(jobs) -> None:
                             min_score=max(0, min(10, int(min_score.value or 0))),
                             max_results=max(10, min(100, int(max_results.value or 10))),
                             lookback=max(1, int(lookback.value or 24)),
-                            min_views=max(0, int(min_views.value or 0)),
+                            min_views=max(0, int(min_views.value or 0)), read_media=1 if read_media.value else 0,
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0,
                             reply_account_id=(int(acc.value) or None) if acc.value else None)
                 try:

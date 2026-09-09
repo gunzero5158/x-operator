@@ -26,9 +26,36 @@ RELEVANCE_SYSTEM = """你是 X（推特）运营工具的候选推文打分助�
 {"results": [{"tweet_id": "字符串", "score": 整数0-10, "reason": "中文一句话"}]}"""
 
 
+RELEVANCE_MEDIA_NOTE = """
+附件说明：候选推文的 media 字段列出了它带的图片 / 视频（kind：photo 图片、video 视频、gif 动图；视频只给封面图和时长）。
+文字之后会按顺序附上这些图片，每张图前面有一行「tweet_id=… 的附件 N」标明属于哪条推文。
+打分时把图片内容和正文合起来看：正文短但截图 / 配图能说明作者处境的，按图里的信息给分；视频只能看封面，拿不准仍按 6~7 档处理。"""
+
+# 附件打分：最多送几张图（每条推文 / 每次请求），控制多模态 token 开销
+MEDIA_MAX_PER_TWEET = 2
+MEDIA_MAX_PER_REQUEST = 40
+
+
 def relevance_user(semantic_criteria: str, tweets: list[dict]) -> str:
     tweets_json = json.dumps(tweets, ensure_ascii=False)
     return f"筛选条件：{semantic_criteria}\n\n候选推文（JSON 数组）：\n{tweets_json}"
+
+
+def relevance_user_with_media(semantic_criteria: str, tweets: list[dict]) -> list[dict]:
+    """OpenAI 兼容的多段 content：文字 + 各推文的附件预览图（低清模式，一张约 85 token）。
+    超过上限的图不送，但 media 字段里仍列出，模型至少知道「有附件」。"""
+    parts: list[dict] = [{"type": "text", "text": relevance_user(semantic_criteria, tweets)}]
+    sent = 0
+    for t in tweets:
+        for i, m in enumerate((t.get("media") or [])[:MEDIA_MAX_PER_TWEET], start=1):
+            url = m.get("preview_url")
+            if not url or sent >= MEDIA_MAX_PER_REQUEST:
+                continue
+            what = {"photo": "图片", "video": "视频封面", "gif": "GIF 首帧"}.get(m.get("kind"), "附件")
+            parts.append({"type": "text", "text": f"tweet_id={t['tweet_id']} 的附件 {i}（{what}）："})
+            parts.append({"type": "image_url", "image_url": {"url": url, "detail": "low"}})
+            sent += 1
+    return parts
 
 
 MATCH_SYSTEM = """你是 X（推特）运营的回复助手。给定一条目标推文和若干条候选回复素材，

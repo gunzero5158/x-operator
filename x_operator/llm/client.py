@@ -194,13 +194,24 @@ class LLMClient:
                 "confidence": 0.72, "reason": "启发式：选用同语言候选素材（配置 LLM 后将做语义择优）"}
 
     # ---------------- 对上层的统一入口 ----------------
-    def score_relevance(self, semantic_criteria: str, tweets: list[dict]) -> list[dict]:
+    @staticmethod
+    def relevance_messages(semantic_criteria: str, tweets: list[dict], with_media: bool = False) -> list[dict]:
+        """with_media=True 且有推文带附件时，把预览图作为图片段一起送（需要打分模型支持图片输入）。"""
+        has_media = with_media and any(t.get("media") for t in tweets)
+        if not has_media:
+            return [
+                {"role": "system", "content": prompts.RELEVANCE_SYSTEM},
+                {"role": "user", "content": prompts.relevance_user(semantic_criteria, tweets)},
+            ]
+        return [
+            {"role": "system", "content": prompts.RELEVANCE_SYSTEM + prompts.RELEVANCE_MEDIA_NOTE},
+            {"role": "user", "content": prompts.relevance_user_with_media(semantic_criteria, tweets)},
+        ]
+
+    def score_relevance(self, semantic_criteria: str, tweets: list[dict], with_media: bool = False) -> list[dict]:
         if not self.configured:
             return self.score_relevance_heuristic(tweets)
-        messages = [
-            {"role": "system", "content": prompts.RELEVANCE_SYSTEM},
-            {"role": "user", "content": prompts.relevance_user(semantic_criteria, tweets)},
-        ]
+        messages = self.relevance_messages(semantic_criteria, tweets, with_media)
         obj = self.chat_json("relevance", messages, required_keys=["results"], temperature=0.2)
         return obj["results"]
 

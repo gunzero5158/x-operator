@@ -57,6 +57,27 @@ RETRYABLE = (RateLimited, NetworkError)
 
 
 @dataclass(frozen=True)
+class MediaData:
+    """推文附件的元信息（不下载文件本身）。kind：photo / video / gif；
+    preview_url：图片直链，视频 / GIF 则是 X 生成的预览图（封面）；duration_ms 仅视频有。"""
+    kind: str
+    preview_url: str
+    duration_ms: int | None = None
+    alt_text: str | None = None
+
+    def as_dict(self) -> dict:
+        d = {"kind": self.kind, "preview_url": self.preview_url}
+        if self.duration_ms is not None:
+            d["duration_ms"] = self.duration_ms
+        if self.alt_text:
+            d["alt_text"] = self.alt_text
+        return d
+
+
+MEDIA_KIND_LABEL = {"photo": "图片", "video": "视频", "gif": "GIF"}
+
+
+@dataclass(frozen=True)
 class TweetData:
     tweet_id: str
     author_id: str
@@ -67,6 +88,7 @@ class TweetData:
     is_retweet: bool
     in_reply_to_tweet_id: str | None
     view_count: int | None = None   # 观看量（官方 impression_count / 非官方 view_count）；拿不到为 None
+    media: tuple[MediaData, ...] = ()   # 附件元信息（图片直链 / 视频预览图）；两条通道都不额外计费
 
 
 @dataclass(frozen=True)

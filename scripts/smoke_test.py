@@ -73,7 +73,7 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 15 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 16 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -413,7 +413,7 @@ print("[6e] 黑名单 @handle 匹配 OK")
 # [6f] LLM 打分容错：tweet_id 数字、分数 "8/10"
 assert coerce_score("8/10") == 8 and coerce_score(7.6) == 8 and coerce_score(None) == 0 and coerce_score(15) == 10 and coerce_score(True) == 0
 orig_score = jobs.llm.score_relevance
-jobs.llm.score_relevance = lambda crit, payload: [{"tweet_id": int(p["tweet_id"]), "score": "9/10", "reason": "r"} for p in payload]
+jobs.llm.score_relevance = lambda crit, payload, **kw: [{"tweet_id": int(p["tweet_id"]), "score": "9/10", "reason": "r"} for p in payload]
 with get_conn() as conn:
     rule = conn.execute("SELECT * FROM search_rules").fetchone()
 scored = jobs.search.run_rule(rule, get_primary_account())
@@ -1084,6 +1084,67 @@ with get_conn() as conn:
 ok, why = _g.force_restore(rq_rc); assert not ok and "已回复过" in why, (ok, why)
 ok, why = _g.recheck_skipped(rq_rc); assert not ok and "已回复过" in why, (ok, why)
 print("[6f17] 已跳过重新判断：冷却中仍跳过 / 过时效仍跳过 / 都不成立放回待审核且时效不动 / 人工放行绕过黑名单冷却时效 / 已回复过谁也放不了 OK")
+
+# [6f18] 附件元信息：mock 推文带图 / 视频 → 入库 media 列；规则 read_media 默认关（纯文本消息）、开了才拼多模态消息（每条最多 2 张、低清）；
+#        打分失败时给出「模型可能不支持图片」的提示；抓取记录页标签
+from x_operator.llm.client import LLMError as _LLMErr  # noqa: E402
+from x_operator.llm import prompts as _prompts  # noqa: E402
+from x_operator.ui.targets import media_tags  # noqa: E402
+with get_conn() as conn:
+    rule = conn.execute("SELECT * FROM search_rules WHERE name='规则A'").fetchone()
+    assert rule["read_media"] == 0
+    conn.execute("UPDATE search_rules SET newest_id_cursor=NULL, min_views=0 WHERE id=?", (rule["id"],)); conn.commit()
+seen_kwargs: list[dict] = []
+def _fake_score(crit, payload, with_media=False):
+    seen_kwargs.append({"with_media": with_media, "media_items": [p for p in payload if p.get("media")]})
+    return [{"tweet_id": p["tweet_id"], "score": 9, "reason": "r"} for p in payload]
+jobs.llm.score_relevance = _fake_score
+for _ in range(3):   # mock 每页 6 条轮转取样，最多两轮必然轮到带附件的样本
+    st = jobs.search.run_once(rule_ids=[rule["id"]])
+    if seen_kwargs and seen_kwargs[-1]["media_items"]:
+        break
+assert seen_kwargs and seen_kwargs[-1]["with_media"] is False and seen_kwargs[-1]["media_items"], (st.as_msg(), seen_kwargs)
+with get_conn() as conn:
+    rows = conn.execute("SELECT media FROM target_tweets WHERE source_rule_id=? AND media != '[]'", (rule["id"],)).fetchall()
+    kinds = {m["kind"] for r in rows for m in json.loads(r["media"])}
+    assert {"photo", "video"} <= kinds, kinds
+    conn.execute("UPDATE search_rules SET read_media=1, newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+jobs.search.run_rule(rule, get_primary_account())
+assert seen_kwargs[-1]["with_media"] is True
+# 消息构造：关着 / 没附件 → content 是字符串；开着且有附件 → 文字段 + 每条最多 2 张图（低清）+ 视频只送封面
+payload = [{"tweet_id": "1", "text": "a", "media": [{"kind": "photo", "preview_url": f"https://p/{i}.jpg"} for i in range(4)]},
+           {"tweet_id": "2", "text": "b", "media": [{"kind": "video", "preview_url": "https://p/v.jpg", "duration_ms": 42000}]},
+           {"tweet_id": "3", "text": "c"}]
+plain = jobs.llm.relevance_messages("x", payload, with_media=False)
+assert isinstance(plain[1]["content"], str) and "附件说明" not in plain[0]["content"]
+assert isinstance(jobs.llm.relevance_messages("x", [payload[2]], with_media=True)[1]["content"], str)
+mm = jobs.llm.relevance_messages("x", payload, with_media=True)
+assert "附件说明" in mm[0]["content"]
+parts = mm[1]["content"]; imgs = [p for p in parts if p["type"] == "image_url"]
+assert parts[0]["type"] == "text" and len(imgs) == _prompts.MEDIA_MAX_PER_TWEET + 1, [p["type"] for p in parts]
+assert all(p["image_url"]["detail"] == "low" for p in imgs) and imgs[-1]["image_url"]["url"] == "https://p/v.jpg"
+assert any("tweet_id=2 的附件 1（视频封面）" in p.get("text", "") for p in parts)
+# LLM 失败 → 退回粗估，并在提示里点明可能是模型不支持图片
+def _boom(crit, payload, with_media=False):
+    raise _LLMErr("LLM 网关返回 400：image_url not supported")
+jobs.llm.score_relevance = _boom
+notes: list[str] = []
+for _ in range(3):
+    scored = jobs.search.run_rule(rule, get_primary_account(), notes=notes)
+    if notes:
+        break
+assert any("读取附图打分" in n and "不支持图片" in n for n in notes), notes
+assert all(c.prefiltered or "改用关键词粗略打分" in c.reason for c in scored)
+jobs.llm.score_relevance = orig_score
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET read_media=0 WHERE id=?", (rule["id"],)); conn.commit()
+# 抓取记录页标签
+tags = media_tags(json.dumps([{"kind": "photo", "preview_url": "u"}, {"kind": "photo", "preview_url": "u"},
+                              {"kind": "video", "preview_url": "u", "duration_ms": 42000}]))
+assert [t[0] for t in tags] == ["🖼 2", "🎬 0:42"], tags
+assert media_tags(None) == [] and media_tags("not json") == []
+print("[6f18] 附件元信息：入库 / 默认不送图 / 开关开了拼多模态消息（每条 ≤2 张、低清、视频只送封面）/ 失败提示 / 页面标签 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

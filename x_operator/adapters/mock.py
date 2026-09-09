@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from .base import FetchResult, PostResult, TweetData, UserData, XClient
+from .base import FetchResult, MediaData, PostResult, TweetData, UserData, XClient
 
 # 一批固定样本：混入正例（本人在抱怨 / 求推荐，有上下文）与噪声（新闻/教程/招聘/营销）。内容是通用话题，不绑定任何产品。
 # 每条给定相对「新鲜度」偏移（分钟），tweet_id 单调递增，模拟真实时间线。
@@ -34,6 +34,12 @@ _SAMPLE_TWEETS = [
 
 # 与样本一一对应的观看量：高低混合，用来测「观看量 ≥ N」在抓取端翻页
 _SAMPLE_VIEWS = [50, 12000, 300, 8000, 90, 25000, 40, 700, 15000, 5]
+# 样本附件（按样本下标，挑的是能过预检的正例）：第 0 条带两张图，第 2 条带一段视频（只有封面图 + 时长），其余无附件。链接是占位，不会真的去下载
+_SAMPLE_MEDIA: dict[int, tuple[MediaData, ...]] = {
+    0: (MediaData("photo", "https://pbs.twimg.com/media/mock_photo_1.jpg"),
+        MediaData("photo", "https://pbs.twimg.com/media/mock_photo_2.jpg", alt_text="账单截图")),
+    2: (MediaData("video", "https://pbs.twimg.com/ext_tw_video_thumb/mock_video_1.jpg", duration_ms=42000),),
+}
 
 
 def _stable_id(seed: str) -> str:
@@ -84,7 +90,7 @@ class MockXClient(XClient):
             tweets.append(TweetData(
                 tweet_id=_next_id(), author_id=aid, author_handle=ah, text=text, lang=lang,
                 created_at=created, is_retweet=False, in_reply_to_tweet_id=None,
-                view_count=_SAMPLE_VIEWS[idx],
+                view_count=_SAMPLE_VIEWS[idx], media=_SAMPLE_MEDIA.get(idx, ()),
             ))
         self._rot = (self._rot + n) % len(_SAMPLE_TWEETS)
         return tweets
