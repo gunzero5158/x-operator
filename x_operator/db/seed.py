@@ -19,8 +19,16 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "reply_ttl_hours": "48",
     "nurture_days": "14",
     "match_confidence_threshold": "0.4",
-    # 抓取（监控/搜索的读取）走哪个通道：unofficial=小号 Cookie 通道（免费，读额度不生效）/ official=官方 API（计费，读额度生效）
-    "read_channel": "unofficial",
+    # 读取账号池（core/readpool.py）：小号永远参与，官方 API 账号默认不参与（计费）；每号每 15 分钟请求上限；撞 429 / 到上限后停几分钟再续；请求间随机间隔
+    "read_official_enabled": "0",
+    "read_cap_unofficial": "40",
+    "read_cap_official": "5",
+    "rate_limit_pause_minutes": "15",
+    "read_gap_min_seconds": "2",
+    "read_gap_max_seconds": "6",
+    # 监控中途暂停后的续跑记录（程序自己写，空 = 没有待续跑）
+    "monitor_resume_from_user_id": "",
+    "monitor_resume_at": "",
     # 预算（读额度由 core/budget.py 实际执行，只在抓取走官方 API 时生效：自动轮询在触及熔断线时停，手动运行在用完时拒绝）
     "monthly_budget_usd": "60",
     "daily_read_budget": "330",
@@ -42,7 +50,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
 }
 
 # 已废弃、任何代码都不再读取的设置键：每次启动顺手删掉，免得设置页/导出里误导人
-OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota", "search_runs_per_day")
+OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota", "search_runs_per_day", "read_channel")
 
 
 def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> None:
@@ -54,6 +62,11 @@ def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> No
             conn.execute("INSERT INTO app_settings(key, value) VALUES ('search_interval_minutes', ?)", (str(max(30, 1440 // runs)),))
         except (TypeError, ValueError):
             pass
+    # 旧键 read_channel=official（抓取走官方 API）→ 新键 read_official_enabled=1（官方号参与账号池），只在新键还没有时换算一次
+    old = conn.execute("SELECT value FROM app_settings WHERE key='read_channel'").fetchone()
+    if old is not None and conn.execute("SELECT 1 FROM app_settings WHERE key='read_official_enabled'").fetchone() is None:
+        conn.execute("INSERT INTO app_settings(key, value) VALUES ('read_official_enabled', ?)",
+                     ("1" if (old["value"] or "").strip() == "official" else "0",))
     values = dict(DEFAULT_SETTINGS)
     for key, val in (overrides or {}).items():
         if key in values:

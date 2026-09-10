@@ -76,6 +76,8 @@ _ADDED_COLUMNS = [
     # v16：抓取记录保存附件元信息（图片直链 / 视频封面，JSON 列表）；规则可选把它们一并送给打分模型
     ("target_tweets", "media", "TEXT NOT NULL DEFAULT '[]'"),
     ("search_rules", "read_media", "INTEGER NOT NULL DEFAULT 0"),
+    # v17：读取账号池——撞 429 的账号暂停到什么时候（UTC ISO），期间不被挑去抓取
+    ("accounts", "read_paused_until", "TEXT"),
 ]
 
 

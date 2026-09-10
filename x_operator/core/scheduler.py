@@ -270,7 +270,7 @@ AUTO_JOBS = {
 }
 ALWAYS_JOBS = {
     "dispatcher": ("发送分发", "每分钟检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
-    "scheduled_check": ("定时发帖计划 + 过期清扫", "每分钟检查到点的定时发帖计划，生成到审核队列；顺带把超时的待审核条目标过期。始终开启", None),
+    "scheduled_check": ("定时发帖计划 + 过期清扫 + 监控续跑", "每分钟检查到点的定时发帖计划，生成到审核队列；顺带把超时的待审核条目标过期；监控因限流暂停的到点接着跑。始终开启", None),
 }
 
 
@@ -367,6 +367,10 @@ def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
         if n:
             log.info("过期清扫：%d 条待审核条目已过期", n)
         jobs.run_scheduled_posts()
+        # 监控上次因 429 / 账号都到限额停下的，到点接着跑（不看自动监控开关：那是用户已经发起的一次运行）
+        st = jobs.monitor.resume_if_due()
+        if st is not None:
+            log.info("监控续跑：%s", st.as_msg())
 
     @_safe
     def dispatcher_tick():

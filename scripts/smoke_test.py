@@ -32,6 +32,7 @@ old_db = TMP / 'v2.db'
 c = sqlite3.connect(old_db); c.row_factory = sqlite3.Row
 c.executescript(schema.DDL); c.execute("INSERT INTO schema_version(version) VALUES (2)")
 c.execute("INSERT INTO app_settings(key,value) VALUES ('dry_run','1')")
+c.execute("INSERT INTO app_settings(key,value) VALUES ('read_channel','official')")
 c.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES ('my_real','unofficial',?)", (json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32}),))
 acc_id = c.execute("SELECT id FROM accounts").fetchone()["id"]
 c.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('fake_user','mock_user_fake_user')")
@@ -73,7 +74,10 @@ with get_conn() as conn:
                  (acc_id, sp_row["id"], utcnow_iso()))   # 外键仍指向重建后的表
     conn.execute("INSERT INTO scheduled_posts(account_id, material_id, content_mode, schedule_type, schedule_expr) VALUES (?,NULL,'pool','daily','09:00')", (acc_id,))
     conn.rollback()
-assert ver == 16 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+    rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
+    assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
+    assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
+assert ver == 17 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -103,6 +107,9 @@ with get_conn() as conn:
     conn.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('someone','1234567')")
     conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score,max_results_per_run) VALUES ('规则A','(API cost) -is:retweet','找为成本发愁的人','ja,en',6,15)")
     conn.commit()
+m = jobs.monitor.run_once(); assert m.users_polled == 0 and "官方 API 账号默认不参与抓取" in m.as_msg(), m.as_msg()   # 只有官方号且开关关着：明确提示
+from x_operator import config as _cfg  # noqa: E402
+_cfg.set_value("read_official_enabled", 1); _cfg.set_value("read_cap_official", 100000)   # 冒烟里官方号要连发很多次
 m = jobs.monitor.run_once(); print("[3b] 监控:", m.as_msg()[:80])
 assert m.users_polled == 1 and m.tweets_fetched == 3, m
 from x_operator.core.search import effective_query  # noqa: E402
@@ -544,24 +551,34 @@ with get_conn() as conn:
 chosen, note = choose_reply_account(None, acc_row)
 assert chosen["id"] == ids["tester"] and "没有启用中的小号" in note, note   # 没小号才退回主号
 print("[6f8] 多账号回复分摊（自动轮流 / 指定账号 / 队列改账号 / 无小号退回主号）OK")
-# 抓取通道：默认小号（免费、预算不拦、多个小号轮流读得最少的）；切官方才用主号
+# 抓取账号池：小号优先（免费、预算不拦、挑 15 分钟窗口内请求最少的）；小号都到上限才轮到官方号，且官方号要开了参与才用
 from x_operator.core.monitor import get_read_account, read_is_billed  # noqa: E402
+from x_operator.core.readpool import ReadPool, gap_seconds, pool_status  # noqa: E402
 with get_conn() as conn:
-    conn.execute("UPDATE accounts SET status='active' WHERE handle IN ('small1','small2')"); conn.commit()
-assert get_read_account()["handle"] in ("small1", "small2") and not read_is_billed(get_read_account())
+    conn.execute("UPDATE accounts SET status='active' WHERE handle IN ('small1','small2')")
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+assert get_read_account()["handle"] == "small1" and not read_is_billed(get_read_account())
 with get_conn() as conn:
     conn.execute("INSERT INTO action_log(account_id, api_kind, endpoint, reads_consumed, success, created_at) VALUES (?, 'x_unofficial', 'search_recent', 50, 1, ?)", (ids["small1"], utcnow_iso())); conn.commit()
-assert get_read_account()["handle"] == "small2"   # 读得少的优先
+assert get_read_account()["handle"] == "small2"   # 窗口内请求少的优先
 config.set_value("daily_read_budget", 1)          # 额度只剩 1，走小号照样能抓
 st = jobs.search.run_once(rule_ids=[rule["id"]]); assert st.rules_run == 1 and "小号通道，不计费" in st.as_msg(), st.as_msg()
-config.set_value("read_channel", "official")
-assert get_read_account()["handle"] == "tester" and read_is_billed(get_read_account())
+config.set_value("read_cap_unofficial", 1)        # 两个小号都到窗口上限 → 轮到官方号 → 读额度已用完 → 没号可用
+pk, why = ReadPool().pick(); assert pk is None and "上限 1" in why and "已用完" in why, why
 st = jobs.search.run_once(rule_ids=[rule["id"]]); assert st.rules_run == 0 and "已用完" in st.as_msg(), st.as_msg()
-config.set_value("read_channel", "unofficial"); config.set_value("daily_read_budget", 0)
+config.set_value("daily_read_budget", 0)
+pk, why = ReadPool().pick(); assert pk["handle"] == "tester" and "官方号" in why, why
+config.set_value("read_official_enabled", 0)      # 官方号不参与：哪怕小号都满了也不用它
+pk, why = ReadPool().pick(); assert pk is None and "官方 API 也参与抓取」是关的" in why, why
+config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40)
+ps = {x["handle"]: x for x in pool_status()}
+assert ps["small1"]["requests"] >= 1 and ps["small1"]["cap"] == 40 and ps["tester"]["official"] and ps["tester"]["participates"], ps
+assert 2 <= gap_seconds() <= 6
+config.set_value("read_gap_max_seconds", 0); assert gap_seconds() == 0; config.set_value("read_gap_max_seconds", 6)
 with get_conn() as conn:
     conn.execute("UPDATE accounts SET status='paused' WHERE handle IN ('small1','small2')"); conn.commit()
-assert get_read_account()["handle"] == "tester"   # 没小号退回官方
-print("[6f9] 抓取通道（默认小号免费不拦 / 小号轮流 / 切官方才计费受限）OK")
+assert get_read_account()["handle"] == "tester"   # 没小号、官方号开了参与 → 用官方号
+print("[6f9] 抓取账号池（小号优先免费不拦 / 窗口内最少优先 / 到上限才轮官方号且要开了参与 / 读额度照拦）OK")
 # 搜索 0 条 / 出错时必须有能看懂的提示
 cli0 = factory.get_client(acc_row)
 orig_search = cli0.search_recent
@@ -1145,6 +1162,74 @@ tags = media_tags(json.dumps([{"kind": "photo", "preview_url": "u"}, {"kind": "p
 assert [t[0] for t in tags] == ["🖼 2", "🎬 0:42"], tags
 assert media_tags(None) == [] and media_tags("not json") == []
 print("[6f18] 附件元信息：入库 / 默认不送图 / 开关开了拼多模态消息（每条 ≤2 张、低清、视频只送封面）/ 失败提示 / 页面标签 OK")
+
+# [6f19] 监控按账号池分摊：多小号轮流；账号都到上限 → 暂停并记住从哪个推主继续，到点由调度器续跑；撞 429 → 该号暂停、本次停下、续跑换号
+with get_conn() as conn:
+    conn.execute("UPDATE watched_users SET enabled=0")
+    conn.execute("UPDATE accounts SET status='active', read_paused_until=NULL WHERE handle IN ('small1','small2')")
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"]))
+    for h in ("rp_w1", "rp_w2", "rp_w3"):
+        conn.execute("INSERT INTO watched_users(handle,x_user_id,reply_mode) VALUES (?,?,'manual')", (h, "mock_user_" + h))
+    conn.commit()
+    wids = {r["handle"]: r["id"] for r in conn.execute("SELECT id, handle FROM watched_users WHERE handle LIKE 'rp_w%'")}
+config.set_value("read_official_enabled", 0)
+# A. 两个小号、每号上限 2、3 位推主：跑完，两个号都用上了
+config.set_value("read_cap_unofficial", 2)
+m = jobs.monitor.run_once()
+assert m.users_polled == 3 and not m.paused and "@small1" in m.as_msg() and "@small2" in m.as_msg(), m.as_msg()
+assert jobs.monitor.pending_resume() == (None, None)
+with get_conn() as conn:
+    per = {r["account_id"]: r["c"] for r in conn.execute("SELECT account_id, COUNT(*) c FROM action_log WHERE endpoint='get_user_tweets' AND account_id IN (?,?) GROUP BY account_id", (ids["small1"], ids["small2"]))}
+assert per[ids["small1"]] == 2 and per[ids["small2"]] == 1, per
+# B. 上限 1：两位推主后号都满了 → 暂停，记住第 3 位，续跑时间 = 现在 + 设置的分钟数；没到点不续；到点且窗口空了就从第 3 位继续
+with get_conn() as conn:
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+config.set_value("read_cap_unofficial", 1); config.set_value("rate_limit_pause_minutes", 7)
+m = jobs.monitor.run_once()
+assert m.paused and m.users_polled == 2 and "监控暂停" in m.as_msg() and "还剩 1 位推主" in m.as_msg() and "@rp_w3" in m.as_msg(), m.as_msg()
+r_uid, r_at = jobs.monitor.pending_resume()
+assert r_uid == wids["rp_w3"] and 6 <= (r_at - datetime.now(timezone.utc)).total_seconds() / 60 <= 7.1, (r_uid, r_at)
+assert jobs.monitor.resume_if_due() is None                                   # 没到点
+config.set_value("monitor_resume_at", to_iso(datetime.now(timezone.utc) - _td(seconds=1)))
+config.set_value("read_cap_unofficial", 5)
+with get_conn() as conn:
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+m = jobs.monitor.resume_if_due()
+assert m is not None and not m.paused and "从 @rp_w3 开始" in m.as_msg() and m.users_polled == 3, m.as_msg()
+assert jobs.monitor.pending_resume() == (None, None)
+# C. 撞 429：该号暂停到设置的分钟数后，本次停下记住推主；续跑时这个号不再被挑，换另一个号
+with get_conn() as conn:
+    s1 = conn.execute("SELECT * FROM accounts WHERE handle='small1'").fetchone()
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+cli1 = factory.get_client(s1)
+orig_gut = cli1.get_user_tweets
+def _boom429(*a, **k):
+    raise RateLimited("X 限流（拉取推主时间线），稍后自动重试。")
+cli1.get_user_tweets = _boom429
+m = jobs.monitor.run_once()
+assert m.paused and m.users_polled == 0 and "被 X 限流（429）" in m.as_msg() and "@small1" in m.as_msg(), m.as_msg()
+assert jobs.monitor.pending_resume()[0] == wids["rp_w1"]
+with get_conn() as conn:
+    pu = conn.execute("SELECT read_paused_until FROM accounts WHERE handle='small1'").fetchone()["read_paused_until"]
+assert pu and 6 <= (parse_iso(pu) - datetime.now(timezone.utc)).total_seconds() / 60 <= 7.1, pu
+pk, why = ReadPool().pick(); assert pk["handle"] == "small2", why                  # 暂停中的号不被挑
+config.set_value("monitor_resume_at", to_iso(datetime.now(timezone.utc) - _td(seconds=1)))
+m = jobs.monitor.resume_if_due()
+assert m is not None and not m.paused and m.users_polled == 3 and "@small2 3 次" in m.as_msg() and "@small1" not in m.as_msg().split("本次抓取用了")[1], m.as_msg()
+cli1.get_user_tweets = orig_gut
+# 搜索：撞 429 也暂停该号，规则留到下次
+orig_s1_search = cli1.search_recent
+cli1.search_recent = _boom429
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET read_paused_until=NULL WHERE handle='small1'"); conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]])
+assert st.errors == 1 and "被 X 限流（429）" in st.as_msg() and "下次运行再抓" in st.as_msg(), st.as_msg()
+pk, why = ReadPool().pick(); assert pk["handle"] == "small2", why
+cli1.search_recent = orig_s1_search
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET read_paused_until=NULL"); conn.execute("UPDATE watched_users SET enabled=0 WHERE handle LIKE 'rp_w%'"); conn.commit()
+config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40); config.set_value("rate_limit_pause_minutes", 15)
+print("[6f19] 监控账号池：多小号分摊 / 到上限暂停并记住推主、到点续跑 / 撞 429 暂停该号、续跑换号 / 搜索撞 429 也暂停该号 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

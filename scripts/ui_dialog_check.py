@@ -19,7 +19,7 @@ from nicegui.testing.user_interaction import UserInteraction  # noqa: E402
 from x_operator.core import media  # noqa: E402
 from x_operator.core.scheduler import Jobs  # noqa: E402
 from x_operator.db.database import get_conn, init_db, utcnow_iso  # noqa: E402
-from x_operator.ui import materials, queue, rules, schedule, settings_page, targets  # noqa: E402
+from x_operator.ui import dashboard, materials, queue, rules, schedule, settings_page, targets  # noqa: E402
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
@@ -58,7 +58,7 @@ def _click_button(user: User, label: str) -> None:
 
 def _pages() -> None:
     """user fixture 每个测试前会清空页面注册，所以在测试里注册。"""
-    for mod in (materials, queue, rules, schedule, settings_page, targets):
+    for mod in (dashboard, materials, queue, rules, schedule, settings_page, targets):
         mod.register(JOBS)
 
 
@@ -346,3 +346,31 @@ async def test_rule_dialog_read_media_switch(user: User):
     await user.open("/targets")
     await user.should_see("🖼 1")
     await user.should_see("🎬 0:42")
+
+
+async def test_settings_read_pool_panel_and_dashboard(user: User):
+    """设置 → 预算：抓取账号池面板——官方号参与开关默认关、切换即落库；限额 / 暂停分钟 / 随机间隔可改。仪表盘按账号显示窗口用量与暂停状态。"""
+    _pages()
+    await user.open("/settings")
+    user.find("预算").click()
+    await user.should_see("抓取账号池（监控 / 搜索用哪个账号去读）")
+    await user.should_see("每个小号每 15 分钟最多请求次数")
+    await user.should_see("遇到限额后停多少分钟再继续")
+    sw = [e for e in user.find(kind=ui.switch).elements if e.text.startswith("官方 API 也参与抓取")][0]
+    assert sw.value is False
+    UserInteraction(user, {sw}, None).trigger("update:modelValue", True)
+    await user.should_see("已参与抓取（计费）")
+    with get_conn() as c:
+        assert c.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"] == "1"
+        c.execute("UPDATE accounts SET read_paused_until='2099-01-01T00:00:00Z' WHERE handle='small1'")
+        c.execute("INSERT INTO app_settings(key,value) VALUES ('monitor_resume_from_user_id','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+        c.execute("INSERT INTO app_settings(key,value) VALUES ('monitor_resume_at','2099-01-01T00:00:00Z') ON CONFLICT(key) DO UPDATE SET value='2099-01-01T00:00:00Z'")
+        c.commit()
+    await user.open("/")
+    await user.should_see("抓取账号池与读额度")
+    await user.should_see("小号 @small1：撞过 429，暂停到")
+    await user.should_see("官方号 @acc1：最近 15 分钟 0/5 次")
+    await user.should_see("监控上次因限流暂停")
+    with get_conn() as c:
+        c.execute("UPDATE accounts SET read_paused_until=NULL"); c.execute("UPDATE app_settings SET value='' WHERE key LIKE 'monitor_resume%'")
+        c.execute("UPDATE app_settings SET value='0' WHERE key='read_official_enabled'"); c.commit()

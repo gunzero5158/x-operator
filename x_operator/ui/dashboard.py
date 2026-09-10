@@ -5,9 +5,10 @@ from nicegui import ui
 
 from .. import config
 from ..core import budget
-from ..core.monitor import READ_CHANNEL_LABEL, get_read_account, read_channel, read_is_billed
+from ..core.monitor import get_read_account, read_is_billed
+from ..core.readpool import pool_status
 from ..core.scheduler import AUTO_JOBS, describe_schedule, job_enabled, next_runs
-from ..db.database import get_conn
+from ..db.database import get_conn, to_iso
 from .layout import fmt_time, run_job, run_job_with_progress, shell, display_tz
 
 
@@ -79,10 +80,25 @@ def register(jobs) -> None:
                         b = budget.current()
                         ra = get_read_account()
                         billed = ra is not None and read_is_billed(ra)
-                        ui.label("抓取通道与读额度").classes("font-semibold")
-                        ui.label("当前抓取通道：" + READ_CHANNEL_LABEL[read_channel()]
-                                 + (f"，实际会用 @{ra['handle']}（{'官方 API，计费' if billed else '小号通道，不计费'}）" if ra else "，但没有启用的账号")
-                                 + "。设置 → 预算 可切换。").classes("text-sm")
+                        ui.label("抓取账号池与读额度").classes("font-semibold")
+                        ps = pool_status()
+                        if not ps:
+                            ui.label("没有启用的账号。设置 → 账号 添加。").classes("text-sm")
+                        else:
+                            lines = []
+                            for x in ps:
+                                who = ("官方号" if x["official"] else "小号") + f" @{x['handle']}"
+                                if x["official"] and not x["participates"]:
+                                    lines.append(who + "：不参与抓取（设置 → 预算 可打开）")
+                                elif x["paused_until"]:
+                                    lines.append(who + f"：撞过 429，暂停到 {fmt_time(to_iso(x['paused_until']))}")
+                                else:
+                                    lines.append(who + f"：最近 15 分钟 {x['requests']}/{x['cap']} 次")
+                            ui.label("；".join(lines) + "。下一次请求会用 " + (f"@{ra['handle']}" if ra else "（现在没有能用的号）")
+                                     + "。设置 → 预算 可调上限。").classes("text-sm")
+                        r_uid, r_at = jobs.monitor.pending_resume()
+                        if r_uid is not None and r_at is not None:
+                            ui.label(f"⏸ 监控上次因限流暂停，{fmt_time(to_iso(r_at))} 自动从停下的推主继续").classes("text-xs text-orange-600")
                         pct = min(1.0, b.used_today / b.daily_budget) if b.daily_budget else 0
                         ui.linear_progress(pct, show_value=False).classes("w-full")
                         month_usd = b.used_month * budget.OFFICIAL_READ_USD
@@ -91,7 +107,7 @@ def register(jobs) -> None:
                                  f"本月累计 {b.used_month} 条，按 ${budget.OFFICIAL_READ_USD}/条估算约 ${month_usd:.2f} / 月预算 ${monthly_budget:.0f}"
                                  f"（实际单价以开发者后台为准）· 今日小号通道读取 {b.free_today} 条（免费）").classes("text-xs text-gray-500")
                         if not billed:
-                            ui.label("抓取走小号通道：读额度限制不生效，只有切到官方 API 时才会拦。").classes("text-xs text-gray-400")
+                            ui.label("下一次请求走小号：读额度限制不生效，只在轮到官方号时才会拦。").classes("text-xs text-gray-400")
                         else:
                             denied = b.allow(auto=True)
                             if denied:

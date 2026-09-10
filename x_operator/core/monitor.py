@@ -11,16 +11,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .. import config
 from ..adapters import factory
-from ..adapters.base import TweetData, XClientError
-from ..db.database import get_conn, to_iso, utcnow_iso
-from . import budget
+from ..adapters.base import RateLimited, TweetData, XClientError
+from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from .compliance import is_blacklisted
 from .matcher import MatchEngine
+from .readpool import ReadPool, resume_delay
 
 # 单个推主一次最多拉多少条（官方 API 单页上限 100，非官方 40）。高产推主一天几十条也够；
 # 更早的会在下一轮凭游标继续，不会丢
@@ -35,46 +36,24 @@ class MonitorStats:
     no_match: int = 0
     filtered: int = 0
     errors: int = 0
+    paused: bool = False                             # 因 429 / 账号都到限额而中途停下（会自动续跑）
     notes: list[str] = field(default_factory=list)   # 中文说明（为什么没结果 / 哪个推主出错）
 
     @property
     def ok(self) -> bool:
-        return self.errors == 0 and not (self.users_polled == 0 and self.notes)
+        return self.errors == 0 and not self.paused and not (self.users_polled == 0 and self.notes)
 
     def as_msg(self) -> str:
-        head = (f"监控完成：轮询 {self.users_polled} 位推主，拉取 {self.tweets_fetched} 条，"
+        head = (f"{'监控暂停' if self.paused else '监控完成'}：轮询 {self.users_polled} 位推主，拉取 {self.tweets_fetched} 条，"
                 f"入队 {self.queued}，未匹配 {self.no_match}，过滤 {self.filtered}，错误 {self.errors}")
         if self.notes:
             head += "。\n" + "\n".join(self.notes[:12])
         return head
 
 
-READ_CHANNEL_LABEL = {"unofficial": "小号 Cookie 通道（免费，读额度不生效）", "official": "官方 API（按条计费，读额度生效）"}
-
-
-def read_channel() -> str:
-    v = (config.get("read_channel") or "unofficial").strip()
-    return v if v in READ_CHANNEL_LABEL else "unofficial"
-
-
 def get_read_account() -> sqlite3.Row | None:
-    """抓取（监控/搜索的读取）用的账号，按设置里的「抓取通道」选：
-    - 小号通道（默认）：在启用中的非官方账号里挑今天读得最少的（多个小号分摊风控）；一个都没有就退回官方号。
-    - 官方 API：优先主号；没有官方号就退回小号。
-    调用方用 account['access_type'] 判断这次读取是否计费/是否受读额度限制。"""
-    with get_conn() as conn:
-        official = conn.execute(
-            "SELECT * FROM accounts WHERE status='active' AND access_type='official' "
-            "ORDER BY is_primary DESC, id ASC LIMIT 1").fetchone()
-        unofficial = conn.execute(
-            "SELECT a.* FROM accounts a LEFT JOIN ("
-            "  SELECT account_id, SUM(reads_consumed) AS r FROM action_log "
-            "  WHERE created_at>=strftime('%Y-%m-%dT00:00:00Z','now') GROUP BY account_id) l ON l.account_id=a.id "
-            "WHERE a.status='active' AND a.access_type='unofficial' "
-            "ORDER BY COALESCE(l.r,0) ASC, a.id ASC LIMIT 1").fetchone()
-    if read_channel() == "official":
-        return official or unofficial
-    return unofficial or official
+    """现在这一刻读取账号池会挑出的账号（仪表盘展示 / 单次读取用）。正式抓取循环里每次请求都重新挑，见 core/readpool.py。"""
+    return ReadPool().pick()[0]
 
 
 # 旧名字，其他模块还在用
@@ -149,54 +128,107 @@ def store_target(t: TweetData, source: str, source_rule_id: int | None,
 
 
 class MonitorJob:
+    # 暂停 / 续跑的记录放在 app_settings 里（进程重启也不丢）
+    RESUME_FROM_KEY = "monitor_resume_from_user_id"   # 下次从哪个推主继续（watched_users.id）
+    RESUME_AT_KEY = "monitor_resume_at"               # 什么时候自动继续（UTC ISO）；空 = 没有待续跑
+
     def __init__(self, match_engine: MatchEngine):
         self.match = match_engine
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def pending_resume() -> tuple[int | None, datetime | None]:
+        """(从哪个推主继续, 何时继续)；都为 None = 上次跑完了。"""
+        raw_id = config.get(MonitorJob.RESUME_FROM_KEY) or ""
+        raw_at = config.get(MonitorJob.RESUME_AT_KEY) or ""
+        uid = int(raw_id) if raw_id.isdigit() else None
+        return uid, (parse_iso(raw_at) if raw_at else None)
+
+    @staticmethod
+    def _clear_resume() -> None:
+        config.set_value(MonitorJob.RESUME_FROM_KEY, "")
+        config.set_value(MonitorJob.RESUME_AT_KEY, "")
+
+    def resume_if_due(self) -> MonitorStats | None:
+        """调度器每分钟问一次：上次因 429 / 限额停下的运行到点了就接着跑。没到点或没有待续跑返回 None。"""
+        uid, at = self.pending_resume()
+        if uid is None or at is None or at > datetime.now(timezone.utc):
+            return None
+        return self.run_once(auto=True)
 
     def run_once(self, auto: bool = False, progress=None) -> MonitorStats:
-        """auto=True 表示后台自动轮询（读额度熔断更保守）；手动按钮触发传 False。
-        progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
+        """auto=True 表示后台自动轮询（官方号的读额度熔断更保守）；手动按钮触发传 False。
+        progress(0~1, 文字)：可选进度回调，UI 进度框用。
+
+        每个推主请求前从读取账号池挑号（core/readpool.py）；挑不到号或撞到 429 就停下本次运行，
+        记住下次从哪个推主继续，rate_limit_pause_minutes 后由调度器自动续跑。"""
         stats = MonitorStats()
-        account = get_read_account()
-        if account is None:
-            stats.notes.append("没有状态为「启用」的账号，无法抓取。请到「设置 → 账号」添加并启用一个账号")
+        if not self._lock.acquire(blocking=False):
+            stats.notes.append("监控正在运行中，这次不重复启动")
             return stats
-        if read_is_billed(account):
-            denied = budget.current().allow(auto)
-            if denied:
-                stats.notes.append(denied)
-                return stats
         try:
-            client = factory.get_client(account)
-        except XClientError as e:
-            stats.errors += 1
-            stats.notes.append(f"账号 @{account['handle']} 无法连接：{e}")
-            _log_read(account["id"], "x_official" if read_is_billed(account) else "x_unofficial",
-                      "get_user_tweets", 0, success=False, error=str(e))
-            return stats
-        except ValueError as e:  # 主号误配非官方通道
-            stats.errors += 1
-            stats.notes.append(f"账号 @{account['handle']}：{e}")
-            return stats
+            return self._run(stats, auto, progress)
+        finally:
+            self._lock.release()
 
+    def _run(self, stats: MonitorStats, auto: bool, progress) -> MonitorStats:
+        pool = ReadPool(auto=auto)
         with get_conn() as conn:
-            users = conn.execute("SELECT * FROM watched_users WHERE enabled=1").fetchall()
+            users = conn.execute("SELECT * FROM watched_users WHERE enabled=1 ORDER BY id").fetchall()
         if not users:
-            stats.notes.append("没有启用的监控推主。请到「监控推主」页添加")
+            acc, why = pool.pick()
+            stats.notes.append(why if acc is None else "没有启用的监控推主。请到「监控推主」页添加")
+            self._clear_resume()
             return stats
-
+        # 上次没跑完：从记住的推主开始，转一圈
+        resume_from, _at = self.pending_resume()
+        if resume_from is not None:
+            k = next((i for i, u in enumerate(users) if u["id"] >= resume_from), 0)
+            if k:
+                users = users[k:] + users[:k]
+                stats.notes.append(f"接着上次停下的地方继续（从 @{users[0]['handle']} 开始）")
         total = len(users)
+        clients: dict[int, object] = {}
 
         def _p(i: int, sub: float, text: str) -> None:
             if progress:
                 progress((i + sub) / total, f"（{i + 1}/{total}）" + text)
 
+        stopped_at: sqlite3.Row | None = None    # 停在哪个推主（还没处理）
+        stop_reason = ""
         for i, user in enumerate(users):
+            account, why = pool.pick()
+            if account is None:
+                stopped_at, stop_reason = user, why
+                break
+            try:
+                client = clients.get(account["id"]) or factory.get_client(account)
+                clients[account["id"]] = client
+            except (XClientError, ValueError) as e:   # 凭据坏了 / 主号误配通道：这个号这次不用，换下一个
+                stats.errors += 1
+                stats.notes.insert(0, f"❌ 账号 @{account['handle']} 无法连接：{e}")
+                _log_read(account["id"], _kind_of(account), "get_user_tweets", 0, success=False, error=str(e))
+                pool.mark_rate_limited(account)
+                account2, why2 = pool.pick()
+                if account2 is None:
+                    stopped_at, stop_reason = user, why2
+                    break
+                account = account2
+                try:
+                    client = clients.get(account["id"]) or factory.get_client(account)
+                    clients[account["id"]] = client
+                except (XClientError, ValueError) as e2:
+                    stopped_at, stop_reason = user, f"账号 @{account['handle']} 也无法连接：{e2}"
+                    break
             stats.users_polled += 1
             lookback_h = _row_int(user, "lookback_hours", 24)
             cursor = user["last_seen_tweet_id"]
             start_time = None if (cursor or not lookback_h) else datetime.now(timezone.utc) - timedelta(hours=lookback_h)
             try:
-                _p(i, 0.05, f"@{user['handle']}：正在从 X 拉取（{'游标之后的新推文' if cursor else f'最近 {lookback_h} 小时'}）…")
+                gap = pool.wait_gap()
+                _p(i, 0.05, f"@{user['handle']}：用 @{account['handle']} 从 X 拉取（{'游标之后的新推文' if cursor else f'最近 {lookback_h} 小时'}）…"
+                   + (f"（间隔 {gap:.0f} 秒）" if gap else ""))
+                pool.note_request(account)
                 result = client.get_user_tweets(user["x_user_id"], since_id=cursor, max_results=MAX_FETCH,
                                                 include_replies=bool(user["include_replies"]), start_time=start_time)
                 _log_read(account["id"], client.api_kind, "get_user_tweets", result.reads_consumed)
@@ -236,6 +268,14 @@ class MonitorJob:
                             "UPDATE watched_users SET last_seen_tweet_id=?, hit_count=hit_count+? WHERE id=?",
                             (result.newest_id, hit, user["id"]))
                         conn.commit()
+            except RateLimited as e:
+                # 撞 429：这个号暂停，本次运行到此为止，这位推主下次接着抓
+                _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
+                until = pool.mark_rate_limited(account, getattr(e, "reset_at", None))
+                stats.users_polled -= 1
+                stopped_at = user
+                stop_reason = f"@{account['handle']} 被 X 限流（429），该账号暂停到 {_hm(until)}"
+                break
             except XClientError as e:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ @{user['handle']} 出错：{e}")
@@ -244,12 +284,33 @@ class MonitorJob:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ @{user['handle']} 出错：{type(e).__name__}: {e}")
                 _log_read(account["id"], client.api_kind, "get_user_tweets", 0, success=False, error=str(e))
-        if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled:
+
+        if stopped_at is not None:
+            resume_at = datetime.now(timezone.utc) + resume_delay()
+            config.set_value(self.RESUME_FROM_KEY, str(stopped_at["id"]))
+            config.set_value(self.RESUME_AT_KEY, to_iso(resume_at))
+            left = total - stats.users_polled
+            stats.paused = True
+            stats.notes.insert(0, f"⏸ 本次运行暂停：{stop_reason}。还剩 {left} 位推主没抓（从 @{stopped_at['handle']} 起），"
+                                  f"{_hm(resume_at)} 自动继续（设置 → 预算 → 「遇到限额后停多少分钟」）")
+        else:
+            self._clear_resume()
+        if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled and stopped_at is None:
             stats.notes.append("所有推主都没有新推文（有游标的只看游标之后的，可在推主卡片上「重置游标」；首次抓取只看「首次回溯」小时数内的）")
-        stats.notes.append(f"本次用 @{account['handle']} 抓取（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}）")
+        if pool.summary():
+            stats.notes.append(pool.summary())
         if progress:
-            progress(1.0, "完成")
+            progress(1.0, "完成" if stopped_at is None else "已暂停")
         return stats
+
+
+def _kind_of(account: sqlite3.Row) -> str:
+    return "x_official" if account["access_type"] == "official" else "x_unofficial"
+
+
+def _hm(dt: datetime) -> str:
+    from ..ui.layout import fmt_time  # 延迟导入：按界面显示时区
+    return fmt_time(to_iso(dt))
 
 
 def _log_read(account_id: int, api_kind: str, endpoint: str, reads: int,

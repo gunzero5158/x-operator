@@ -11,7 +11,7 @@ from ..adapters import factory
 from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
                              parse_credentials, validate_unofficial_credentials)
 from ..core import media
-from ..core.monitor import READ_CHANNEL_LABEL, read_channel
+from ..core.readpool import official_enabled
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           LLMClient)
@@ -81,13 +81,27 @@ def register(jobs) -> None:
 
 
 def _read_channel_panel():
-    ui.label("抓取通道").classes("font-semibold")
-    sel = ui.select(READ_CHANNEL_LABEL, value=read_channel(), label="监控 / 搜索的读取走哪个通道").classes("w-full").props("outlined")
-    ui.label("小号通道（默认）：用启用中的非官方账号去读，X 不计费，下面的读额度限制不生效；有多个小号时轮流用今天读得最少的那个分摊风控。"
-             "官方 API：用主号/官方号去读，按返回条数计费，读额度会拦。所选通道一个账号都没有时自动退回另一个通道，运行结果里会写明这次用的是谁。"
-             ).classes("text-xs text-gray-400 -mt-2 mb-1")
-    sel.on("update:model-value", lambda e: (config.set_value("read_channel", sel.value),
-                                            ui.notify("已切换抓取通道：" + READ_CHANNEL_LABEL[sel.value], type="positive")))
+    ui.label("抓取账号池（监控 / 搜索用哪个账号去读）").classes("font-semibold")
+    ui.label("每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；"
+             "小号都到上限时才轮到官方号（且要打开下面的开关）。撞到 429 的账号会暂停一段时间，本次运行停下并记住进度，到点自动续跑。"
+             "仪表盘能看到每个账号当前窗口的用量。").classes("text-xs text-gray-400 -mt-2 mb-1")
+    sw = ui.switch("官方 API 也参与抓取（按条计费，默认关）", value=official_enabled())
+    ui.label("关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，"
+             "受下面的读额度限制。只有一个官方号、没有小号的用户要打开这个。").classes("text-xs text-gray-400 -mt-2 mb-2")
+    sw.on("update:model-value", lambda e: (config.set_value("read_official_enabled", 1 if e.args else 0),
+                                           ui.notify("官方 API " + ("已参与抓取（计费）" if e.args else "不再参与抓取"), type="positive")))
+    _numeric_panel([
+        ("read_cap_unofficial", "每个小号每 15 分钟最多请求次数",
+         "X 对 Cookie 通道的推主时间线 / 搜索接口大约 50 次 / 15 分钟，默认 40 留余量。到了上限这个号就先不用，换别的号或等窗口过去。", int, 1, 500),
+        ("read_cap_official", "每个官方号每 15 分钟最多请求次数",
+         "官方 API Basic 档的推主时间线接口只有 5 次 / 15 分钟（Pro 档 900）。按你的套餐填。", int, 1, 5000),
+        ("rate_limit_pause_minutes", "遇到限额后停多少分钟再继续",
+         "撞到 429 的账号暂停这么久；账号都到上限时本次运行也停这么久再自动从停下的推主继续。X 的窗口是 15 分钟，默认 15。", int, 1, 1440),
+        ("read_gap_min_seconds", "请求之间随机间隔（秒）下限",
+         "两次读请求之间随机停几秒，像真人刷一样，降低小号风控风险。默认 2。", int, 0, 300),
+        ("read_gap_max_seconds", "请求之间随机间隔（秒）上限",
+         "默认 6；填 0 = 不停。间隔只影响耗时，不影响限额计数。", int, 0, 300),
+    ])
 
 
 _TZ_CHOICES = ["Asia/Shanghai", "Asia/Tokyo", "Asia/Taipei", "Asia/Singapore", "UTC",
@@ -347,7 +361,7 @@ def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
     ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
              "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
-    ui.label("多账号分工：抓取（读）默认走小号通道、免费（设置 → 预算「抓取通道」可切到官方 API，计费）；回复默认在启用中的小号里自动轮流、"
+    ui.label("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 预算「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，审核队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
              "发帖的账号在定时发帖计划里选。").classes("text-xs text-gray-400")

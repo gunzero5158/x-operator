@@ -131,7 +131,7 @@ uv run python -m x_operator.main
 
 ### 多账号：谁来回、谁来发
 
-- **主号**：账号弹窗里的「设为主号」开关（只有官方 API 通道能当主号）。主号用来发自己的帖子、以及抓取通道切到「官方 API」时负责读取；默认**不参与回复**。
+- **主号**：账号弹窗里的「设为主号」开关（只有官方 API 通道能当主号）。主号用来发自己的帖子、以及打开「官方 API 也参与抓取」后作为小号都到上限时的抓取后备；默认**不参与回复**。
 - **回复账号**：每条搜索规则 / 每个监控推主可选——
   - 「自动轮流」（默认）：在启用中的小号里挑最闲的（按今天已回 + 队列里待审核/待发送的条数，跳过已到日上限的），
     一轮抓到的多条草稿会均匀分到各小号；一个小号都没有时才退回主号。
@@ -183,8 +183,16 @@ X 按「计数单位」算长度：英文字母/数字/标点每个 1 单位，�
 ### 读额度（设置 → 预算）与费用
 
 - **只有官方 API 通道花钱**（X 按返回的推文条数计费，被过滤掉的也算；发一条也计费，含链接的贵得多）。小号 Cookie/密码通道 X 不计费。
-- **抓取通道**（设置 → 预算）：默认**走小号**——用启用中的非官方账号去读，免费，读额度限制不生效；多个小号时轮流用今天读得最少的那个分摊风控。
-  切到「官方 API」才用主号/官方号去读、按条计费、读额度生效。所选通道没有账号时自动退回另一个通道，运行结果里会写明这次用的是谁。
+- **抓取账号池**（设置 → 预算；`core/readpool.py`）：监控 / 搜索**每发一次请求前**都从池里挑号——
+  - 小号永远参与：挑「最近 15 分钟请求次数最少」的那个（从 `action_log` 数，429 那次也算），多个小号自动分摊、都不撞 X 的窗口限额；
+    每号每 15 分钟的请求上限可设（默认 40，X 对 Cookie 通道大约 50）。
+  - **官方 API 账号默认不参与**（按条计费）：打开「官方 API 也参与抓取」后，小号都到上限、或一个小号都没有时才用它，
+    每号每 15 分钟上限默认 5（Basic 档的推主时间线接口就是 5，Pro 档 900，按套餐填），读额度熔断照拦。只有官方号、没有小号的用户要打开这个开关。
+  - 请求之间随机停 2~6 秒（可设，上限填 0 = 不停），像真人刷一样。
+  - **撞到 429**：该账号暂停「遇到限额后停多少分钟」（默认 15），期间不再被挑。监控这次运行到此停下、记住下次从哪位推主继续，
+    到点由调度器自动续跑（不看「自动监控」开关，那是用户已经发起的一次运行）；账号都到上限挑不出号时同样处理。
+    搜索规则撞 429 只暂停该账号，这条规则留到下次运行。
+  - 运行结果会写「本次抓取用了 @a 12 次、@b 11 次」；仪表盘按账号显示当前窗口用量、暂停到几点、以及监控是否有待续跑。
 - 程序怎么数：每次抓取按返回条数记进 `action_log.reads_consumed`（开了观看量门槛按扫描条数），发送后回查记 1 条。读额度只统计官方通道；仪表盘另行显示小号通道的读取量。
 - 真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑，手动运行在当日额度用完时拒绝，每天 0 点（UTC）重置；填 0 = 不限。
 - 仪表盘按 $0.005/条估算本月官方读费用——这是程序自己的估算，不是 X 账单，实际单价以开发者后台为准。
@@ -230,7 +238,7 @@ X 按「计数单位」算长度：英文字母/数字/标点每个 1 单位，�
 ```bash
 uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
-# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关
+# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
 # 真渲染截图（需要 Playwright 的 Chromium）：先起样例服务，再截图并打印标签实际颜色
 timeout 60 uv run python scripts/shot_server.py &   # 端口 8099
@@ -241,10 +249,10 @@ uv run --with playwright python scripts/shot_pages.py /tmp/shots
 
 ```
 x_operator/
-  db/         schema.py(DDL v16) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v17) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
-  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(素材语言自动判断) textlimit.py(X 计数单位/超限 AI 缩写)
+  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(素材语言自动判断) textlimit.py(X 计数单位/超限 AI 缩写)
   ui/         layout.py(页面框架/标签配色/显示时区) pickers.py(共用弹窗/回复方式字段) media_widget.py(附件上传/缩略图) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
 scripts/      smoke_test.py serve_check.sh ui_dialog_check.py shot_server.py shot_pages.py

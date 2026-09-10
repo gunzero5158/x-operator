@@ -23,7 +23,7 @@ HINTS = {
     "source": "关键词搜索=用下面的关键词去 X 搜（结果多但观看量普遍低）；账号推荐流=直接读某个小号首页 For You 里算法推给它的推文，"
               "热门内容多、观看量高，但内容取决于这个号平时关注谁、点什么赞——先用它关注几十个目标领域账号、刷几天，推荐流才对路；"
               "账号关注流=只看它关注的人发的。推荐流只有小号（Cookie 通道）能读，官方 API 没有这个接口。",
-    "feed_account": "读哪个账号的时间线。留「自动」= 用「设置 → 预算 → 抓取通道」选出来的那个号。推荐流建议固定一个专门养过的小号。",
+    "feed_account": "读哪个账号的时间线。留「自动」= 从抓取账号池里挑当前用得最少的小号（设置 → 预算）。推荐流建议固定一个专门养过的小号。",
     "keywords": "最简单：逗号隔开多个词，命中任意一个即可（中文词会自动整词匹配）。高级：直接写 X 语法，空格=同时包含、OR=或、-词=排除。"
                 "语言不用写，下面勾选；转推默认排除。",
     "semantic": "写给打分 AI 看的：要什么样的人/内容、排除什么。例：作者本人在抱怨某类工具太贵或在找替代；排除新闻、教程、招聘、广告。",
@@ -161,7 +161,7 @@ def register(jobs) -> None:
                                 sw.on("update:model-value", lambda e, rid=r["id"]: _toggle(rid, e.args))
                             if is_feed_rule(r):
                                 ui.label("来源：" + SOURCE_KIND_LABEL[rule_source_kind(r)] + "，读取 "
-                                         + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（抓取通道选的号）")
+                                         + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（账号池挑的号）")
                                          + " 的时间线，不用关键词").classes("text-xs text-gray-600")
                             else:
                                 ui.label("关键词：" + r["keyword_query"]).classes("text-xs font-mono text-gray-600")
@@ -201,7 +201,7 @@ def register(jobs) -> None:
             src = ui.select(SOURCE_KIND_LABEL, value=g("source_kind", "search") if g("source_kind", "search") in SOURCE_KIND_LABEL else "search",
                             label="推文来源").classes("w-full").props("outlined")
             _hint("source")
-            feed_opts = {0: "自动（用抓取通道选出来的号）", **{k: v for k, v in account_options().items() if k}}
+            feed_opts = {0: "自动（账号池挑用得最少的小号）", **{k: v for k, v in account_options().items() if k}}
             feed_box = ui.column().classes("w-full gap-4")  # 与卡片默认间距一致，否则 _hint 的 -mt-2 会压到输入框上
             with feed_box:
                 feed_acc = ui.select(feed_opts, value=g("feed_account_id", 0) if g("feed_account_id", 0) in feed_opts else 0,

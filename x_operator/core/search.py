@@ -16,14 +16,15 @@ from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
 from ..adapters import factory
-from ..adapters.base import TweetData, XClientError
-from ..db.database import get_conn, utcnow_iso
+from ..adapters.base import RateLimited, TweetData, XClientError
+from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import budget
 from .langdetect import LANG_LABEL  # noqa: F401  规则页等处仍从 search 取
 from .matcher import MatchEngine
-from .monitor import (FILTER_REASONS, _log_read, _row_int, get_read_account,
+from .monitor import (FILTER_REASONS, _log_read, _row_int,
                       precheck, read_is_billed, store_target)
+from .readpool import ReadPool
 
 
 # X 官方「最近搜索」只能查 7 天；规则里填得再大也只能抓到这么多
@@ -157,7 +158,7 @@ class SearchJob:
 
     @staticmethod
     def feed_account(rule: sqlite3.Row, fallback: sqlite3.Row) -> sqlite3.Row:
-        """推荐流/关注流规则读哪个账号的时间线：规则里指定的（须启用），否则用抓取通道选出来的账号。"""
+        """推荐流/关注流规则读哪个账号的时间线：规则里指定的（须启用），否则用账号池这次挑出来的账号。"""
         fid = _rule_get(rule, "feed_account_id", None)
         if fid:
             with get_conn() as conn:
@@ -316,15 +317,11 @@ class SearchJob:
         rule_ids：只跑这些规则（停用的也跑——用户明确点了这一条）；None = 全部启用的规则。
         progress(0~1, 文字)：可选进度回调，UI 进度框用。"""
         stats = SearchStats()
-        account = get_read_account()
+        pool = ReadPool(auto=auto)
+        account, why = pool.pick()
         if account is None:
-            stats.notes.append("没有状态为「启用」的账号，无法搜索。请到「设置 → 账号」添加并启用一个账号")
+            stats.notes.append(why)
             return stats
-        if read_is_billed(account):
-            denied = budget.current().allow(auto)
-            if denied:
-                stats.notes.append(denied)
-                return stats
         with get_conn() as conn:
             if rule_ids:
                 marks = ",".join("?" * len(rule_ids))
@@ -345,9 +342,17 @@ class SearchJob:
                 progress((i + sub) / total, f"（{i + 1}/{total}）" + text)
 
         for i, rule in enumerate(rules):
+            # 每条规则请求前重新从账号池挑号（分摊 15 分钟窗口限额）；挑不到就停，剩下的规则等下次
+            if i:
+                account, why = pool.pick()
+                if account is None:
+                    stats.notes.insert(0, f"⏸ 停在规则「{rule['name']}」之前：{why}。剩下 {len(rules) - i} 条规则下次运行再跑")
+                    break
             stats.rules_run += 1
             min_scores.append(int(rule["min_llm_score"]))
             try:
+                pool.wait_gap()
+                pool.note_request(account)
                 scored = self.run_rule(rule, account, notes=stats.notes,
                                        progress=lambda sub, text, i=i: _p(i, sub, text))
                 stats.tweets_fetched += len(scored)
@@ -388,6 +393,12 @@ class SearchJob:
                     else:
                         conn.execute("UPDATE search_rules SET last_run_at=? WHERE id=?", (utcnow_iso(), rule["id"]))
                     conn.commit()
+            except RateLimited as e:
+                stats.errors += 1
+                until = pool.mark_rate_limited(account, getattr(e, "reset_at", None))
+                stats.notes.insert(0, f"❌ 规则「{rule['name']}」：@{account['handle']} 被 X 限流（429），该账号暂停到 {_hm(until)}；"
+                                      "这条规则下次运行再抓")
+                _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
             except (XClientError, ValueError) as e:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{e}")
@@ -406,10 +417,16 @@ class SearchJob:
             stats.notes.append(tip)
         if stats.tweets_fetched:
             stats.notes.append("每条推文的打分和被过滤的原因都在「抓取记录」页")
-        stats.notes.append(f"本次用 @{account['handle']} 抓取（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}）")
+        if pool.summary():
+            stats.notes.append(pool.summary())
         if progress:
             progress(1.0, "完成")
         return stats
+
+
+def _hm(dt: datetime) -> str:
+    from ..ui.layout import fmt_time  # 延迟导入：按界面显示时区
+    return fmt_time(to_iso(dt))
 
 
 def _kind(account: sqlite3.Row) -> str:
