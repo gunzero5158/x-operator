@@ -1197,39 +1197,54 @@ with get_conn() as conn:
 m = jobs.monitor.resume_if_due()
 assert m is not None and not m.paused and "从 @rp_w3 开始" in m.as_msg() and m.users_polled == 3, m.as_msg()
 assert jobs.monitor.pending_resume() == (None, None)
-# C. 撞 429：该号暂停到设置的分钟数后，本次停下记住推主；续跑时这个号不再被挑，换另一个号
+# C. 撞 429：该号暂停到设置的分钟数后，换另一个号重试同一位推主、这次照样跑完；所有号都撞了才停下记住推主，到点续跑
 with get_conn() as conn:
     s1 = conn.execute("SELECT * FROM accounts WHERE handle='small1'").fetchone()
+    s2 = conn.execute("SELECT * FROM accounts WHERE handle='small2'").fetchone()
     conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
-cli1 = factory.get_client(s1)
-orig_gut = cli1.get_user_tweets
+cli1, cli2 = factory.get_client(s1), factory.get_client(s2)
+orig_gut1, orig_gut2 = cli1.get_user_tweets, cli2.get_user_tweets
 def _boom429(*a, **k):
     raise RateLimited("X 限流（拉取推主时间线），稍后自动重试。")
 cli1.get_user_tweets = _boom429
 m = jobs.monitor.run_once()
-assert m.paused and m.users_polled == 0 and "被 X 限流（429）" in m.as_msg() and "@small1" in m.as_msg(), m.as_msg()
-assert jobs.monitor.pending_resume()[0] == wids["rp_w1"]
+assert not m.paused and m.users_polled == 3 and "@small1 被 X 限流（429）" in m.as_msg() and "换号继续" in m.as_msg(), m.as_msg()
+assert "@small2 3 次" in m.as_msg() and jobs.monitor.pending_resume() == (None, None), m.as_msg()
 with get_conn() as conn:
     pu = conn.execute("SELECT read_paused_until FROM accounts WHERE handle='small1'").fetchone()["read_paused_until"]
 assert pu and 6 <= (parse_iso(pu) - datetime.now(timezone.utc)).total_seconds() / 60 <= 7.1, pu
 pk, why = ReadPool().pick(); assert pk["handle"] == "small2", why                  # 暂停中的号不被挑
+# 两个号都撞 429 → 一个号都挑不出来 → 停下记住第 1 位推主；号恢复后到点续跑
+cli2.get_user_tweets = _boom429
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET read_paused_until=NULL WHERE handle='small1'"); conn.commit()
+m = jobs.monitor.run_once()
+assert m.paused and m.users_polled == 0 and m.as_msg().count("被 X 限流（429）") == 2 and "@rp_w1" in m.as_msg(), m.as_msg()
+assert jobs.monitor.pending_resume()[0] == wids["rp_w1"]
+cli1.get_user_tweets, cli2.get_user_tweets = orig_gut1, orig_gut2
 config.set_value("monitor_resume_at", to_iso(datetime.now(timezone.utc) - _td(seconds=1)))
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET read_paused_until=NULL WHERE handle IN ('small1','small2')"); conn.commit()
 m = jobs.monitor.resume_if_due()
-assert m is not None and not m.paused and m.users_polled == 3 and "@small2 3 次" in m.as_msg() and "@small1" not in m.as_msg().split("本次抓取用了")[1], m.as_msg()
-cli1.get_user_tweets = orig_gut
-# 搜索：撞 429 也暂停该号，规则留到下次
+assert m is not None and not m.paused and m.users_polled == 3 and jobs.monitor.pending_resume() == (None, None), m.as_msg()   # 停在第 1 位，续跑就是从头
+# 搜索：撞 429 也暂停该号、换号重试同一条规则；换不到号才把规则留到下次
 orig_s1_search = cli1.search_recent
 cli1.search_recent = _boom429
 with get_conn() as conn:
-    conn.execute("UPDATE accounts SET read_paused_until=NULL WHERE handle='small1'"); conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
+    conn.execute("DELETE FROM action_log WHERE account_id IN (?,?)", (ids["small1"], ids["small2"])); conn.commit()
 st = jobs.search.run_once(rule_ids=[rule["id"]])
-assert st.errors == 1 and "被 X 限流（429）" in st.as_msg() and "下次运行再抓" in st.as_msg(), st.as_msg()
+assert st.errors == 0 and st.rules_run == 1 and "@small1 被 X 限流（429）" in st.as_msg() and "换号继续" in st.as_msg(), st.as_msg()
 pk, why = ReadPool().pick(); assert pk["handle"] == "small2", why
-cli1.search_recent = orig_s1_search
+cli2.search_recent, orig_s2_search = _boom429, cli2.search_recent
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET read_paused_until=NULL WHERE handle='small1'"); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]])
+assert st.errors == 1 and "换不到号了" in st.as_msg() and "下次运行再抓" in st.as_msg(), st.as_msg()
+cli1.search_recent, cli2.search_recent = orig_s1_search, orig_s2_search
 with get_conn() as conn:
     conn.execute("UPDATE accounts SET read_paused_until=NULL"); conn.execute("UPDATE watched_users SET enabled=0 WHERE handle LIKE 'rp_w%'"); conn.commit()
 config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40); config.set_value("rate_limit_pause_minutes", 15)
-print("[6f19] 监控账号池：多小号分摊 / 到上限暂停并记住推主、到点续跑 / 撞 429 暂停该号、续跑换号 / 搜索撞 429 也暂停该号 OK")
+print("[6f19] 监控账号池：多小号分摊 / 到上限暂停并记住推主、到点续跑 / 撞 429 暂停该号换号重试、全撞了才停 / 搜索同样换号重试 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

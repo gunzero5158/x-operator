@@ -351,10 +351,22 @@ class SearchJob:
             stats.rules_run += 1
             min_scores.append(int(rule["min_llm_score"]))
             try:
-                pool.wait_gap()
-                pool.note_request(account)
-                scored = self.run_rule(rule, account, notes=stats.notes,
-                                       progress=lambda sub, text, i=i: _p(i, sub, text))
+                while True:
+                    pool.wait_gap()
+                    pool.note_request(account)
+                    try:
+                        scored = self.run_rule(rule, account, notes=stats.notes,
+                                               progress=lambda sub, text, i=i: _p(i, sub, text))
+                        break
+                    except RateLimited as e:
+                        # 撞 429：暂停该号，换下一个号重试这条规则；挑不出号了就把这条规则留到下次
+                        _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
+                        until = pool.mark_rate_limited(account, getattr(e, "reset_at", None))
+                        stats.notes.append(f"⚠ @{account['handle']} 被 X 限流（429），该账号暂停到 {_hm(until)}，换号继续")
+                        nxt, why = pool.pick()
+                        if nxt is None:
+                            raise XClientError(f"换不到号了：{why}。这条规则下次运行再抓") from e
+                        account = nxt
                 stats.tweets_fetched += len(scored)
                 newest_id = None
                 for k, cand in enumerate(scored):
@@ -393,12 +405,6 @@ class SearchJob:
                     else:
                         conn.execute("UPDATE search_rules SET last_run_at=? WHERE id=?", (utcnow_iso(), rule["id"]))
                     conn.commit()
-            except RateLimited as e:
-                stats.errors += 1
-                until = pool.mark_rate_limited(account, getattr(e, "reset_at", None))
-                stats.notes.insert(0, f"❌ 规则「{rule['name']}」：@{account['handle']} 被 X 限流（429），该账号暂停到 {_hm(until)}；"
-                                      "这条规则下次运行再抓")
-                _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
             except (XClientError, ValueError) as e:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{e}")
