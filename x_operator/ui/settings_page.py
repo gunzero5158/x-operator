@@ -30,6 +30,7 @@ def register(jobs) -> None:
             with ui.tabs().classes("w-full") as tabs:
                 t_acc = ui.tab("账号")
                 t_run = ui.tab("自动运行")
+                t_fetch = ui.tab("抓取")
                 t_llm = ui.tab("LLM")
                 t_comp = ui.tab("合规参数")
                 t_budget = ui.tab("预算")
@@ -58,9 +59,9 @@ def register(jobs) -> None:
                         ("nurture_days", "养号期天数",
                          "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。", int, 0, 365),
                     ])
-                with ui.tab_panel(t_budget):
+                with ui.tab_panel(t_fetch):
                     _read_channel_panel()
-                    ui.separator()
+                with ui.tab_panel(t_budget):
                     ui.label("读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。"
                              "怎么数：每次抓取按 X 返回的推文条数记（被过滤掉的也算，开了观看量门槛时按扫描条数记），发送后回查算 1 条，发送本身不占读额度。"
                              "真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。"
@@ -81,13 +82,13 @@ def register(jobs) -> None:
 
 
 def _read_channel_panel():
-    ui.label("抓取账号池（监控 / 搜索用哪个账号去读）").classes("font-semibold")
+    ui.label("抓取账号池（监控 / 搜索用哪个账号去读、限额与 429 冷却）").classes("font-semibold")
     ui.label("每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；"
              "小号都到上限时才轮到官方号（且要打开下面的开关）。撞到 429 的账号会暂停一段时间，本次运行停下并记住进度，到点自动续跑。"
              "仪表盘能看到每个账号当前窗口的用量。").classes("text-xs text-gray-400 -mt-2 mb-1")
     sw = ui.switch("官方 API 也参与抓取（按条计费，默认关）", value=official_enabled())
     ui.label("关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，"
-             "受下面的读额度限制。只有一个官方号、没有小号的用户要打开这个。").classes("text-xs text-gray-400 -mt-2 mb-2")
+             "受「预算」标签页里的读额度限制。只有一个官方号、没有小号的用户要打开这个。").classes("text-xs text-gray-400 -mt-2 mb-2")
     sw.on("update:model-value", lambda e: (config.set_value("read_official_enabled", 1 if e.args else 0),
                                            ui.notify("官方 API " + ("已参与抓取（计费）" if e.args else "不再参与抓取"), type="positive")))
     _numeric_panel([
@@ -361,7 +362,7 @@ def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
     ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
              "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
-    ui.label("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 预算「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
+    ui.label("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，任务队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
              "发帖的账号在定时发帖计划里选。").classes("text-xs text-gray-400")
@@ -500,6 +501,8 @@ def _accounts_panel():
                     .props("outlined dense").classes("flex-1")
                 mx = ui.number("最大间隔(秒)", value=existing["max_interval_sec"] if existing else 600, min=0) \
                     .props("outlined dense").classes("flex-1")
+            ui.label("两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；"
+                     "同一账号主贴和回复都到点时先发主贴。").classes("text-xs text-gray-400 -mt-2")
             with ui.row().classes("w-full gap-2 no-wrap"):
                 a_start = ui.input("活跃开始 HH:MM", value=existing["active_hours_start"] if existing else "09:00") \
                     .props("outlined dense").classes("flex-1")

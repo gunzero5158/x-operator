@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # 定时发帖表单独拎出来：v9 把 material_id 改成可空、v12 计划类型加 interval（每隔 N 小时），改约束 SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     status              TEXT    NOT NULL DEFAULT 'active'
                         CHECK (status IN ('active','paused','auth_error')),
     next_allowed_at     TEXT,
+    next_allowed_post_at TEXT,
     read_paused_until   TEXT,
     note                TEXT    NOT NULL DEFAULT '',
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),

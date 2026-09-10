@@ -23,7 +23,7 @@ from ..adapters.base import (AuthExpired, DuplicateContent, MediaError, NetworkE
                              PostResult, RateLimited, TargetNotFound, XClientError)
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from . import media, textlimit
-from .compliance import ComplianceGuard
+from .compliance import ComplianceGuard, next_allowed_key
 
 log = logging.getLogger("x_operator.dispatcher")
 
@@ -104,17 +104,26 @@ class Dispatcher:
         if not self.guard.is_in_active_hours(account, now):
             return False, (f"不在活跃时段（{account['active_hours_start']}-{account['active_hours_end']} "
                            f"{account['timezone']}），{waiting} 条待发到时段内自动发送")
-        na = parse_iso(account["next_allowed_at"])
-        if na and now < na:
-            secs = int((na - now).total_seconds())
-            return False, f"距下次可发时间还有约 {secs} 秒（{waiting} 条待发）"
-
+        # 主贴和回复各自一个冷却：挑「自己那套冷却已到」的最早条目；主贴优先（定时发帖才能大致准点）
+        ready: dict[str, bool] = {}
+        waits: list[str] = []
+        for kind, label in (("post", "发帖"), ("reply", "回复")):
+            na = parse_iso(account[next_allowed_key(kind)])
+            ready[kind] = not (na and now < na)
+            if not ready[kind]:
+                waits.append(f"{label}还要等约 {int((na - now).total_seconds())} 秒")
         with get_conn() as conn:
-            item = conn.execute(
-                "SELECT * FROM review_queue WHERE status='approved' AND account_id=? "
-                "ORDER BY created_at ASC LIMIT 1", (account["id"],)).fetchone()
+            item = None
+            for kind in ("post", "reply"):
+                if not ready[kind]:
+                    continue
+                item = conn.execute(
+                    "SELECT * FROM review_queue WHERE status='approved' AND account_id=? AND action_type=? "
+                    "ORDER BY created_at ASC LIMIT 1", (account["id"], kind)).fetchone()
+                if item is not None:
+                    break
             if item is None:
-                return False, ""
+                return False, (f"距下次可发时间：{'；'.join(waits)}（{waiting} 条待发）" if waits else "")
             # 乐观锁
             cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved'",
                                (item["id"],))
@@ -271,7 +280,7 @@ class Dispatcher:
             lo, hi = account["min_interval_sec"], account["max_interval_sec"]
             delay = random.randint(lo, hi) if hi >= lo else lo
             next_at = to_iso(datetime.now(timezone.utc) + timedelta(seconds=delay))
-            conn.execute("UPDATE accounts SET next_allowed_at=? WHERE id=?", (next_at, account["id"]))
+            conn.execute(f"UPDATE accounts SET {next_allowed_key(item['action_type'])}=? WHERE id=?", (next_at, account["id"]))
             conn.execute(
                 "INSERT INTO action_log(account_id, api_kind, endpoint, has_link, success, created_at) "
                 "VALUES (?,?,?,?,1,?)",
@@ -326,10 +335,10 @@ class Dispatcher:
         with get_conn() as conn:
             conn.execute("UPDATE review_queue SET status='approved', error_msg=? WHERE id=?",
                          (f"X 限流，暂停到 {to_iso(reset)} 后自动继续", item["id"]))
-            cur = parse_iso(conn.execute("SELECT next_allowed_at FROM accounts WHERE id=?",
-                                         (account["id"],)).fetchone()["next_allowed_at"])
+            key = next_allowed_key(item["action_type"])
+            cur = parse_iso(conn.execute(f"SELECT {key} FROM accounts WHERE id=?", (account["id"],)).fetchone()[key])
             if cur is None or cur < reset:
-                conn.execute("UPDATE accounts SET next_allowed_at=? WHERE id=?", (to_iso(reset), account["id"]))
+                conn.execute(f"UPDATE accounts SET {key}=? WHERE id=?", (to_iso(reset), account["id"]))
             conn.commit()
 
     # ------------------------------------------------------------------ 回查

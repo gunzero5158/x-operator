@@ -78,6 +78,8 @@ _ADDED_COLUMNS = [
     ("search_rules", "read_media", "INTEGER NOT NULL DEFAULT 0"),
     # v17：读取账号池——撞 429 的账号暂停到什么时候（UTC ISO），期间不被挑去抓取
     ("accounts", "read_paused_until", "TEXT"),
+    # v18：主贴和回复各自一个发送冷却——next_allowed_at 只管回复，主贴看这个
+    ("accounts", "next_allowed_post_at", "TEXT"),
 ]
 
 

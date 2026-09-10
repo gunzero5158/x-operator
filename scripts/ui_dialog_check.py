@@ -350,11 +350,11 @@ async def test_rule_dialog_read_media_switch(user: User):
 
 
 async def test_settings_read_pool_panel_and_dashboard(user: User):
-    """设置 → 预算：抓取账号池面板——官方号参与开关默认关、切换即落库；限额 / 暂停分钟 / 随机间隔可改。仪表盘按账号显示窗口用量与暂停状态。"""
+    """设置 → 抓取：抓取账号池面板——官方号参与开关默认关、切换即落库；限额 / 暂停分钟 / 随机间隔可改。仪表盘按账号显示窗口用量与暂停状态。"""
     _pages()
     await user.open("/settings")
-    user.find("预算").click()
-    await user.should_see("抓取账号池（监控 / 搜索用哪个账号去读）")
+    user.find("抓取").click()
+    await user.should_see("抓取账号池（监控 / 搜索用哪个账号去读、限额与 429 冷却）")
     await user.should_see("每个小号每 15 分钟最多请求次数")
     await user.should_see("遇到限额后停多少分钟再继续")
     sw = [e for e in user.find(kind=ui.switch).elements if e.text.startswith("官方 API 也参与抓取")][0]

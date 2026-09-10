@@ -300,7 +300,7 @@ class MonitorJob:
             left = total - stats.users_polled
             stats.paused = True
             stats.notes.insert(0, f"⏸ 本次运行暂停：{stop_reason}。还剩 {left} 位推主没抓（从 @{stopped_at['handle']} 起），"
-                                  f"{_hm(resume_at)} 自动继续（设置 → 预算 → 「遇到限额后停多少分钟」）")
+                                  f"{_hm(resume_at)} 自动继续（设置 → 抓取 → 「遇到限额后停多少分钟」）")
         else:
             self._clear_resume()
         if stats.tweets_fetched == 0 and stats.errors == 0 and stats.users_polled and stopped_at is None:

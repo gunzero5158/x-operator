@@ -74,6 +74,11 @@ def is_blacklisted(conn: sqlite3.Connection, author_id: str | None, author_handl
     return row is not None
 
 
+def next_allowed_key(action_type: str) -> str:
+    """账号上记录「下次可发时间」的列：主贴 next_allowed_post_at，回复 next_allowed_at（两套冷却互不影响）。"""
+    return "next_allowed_post_at" if action_type == "post" else "next_allowed_at"
+
+
 class ComplianceGuard:
     def is_in_active_hours(self, account: sqlite3.Row, now: datetime) -> bool:
         tz = _tz(account["timezone"])
@@ -122,10 +127,11 @@ class ComplianceGuard:
             if not self.is_in_active_hours(account, now):
                 return GuardResult(False, GuardCode.OUTSIDE_ACTIVE_HOURS, False, "当前不在账号活跃时段内")
 
-            # 发送间隔
-            next_allowed = parse_iso(account["next_allowed_at"])
+            # 发送间隔：主贴和回复各自一个冷却，互不影响
+            next_allowed = parse_iso(account[next_allowed_key(item["action_type"])])
             if next_allowed and now < next_allowed:
-                return GuardResult(False, GuardCode.INTERVAL_NOT_ELAPSED, False, "两次发送最小间隔未到")
+                return GuardResult(False, GuardCode.INTERVAL_NOT_ELAPSED, False,
+                                   f"两次{'发帖' if item['action_type'] == 'post' else '回复'}的最小间隔未到")
 
         # 日上限
         post_lim, reply_lim = self.effective_limits(account)

@@ -89,13 +89,13 @@ def register(jobs) -> None:
                             for x in ps:
                                 who = ("官方号" if x["official"] else "小号") + f" @{x['handle']}"
                                 if x["official"] and not x["participates"]:
-                                    lines.append(who + "：不参与抓取（设置 → 预算 可打开）")
+                                    lines.append(who + "：不参与抓取（设置 → 抓取 可打开）")
                                 elif x["paused_until"]:
                                     lines.append(who + f"：撞过 429，暂停到 {fmt_time(to_iso(x['paused_until']))}")
                                 else:
                                     lines.append(who + f"：最近 15 分钟 {x['requests']}/{x['cap']} 次")
                             ui.label("；".join(lines) + "。下一次请求会用 " + (f"@{ra['handle']}" if ra else "（现在没有能用的号）")
-                                     + "。设置 → 预算 可调上限。").classes("text-sm")
+                                     + "。设置 → 抓取 可调上限。").classes("text-sm")
                         r_uid, r_at = jobs.monitor.pending_resume()
                         if r_uid is not None and r_at is not None:
                             ui.label(f"⏸ 监控上次因限流暂停，{fmt_time(to_iso(r_at))} 自动从停下的推主继续").classes("text-xs text-orange-600")

@@ -112,7 +112,7 @@ class ReadPool:
                 return a, f"小号 @{a['handle']}（最近 {WINDOW_MINUTES} 分钟第 {ranked[0][0] + 1} 次）"
             if officials:
                 if not official_enabled():
-                    blocked.append("官方 API 账号未参与抓取（设置 → 预算 → 「官方 API 也参与抓取」是关的）")
+                    blocked.append("官方 API 账号未参与抓取（设置 → 抓取 → 「官方 API 也参与抓取」是关的）")
                 else:
                     for a in officials:
                         until = paused_until(a)
@@ -132,7 +132,7 @@ class ReadPool:
             return None, "没有状态为「启用」的账号，无法抓取。请到「设置 → 账号」添加并启用一个账号"
         if not smalls and officials and not official_enabled():
             return None, ("没有启用中的小号，而官方 API 账号默认不参与抓取（按条计费）。"
-                          "要用官方号抓取，到「设置 → 预算」打开「官方 API 也参与抓取」")
+                          "要用官方号抓取，到「设置 → 抓取」打开「官方 API 也参与抓取」")
         return None, "现在没有能用的抓取账号：" + "；".join(blocked)
 
     def note_request(self, account: sqlite3.Row) -> None:

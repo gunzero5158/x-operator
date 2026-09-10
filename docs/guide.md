@@ -40,6 +40,8 @@ uv run python -m x_operator.main
   **所有数据（账号、LLM key、规则、素材、模板、抓取记录）都在这一个文件里**，浏览器只是显示窗口——换 IP、换浏览器打开都是同一份；
   换电脑跑要把 `data/` 一起带走。备份 = 复制这个文件。
 - 账号卡片还可设日发帖/回复上限、发送随机间隔、活跃时段与时区——分发器只在活跃时段内、间隔到了才发。
+  **主贴和回复各自一套冷却**（`accounts.next_allowed_post_at` / `next_allowed_at`）：发了一条回复不会让主贴等，反之亦然；
+  同一账号主贴和回复都到点时先发主贴（定时发帖才能大致准点）。
 - **「已订阅 X Premium（会员）」开关**：决定这个账号的推文长度上限（见下面「推文长度」）。请如实勾选。
 
 ## 卡片标签的颜色约定（全站统一）
@@ -185,7 +187,7 @@ X 按「计数单位」算长度：英文字母/数字/标点每个 1 单位，�
 ### 读额度（设置 → 预算）与费用
 
 - **只有官方 API 通道花钱**（X 按返回的推文条数计费，被过滤掉的也算；发一条也计费，含链接的贵得多）。小号 Cookie/密码通道 X 不计费。
-- **抓取账号池**（设置 → 预算；`core/readpool.py`）：监控 / 搜索**每发一次请求前**都从池里挑号——
+- **抓取账号池**（设置 → 抓取；`core/readpool.py`）：监控 / 搜索**每发一次请求前**都从池里挑号——
   - 小号永远参与：挑「最近 15 分钟请求次数最少」的那个（从 `action_log` 数，429 那次也算），多个小号自动分摊、都不撞 X 的窗口限额；
     每号每 15 分钟的请求上限可设（默认 40，X 对 Cookie 通道大约 50）。
   - **官方 API 账号默认不参与**（按条计费）：打开「官方 API 也参与抓取」后，小号都到上限、或一个小号都没有时才用它，
@@ -251,7 +253,7 @@ uv run --with playwright python scripts/shot_pages.py /tmp/shots
 
 ```
 x_operator/
-  db/         schema.py(DDL v17) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v18) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
   core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(素材语言自动判断) textlimit.py(X 计数单位/超限 AI 缩写)

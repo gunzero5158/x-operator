@@ -77,7 +77,7 @@ with get_conn() as conn:
     rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
     assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
     assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
-assert ver == 17 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 18 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -319,10 +319,16 @@ with get_conn() as conn:
 
 def _fresh_pending_item():
     """挑一条没进过队列的抓取记录，手动选素材 → 批准，返回 (queue_id, target_tweet_id 字符串)。"""
+    base = ("SELECT id, tweet_id, lang FROM target_tweets WHERE process_status IN ('filtered','no_match') "
+            "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
+            "AND tweet_id NOT IN (SELECT tweet_id FROM interactions)")
     with get_conn() as conn:
-        t = conn.execute("SELECT id, tweet_id, lang FROM target_tweets WHERE process_status IN ('filtered','no_match') "
-                         "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
-                         "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
+        # 优先挑作者没互动过的（不会撞作者冷却）；实在没有再放宽
+        t = conn.execute(base + " AND author_id NOT IN (SELECT author_id FROM interactions) LIMIT 1").fetchone() \
+            or conn.execute(base + " LIMIT 1").fetchone()
+        if t is None:   # 池子用光了：再抓一批 mock 推文
+            jobs.monitor.run_once()
+            t = conn.execute(base + " LIMIT 1").fetchone()
         m = conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' LIMIT 1").fetchone()
     out = jobs.match.manual_match(t["id"], m["id"], "回归测试文案 " + t["tweet_id"])
     assert out.status == "queued", out
@@ -407,6 +413,44 @@ ok, msg = jobs.dispatcher.send_now(qid3); assert not ok and "待发送" in msg, 
 with get_conn() as conn:
     conn.execute("UPDATE accounts SET next_allowed_at=NULL, active_hours_start='00:00', active_hours_end='00:00' WHERE id=?", (acc["id"],)); conn.commit()
 print("[6d2] 立即发送突破时段 / 间隔 OK")
+
+# [6d3] 主贴和回复各自一套冷却：回复冷却没到时主贴照发（推进的是 next_allowed_post_at，回复冷却不动）；
+#       两者都到点时先发主贴；主贴冷却没到、回复到点则发回复
+_cd_saved = config.get("cooldown_days"); config.set_value("cooldown_days", 0)   # 这段只看发送冷却，作者冷却先关掉
+qid_r, _ = _fresh_pending_item()
+with get_conn() as conn:
+    conn.execute("UPDATE review_queue SET status='approved' WHERE id=?", (qid_r,))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, final_text, status, created_at) VALUES (?,'post','主贴 A','approved',?)",
+                 (acc["id"], to_iso(datetime.now(timezone.utc) - timedelta(minutes=1))))
+    qid_p = conn.execute("SELECT id FROM review_queue WHERE final_text='主贴 A'").fetchone()["id"]
+    reply_na = to_iso(datetime.now(timezone.utc) + timedelta(hours=1))
+    conn.execute("UPDATE accounts SET next_allowed_at=?, next_allowed_post_at=NULL, min_interval_sec=300, max_interval_sec=300 WHERE id=?", (reply_na, acc["id"])); conn.commit()
+r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
+with get_conn() as conn:
+    rows = {x["id"]: x["status"] for x in conn.execute("SELECT id, status FROM review_queue WHERE id IN (?,?)", (qid_r, qid_p))}
+    a = conn.execute("SELECT next_allowed_at, next_allowed_post_at FROM accounts WHERE id=?", (acc["id"],)).fetchone()
+assert rows[qid_p] == "sent" and rows[qid_r] == "approved", rows            # 回复冷却中，主贴发了
+assert a["next_allowed_at"] == reply_na and a["next_allowed_post_at"] and parse_iso(a["next_allowed_post_at"]) > datetime.now(timezone.utc) + timedelta(seconds=200), dict(a)
+r = jobs.dispatcher.tick(); assert r.sent == 0 and "回复还要等约" in r.as_msg() and "发帖还要等约" in r.as_msg(), r.as_msg()
+with get_conn() as conn:   # 主贴冷却没到、回复到点 → 发回复
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
+with get_conn() as conn:
+    assert conn.execute("SELECT status FROM review_queue WHERE id=?", (qid_r,)).fetchone()["status"] == "sent"
+    # 都到点：主贴优先，哪怕回复先进队
+    qid_r2, _ = _fresh_pending_item()
+    conn.execute("UPDATE review_queue SET status='approved', created_at=? WHERE id=?", (to_iso(datetime.now(timezone.utc) - timedelta(minutes=5)), qid_r2))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, final_text, status, created_at) VALUES (?,'post','主贴 B','approved',?)", (acc["id"], utcnow_iso()))
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL, next_allowed_post_at=NULL, min_interval_sec=0, max_interval_sec=0 WHERE id=?", (acc["id"],)); conn.commit()
+r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
+with get_conn() as conn:
+    assert conn.execute("SELECT status FROM review_queue WHERE final_text='主贴 B'").fetchone()["status"] == "sent"
+    assert conn.execute("SELECT status FROM review_queue WHERE id=?", (qid_r2,)).fetchone()["status"] == "approved"
+r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL, next_allowed_post_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+config.set_value("cooldown_days", _cd_saved or 7)
+print("[6d3] 主贴 / 回复冷却分开、主贴优先 OK")
 
 # [6e] 黑名单按 @handle 也能拦
 with get_conn() as conn:
@@ -867,6 +911,8 @@ with get_conn() as conn:
                      "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
                      "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
     conn.execute("UPDATE accounts SET next_allowed_at=NULL, status='active' WHERE id=?", (acc["id"],)); conn.commit()
+with get_conn() as conn:   # 前面的用例已把不少作者回过，这里只看附件上传：把这位作者的互动记录清掉，免得撞作者冷却
+    conn.execute("DELETE FROM interactions WHERE author_id=(SELECT author_id FROM target_tweets WHERE id=?)", (t["id"],)); conn.commit()
 out = jobs.match.manual_match(t["id"], pic_mat, "带图回复 " + t["tweet_id"], account=acc); assert out.status == "queued", out
 with get_conn() as conn:
     assert mediam.parse_files(conn.execute("SELECT final_media_files FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["final_media_files"]) == [rel1, rel2]
@@ -883,7 +929,8 @@ with get_conn() as conn:
     t2 = conn.execute("SELECT id, tweet_id FROM target_tweets WHERE process_status IN ('filtered','no_match') "
                       "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
                       "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) LIMIT 1").fetchone()
-    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
+    conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],))
+    conn.execute("DELETE FROM interactions WHERE author_id=(SELECT author_id FROM target_tweets WHERE id=?)", (t2["id"],)); conn.commit()
 out2 = jobs.match.manual_match(t2["id"], pic_mat, "带图回复2", account=acc); assert out2.status == "queued", out2
 mediam.abs_path(rel2).unlink()
 with get_conn() as conn:
@@ -891,7 +938,7 @@ with get_conn() as conn:
 sent_calls.clear(); uploaded.clear()
 r = jobs.dispatcher.tick()
 with get_conn() as conn:
-    row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (out2.queue_id,)).fetchone()
+    row = conn.execute("SELECT status, error_msg, skip_reason FROM review_queue WHERE id=?", (out2.queue_id,)).fetchone()
 assert r.sent == 0 and row["status"] == "failed" and "不存在" in row["error_msg"] and Path(rel2).name in row["error_msg"] and not sent_calls, (dict(row), sent_calls)
 assert mediam.missing([rel1, rel2]) == [rel2]
 client.reply, client.upload_media = orig_reply, orig_upload
