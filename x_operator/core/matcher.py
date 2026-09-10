@@ -115,8 +115,33 @@ class MatchEngine:
             if not brief:
                 self._mark_no_match(target["id"], "规则选了「AI 按要求创作」但没填创作要求，请编辑规则补上")
                 return MatchOutcome("no_match", None, "缺少创作要求")
-            return self.ai_write(target["id"], brief, account=reply_acc, origin="ai_write", acc_note=acc_note, auto_threshold=auto_thr)
+            files, media_note = self._pipeline_media(cfg, target)
+            if media_note:
+                acc_note = (acc_note + "｜" if acc_note else "") + media_note
+            return self.ai_write(target["id"], brief, account=reply_acc, origin="ai_write", acc_note=acc_note, auto_threshold=auto_thr,
+                                 media_files=files)
         return self._match_material(target, reply_acc, bool(_cfg_get(cfg, "allow_polish", 0)), acc_note=acc_note, auto_threshold=auto_thr)
+
+    @staticmethod
+    def _pipeline_media(cfg, target: sqlite3.Row) -> tuple[list[str], str]:
+        """规则 / 推主上挂的 AI 创作附件：固定 = 全带；素材池 = 随机挑 1 个，优先挑这条规则最近没用过的。返回 (附件列表, 说明)。"""
+        files = media.parse_files(_cfg_get(cfg, "media_files", "[]") or "[]")
+        if not files:
+            return [], ""
+        if (_cfg_get(cfg, "media_mode", "fixed") or "fixed") != "pool":
+            return files, ""
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT rq.final_media_files FROM review_queue rq JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
+                "WHERE tt.source=? AND tt.source_rule_id=? AND rq.status<>'failed' ORDER BY rq.id DESC LIMIT ?",
+                (target["source"], target["source_rule_id"], max(len(files), 1))).fetchall()
+        recent: list[str] = []
+        for r in rows:
+            for f in media.parse_files(r["final_media_files"]):
+                if f not in recent:
+                    recent.append(f)
+        picked = media.pick_from_pool(files, recent)
+        return picked, f"配图从素材池（{len(files)} 个）里随机挑了 1 个"
 
     def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool,
                         acc_note: str = "", auto_threshold: float | None = None) -> MatchOutcome:

@@ -280,10 +280,11 @@ def fmt_size(n: int) -> str:
 
 
 def referenced_files() -> set[str]:
-    """库里（素材含回收站、任务队列、定时发帖）还在引用的附件相对路径。"""
+    """库里（素材含回收站、任务队列、定时发帖、搜索规则 / 监控推主的 AI 创作附件）还在引用的附件相对路径。"""
     refs: set[str] = set()
     with database.get_conn() as conn:
-        for table, col in (("materials", "media_files"), ("review_queue", "final_media_files"), ("scheduled_posts", "media_files")):
+        for table, col in (("materials", "media_files"), ("review_queue", "final_media_files"), ("scheduled_posts", "media_files"),
+                           ("search_rules", "media_files"), ("watched_users", "media_files")):
             for row in conn.execute(f"SELECT {col} AS f FROM {table} WHERE {col} != '[]'").fetchall():
                 refs.update(f.replace("\\", "/") for f in parse_files(row["f"]))
     return refs

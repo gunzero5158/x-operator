@@ -106,6 +106,9 @@ REPLY_HINTS = {
                     "发送前的黑名单 / 冷却 / 时效 / 日上限检查照常。置信度：匹配素材 = AI 对「这条素材贴不贴这条推文」的信心；"
                     "AI 按要求创作 = AI 对「写出来的回复切题、可以直接发」的自评；低于阈值的仍进待审核。只对自动搜索 / 自动监控 / 「运行一次」生效，"
                     "手动选素材、手动 AI 撰写、「重新匹配」不受影响。开着意味着发出去之前没有人看过，建议先用高阈值试。",
+    "media_mode": "AI 只写文字，附件按这里的设置原样带上：固定=下面放的几个每次都一起发（最多 4 个）；"
+                  "素材池=下面放一批图片 / 视频（最多 30 个），每条回复随机挑 1 个，优先挑这条规则 / 推主最近没用过的。"
+                  "匹配素材库模式的附件跟着素材走，在素材库里给素材加。",
     "reply_account": "这条规则/推主抓到的推文由哪个账号回复。自动轮流=在启用中的小号里挑最闲的（按今天已回+待发条数，跳过已到日上限的），"
                      "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。任务队列里每条也能临时改。推荐自动轮流。",
 }
@@ -116,11 +119,15 @@ def hint(text: str, after_row: bool = False):
     ui.label(text).classes("text-xs text-gray-400 mb-1" + ("" if after_row else " -mt-2"))
 
 
+MEDIA_MODE_LABEL = {"fixed": "固定：每条回复都带下面这几个", "pool": "素材池：每条回复从下面随机挑 1 个"}
+MEDIA_FIELD_LABEL = {"fixed": "随 AI 写的回复一起发的配图 / 视频（选填）", "pool": "配图 / 视频素材池（选填，每条随机挑 1 个）"}
+
+
 def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str,
                       account_value: int | None = 0, auto_approve_value: bool = False,
-                      auto_threshold_value: float = 0.7):
-    """画出「回复方式 / AI 创作要求 / 允许润色 / 回复账号 / 免审核」控件（带说明、按模式显隐），
-    返回 (mode, brief, polish, acc, auto_sw, auto_thr)。"""
+                      auto_threshold_value: float = 0.7, media_files_value: str = "[]", media_mode_value: str = "fixed"):
+    """画出「回复方式 / AI 创作要求 / AI 创作附件 / 允许润色 / 回复账号 / 免审核」控件（带说明、按模式显隐），
+    返回 (mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf)。"""
     ui.separator()
     ui.label("回复方式").classes("font-semibold text-sm")
     mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
@@ -135,6 +142,17 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     tpl_box = ui.column().classes("w-full gap-0")
     with tpl_box:
         template_controls(brief)
+    media_box = ui.column().classes("w-full gap-4")
+    with media_box:
+        media_mode = ui.select(MEDIA_MODE_LABEL, value=media_mode_value if media_mode_value in MEDIA_MODE_LABEL else "fixed",
+                               label="配图 / 视频怎么带").classes("w-full").props("outlined")
+        hint(REPLY_HINTS["media_mode"], after_row=True)
+        mf = MediaField(media.parse_files(media_files_value or "[]"), label=MEDIA_FIELD_LABEL["fixed"])
+
+        def sync_media_mode():
+            pool = media_mode.value == "pool"
+            mf.set_limit(media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS, "", label=MEDIA_FIELD_LABEL[media_mode.value])
+        media_mode.on("update:model-value", lambda e: sync_media_mode()); sync_media_mode()
     polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
     polish_hint = ui.label(REPLY_HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
 
@@ -153,12 +171,17 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
 
     def sync():
         is_ai = mode.value == "ai_write"
-        brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai); tpl_box.set_visibility(is_ai)
+        brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai); tpl_box.set_visibility(is_ai); media_box.set_visibility(is_ai)
         polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
         auto_box.set_visibility(mode.value != "manual")     # 只抓取模式没有自动生成的回复，免审核无意义
         auto_thr.set_visibility(bool(auto_sw.value))
     mode.on("update:model-value", lambda e: sync()); auto_sw.on("update:model-value", lambda e: sync()); sync()
-    return mode, brief, polish, acc, auto_sw, auto_thr
+    return mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf
+
+
+def media_values(media_mode, mf) -> tuple[str, str]:
+    """保存时取 (media_mode, media_files JSON)。"""
+    return (media_mode.value if media_mode.value in MEDIA_MODE_LABEL else "fixed"), media.dump_files(mf.files)
 
 
 def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
@@ -170,10 +193,15 @@ def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
     return (1 if auto_sw.value else 0), round(thr, 2)
 
 
-def reply_mode_invalid(mode, brief) -> str:
+def reply_mode_invalid(mode, brief, media_mode=None, mf=None) -> str:
     """保存前校验，返回中文错误（空串 = 没问题）。"""
     if mode.value == "ai_write" and not (brief.value or "").strip():
         return "选了「AI 按要求创作」就必须填创作要求"
+    if mode.value == "ai_write" and mf is not None and mf.files:
+        pool = media_mode is not None and media_mode.value == "pool"
+        problem = media.check_set(mf.files, media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS)
+        if problem:
+            return problem + ("" if pool else "（想放更多请把「配图 / 视频怎么带」改成素材池）")
     return ""
 
 

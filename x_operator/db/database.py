@@ -85,6 +85,11 @@ _ADDED_COLUMNS = [
     ("search_rules", "auto_approve_min_confidence", "REAL NOT NULL DEFAULT 0.7"),
     ("watched_users", "auto_approve", "INTEGER NOT NULL DEFAULT 0"),
     ("watched_users", "auto_approve_min_confidence", "REAL NOT NULL DEFAULT 0.7"),
+    # v20：规则 / 推主的「AI 按要求创作」可挂配图 / 视频——固定几个每次都带，或素材池每次随机挑 1 个
+    ("search_rules", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
+    ("search_rules", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
+    ("watched_users", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
+    ("watched_users", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
 ]
 
 

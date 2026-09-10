@@ -77,7 +77,7 @@ with get_conn() as conn:
     rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
     assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
     assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
-assert ver == 19 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 20 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -1396,6 +1396,62 @@ with get_conn() as conn:
     conn.execute("UPDATE watched_users SET enabled=0 WHERE id=?", (wid,)); conn.commit()
 jobs.llm.match_reply = orig_match
 print("[6f22] 免审核按规则 / 推主：默认关 / 达阈值直接待发送 / 低于阈值待审核 / 手动操作不受影响 / AI 撰写用自评置信度 / 监控推主同样 OK")
+
+# [6f23] 规则 / 推主的「AI 按要求创作」可挂附件：固定 → 每条都带；素材池 → 每条随机挑 1 个且不连续重复；
+#        附件被规则 / 推主引用时不算孤儿；非 ai_write 模式不带
+ra = mediam.new_rel_path("ra.png"); rb = mediam.new_rel_path("rb.png"); rc = mediam.new_rel_path("rc.png")
+for r_ in (ra, rb, rc):
+    mediam.abs_path(r_).parent.mkdir(parents=True, exist_ok=True); mediam.abs_path(r_).write_bytes(b"img-" + r_.encode())
+_orig_write = jobs.llm.write_reply
+jobs.llm.write_reply = lambda *a, **k: {"reply_text": "ai text @MyBrand", "confidence": 0.9, "reason": "ok"}
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_mode='ai_write', ai_brief='推荐 @MyBrand', auto_approve=0, media_mode='fixed', media_files=?, newest_id_cursor=NULL WHERE name='规则A'",
+                 (mediam.dump_files([ra, rb]),))
+    conn.execute("DELETE FROM interactions"); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE name='规则A'").fetchone()
+assert set(mediam.referenced_files()) >= {ra, rb}                    # 规则引用的附件不算孤儿
+def _new_ai_items():
+    with get_conn() as conn:
+        before = conn.execute("SELECT COALESCE(MAX(id),0) m FROM review_queue").fetchone()["m"]
+    st = jobs.search.run_once(rule_ids=[rule["id"]])
+    with get_conn() as conn:
+        return st, [mediam.parse_files(r["final_media_files"]) for r in conn.execute(
+            "SELECT final_media_files FROM review_queue WHERE id>? AND origin='ai_write' ORDER BY id", (before,)).fetchall()]
+st, files = _new_ai_items()
+assert files and all(f == [ra, rb] for f in files), (st.as_msg(), files)
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET media_mode='pool', media_files=? WHERE id=?", (mediam.dump_files([ra, rb, rc]), rule["id"]))
+    # 清掉这条规则已有条目的附件记录：上面固定模式那几轮把 ra/rb 写进了「最近用过」，会影响池子挑选
+    conn.execute("UPDATE review_queue SET final_media_files='[]' WHERE target_tweet_id IN "
+                 "(SELECT id FROM target_tweets WHERE source='search' AND source_rule_id=?)", (rule["id"],))
+    conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+files = []
+for _ in range(4):        # mock 每轮抓回的条数不定，多跑几轮凑够样本
+    st, batch = _new_ai_items()
+    files += batch
+    if len(files) >= 3:
+        break
+assert len(files) >= 3 and all(len(f) == 1 and f[0] in (ra, rb, rc) for f in files), (st.as_msg(), files)
+assert all(files[i] != files[i + 1] for i in range(len(files) - 1)), files          # 不连续重复
+assert len({f[0] for f in files[:3]}) == 3, files                                   # 前三条把池子轮一遍
+with get_conn() as conn:
+    q = conn.execute("SELECT llm_reason FROM review_queue WHERE origin='ai_write' ORDER BY id DESC LIMIT 1").fetchone()
+assert "素材池" in q["llm_reason"], q["llm_reason"]
+# 监控推主同样；匹配素材库模式不带规则上的附件
+with get_conn() as conn:
+    conn.execute("UPDATE watched_users SET enabled=0")
+    wid = conn.execute("INSERT INTO watched_users(handle,x_user_id,reply_mode,ai_brief,media_mode,media_files) VALUES ('att_user','mock_user_att_user','ai_write','推荐 @MyBrand','fixed',?)",
+                       (mediam.dump_files([rc]),)).lastrowid
+    conn.execute("DELETE FROM interactions"); conn.commit()
+m = jobs.monitor.run_once(); assert m.queued >= 1, m.as_msg()
+with get_conn() as conn:
+    rows = conn.execute("SELECT rq.final_media_files FROM review_queue rq JOIN target_tweets tt ON tt.id=rq.target_tweet_id WHERE tt.source_rule_id=? AND tt.source='monitor'", (wid,)).fetchall()
+    assert rows and all(mediam.parse_files(r["final_media_files"]) == [rc] for r in rows), [dict(r) for r in rows]
+    conn.execute("UPDATE watched_users SET enabled=0 WHERE id=?", (wid,))
+    conn.execute("UPDATE search_rules SET reply_mode='material', media_mode='fixed', media_files='[]' WHERE id=?", (rule["id"],)); conn.commit()
+jobs.llm.write_reply = _orig_write
+print("[6f23] AI 创作挂附件：固定全带 / 素材池随机不重复 / 引用不算孤儿 / 监控推主同样 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

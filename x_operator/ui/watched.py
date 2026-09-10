@@ -8,12 +8,13 @@ from nicegui import run, ui
 
 from ..adapters import factory
 from ..adapters.base import XClientError
+from ..core import media
 from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.monitor import get_primary_account
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
-from .pickers import auto_approve_values, hint, reply_mode_fields, reply_mode_invalid
+from .pickers import auto_approve_values, hint, media_values, reply_mode_fields, reply_mode_invalid
 
 HINTS = {
     "lookback": "第一次监控（或重置游标后）往回看多少小时内的推文；之后每次只看上次之后的新推文。推荐 24；发帖少的博主可 72~168。"
@@ -104,6 +105,10 @@ def register(jobs) -> None:
                                             "ai" if u["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
                                         tag("回复账号：" + ("自动轮流" if not u["reply_account_id"] else acc_opts.get(u["reply_account_id"], "（已删除→自动轮流）")),
                                             "account", "用哪个账号回")
+                                        if u["reply_mode"] == "ai_write" and media.parse_files(u["media_files"]):
+                                            n = len(media.parse_files(u["media_files"]))
+                                            tag(f"📎 {'素材池 ' if u['media_mode'] == 'pool' else ''}{n} 个附件", "metric",
+                                                "AI 写的回复会带的配图 / 视频" + ("（每条随机挑 1 个）" if u["media_mode"] == "pool" else ""))
                                         if u["auto_approve"] and u["reply_mode"] != "manual":
                                             tag(f"免审核 ≥ {float(u['auto_approve_min_confidence'] or 0.7):.2f}", "attn",
                                                 "置信度达到阈值的回复不经人工审核直接进待发送")
@@ -134,21 +139,24 @@ def register(jobs) -> None:
             hint(HINTS["lookback"])
             incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
             hint(HINTS["include"])
-            mode, brief, polish, acc, auto_sw, auto_thr = reply_mode_fields(
+            mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf = reply_mode_fields(
                 u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后", u["reply_account_id"],
-                bool(u["auto_approve"]), float(u["auto_approve_min_confidence"] or 0.7))
+                bool(u["auto_approve"]), float(u["auto_approve_min_confidence"] or 0.7), u["media_files"] or "[]", u["media_mode"] or "fixed")
 
             def save():
-                problem = reply_mode_invalid(mode, brief)
+                problem = reply_mode_invalid(mode, brief, media_mode, mf)
                 if problem:
-                    ui.notify(problem, type="negative"); return
+                    ui.notify(problem, type="negative", multi_line=True); return
                 with get_conn() as conn:
                     aa, thr = auto_approve_values(auto_sw, auto_thr)
+                    mm, mfiles = media_values(media_mode, mf)
+                    if mode.value != "ai_write":
+                        mm, mfiles = "fixed", "[]"
                     conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=?, "
-                                 "reply_account_id=?, auto_approve=?, auto_approve_min_confidence=? WHERE id=?",
+                                 "reply_account_id=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
                                  ((note.value or "").strip(), 1 if incl.value else 0, max(1, int(lookback.value or 24)), mode.value,
                                   (brief.value or "").strip(), 1 if polish.value else 0,
-                                  (int(acc.value) or None) if acc.value else None, aa, thr, u["id"]))
+                                  (int(acc.value) or None) if acc.value else None, aa, thr, mm, mfiles, u["id"]))
                     conn.commit()
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 

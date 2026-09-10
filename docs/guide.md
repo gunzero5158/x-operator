@@ -133,7 +133,7 @@ uv run python -m x_operator.main
 | 回复方式 | 做什么 | 需要 |
 |---|---|---|
 | 匹配素材库（默认） | 从启用中的「回复」素材里挑一条（优先同语言），**原文使用**（可开「允许轻微润色」）。**宽进**：只要有素材就一定给一条草稿——AI 择优，AI 拒绝/出错/拿不准时按规则挑用得最少的一条并在理由里说明 | 素材 |
-| AI 按要求创作 | 按你写的「创作要求」（主题、立场、必须带的 @/链接、语气）每条现写，必带项缺了会自动重写 | LLM + 创作要求 |
+| AI 按要求创作 | 按你写的「创作要求」（主题、立场、必须带的 @/链接、语气）每条现写，必带项缺了会自动重写；**可挂配图 / 视频**（固定几个每条都带，或素材池每条随机挑 1 个） | LLM + 创作要求 |
 | 只抓取，手动处理 | 不自动生成，你在抓取记录里逐条「选素材」或「AI 撰写」 | — |
 
 无论哪种，都只生成**待审核**草稿，最后由你批准才发。
@@ -154,7 +154,11 @@ uv run python -m x_operator.main
 回复和主贴都能带附件，规则跟 X 一样：图片（jpg/png/webp，单张 ≤5MB）、GIF（≤15MB）、视频（mp4/mov，≤512MB）**合计最多 4 个，可以混搭**（图 + 视频一起发没问题）。
 
 - **在哪加**：素材库「新建 / 编辑素材」（附件跟着素材走：自动匹配、手动选素材、素材池轮流、固定素材都会带上）；
-  抓取记录「AI 撰写」弹窗（AI 只写文字，附件原样带上）；定时发帖计划「AI 按主题创作」模式——「配图 / 视频怎么带」二选一：
+  抓取记录「AI 撰写」弹窗（AI 只写文字，附件原样带上）；
+  **搜索规则 / 监控推主选了「AI 按要求创作」时**——弹窗「回复方式」区里的「配图 / 视频怎么带」，
+  **固定**（最多 4 个，每条回复都带）或 **素材池**（最多 30 个，每条回复随机挑 1 个，优先挑这条规则 / 推主最近没用过的，不会连着两次用同一个），
+  卡片上显示「📎 N 个附件」；改成别的回复方式再保存会清掉这里的附件设置；
+  定时发帖计划「AI 按主题创作」模式——「配图 / 视频怎么带」二选一：
   **固定**（下面放的最多 4 个每次一起发）或 **素材池**（放一批最多 30 个，每次发帖随机挑 1 个，优先挑最近没发过的，不会连着两次用同一个；
   计划卡片上显示「🎲 附件素材池 N 个」）；
   任务队列每条待审核条目的「附件」按钮（加 / 换 / 去掉，改完再批准）。
@@ -249,7 +253,7 @@ Cookie 小号通道发超过 280 单位的推文会自动按「长推文」发�
 ```bash
 uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
-# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘
+# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘、规则 AI 创作附件
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
 # 真渲染截图（需要 Playwright 的 Chromium）：先起样例服务，再截图并打印标签实际颜色
 timeout 60 uv run python scripts/shot_server.py &   # 端口 8099
@@ -260,7 +264,7 @@ uv run --with playwright python scripts/shot_pages.py /tmp/shots
 
 ```
 x_operator/
-  db/         schema.py(DDL v19) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
+  db/         schema.py(DDL v20) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
   core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(素材语言自动判断) textlimit.py(X 计数单位/超限 AI 缩写)

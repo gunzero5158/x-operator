@@ -459,3 +459,37 @@ async def test_settings_dispatch_interval_and_rule_auto_approve(user: User):
     with get_conn() as c:
         row = c.execute("SELECT auto_approve, auto_approve_min_confidence FROM search_rules WHERE name='免审规则'").fetchone()
         assert row["auto_approve"] == 1 and abs(row["auto_approve_min_confidence"] - 0.8) < 1e-6, dict(row)
+
+
+async def test_rule_dialog_ai_write_media(user: User):
+    """规则弹窗：选「AI 按要求创作」才出现附件区（固定 / 素材池切换），保存后落库并在卡片上显示附件标签；
+    切回「匹配素材库」保存则不留附件。"""
+    _pages()
+    await user.open("/rules")
+    _click_button(user, "新建规则")
+    await user.should_see("回复方式")
+    mode = [e for e in user.find("抓到达标推文后").elements if isinstance(e, ui.select)][0]
+    UserInteraction(user, {mode}, None).trigger("update:modelValue", {"value": list(mode.options).index("ai_write")})
+    await user.should_see("配图 / 视频怎么带")
+    await user.should_see("随 AI 写的回复一起发的配图 / 视频（选填）")
+    mm = [e for e in user.find("配图 / 视频怎么带").elements if isinstance(e, ui.select)][0]
+    UserInteraction(user, {mm}, None).trigger("update:modelValue", {"value": list(mm.options).index("pool")})
+    await user.should_see("配图 / 视频素材池（选填，每条随机挑 1 个）")
+    [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0].set_value("带附件AI规则")
+    [e for e in user.find("关键词（逗号隔开").elements if isinstance(e, ui.textarea)][0].set_value("kw")
+    [e for e in user.find("语义筛选条件").elements if isinstance(e, ui.textarea)][0].set_value("找人")
+    [e for e in user.find("AI 创作要求").elements if isinstance(e, ui.textarea)][0].set_value("推荐 @MyBrand")
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    with get_conn() as c:
+        row = c.execute("SELECT reply_mode, media_mode, media_files FROM search_rules WHERE name='带附件AI规则'").fetchone()
+    assert row["reply_mode"] == "ai_write" and row["media_mode"] == "pool" and row["media_files"] == "[]", dict(row)
+    # 挂上附件后卡片显示标签
+    rel = media.new_rel_path("r.png")
+    media.abs_path(rel).parent.mkdir(parents=True, exist_ok=True); media.abs_path(rel).write_bytes(b"x")
+    with get_conn() as c:
+        c.execute("UPDATE search_rules SET media_files=? WHERE name='带附件AI规则'", (media.dump_files([rel]),)); c.commit()
+    await user.open("/rules")
+    await user.should_see("📎 素材池 1 个附件")
+    with get_conn() as c:
+        c.execute("DELETE FROM search_rules WHERE name='带附件AI规则'"); c.commit()
