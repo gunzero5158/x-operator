@@ -1,4 +1,4 @@
-"""审核队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、换素材、批准/跳过/拉黑/删除。
+"""任务队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、换素材、批准/跳过/拉黑/删除。
 
 自动刷新只在「条目集合变了」时才重绘，避免把用户正在编辑的文案冲掉。
 已发送条目显示 X 上的链接与「回查核实」结果（发送接口返回成功 ≠ 一定真的发出去了）。
@@ -119,7 +119,7 @@ def _account_limits() -> dict:
 
 
 def _shorten(jobs, item_id: int, text: str, account_id: int) -> tuple[str, str]:
-    """审核队列里手动点「AI 缩写」。返回 (新正文, 说明)；失败时新正文为空。"""
+    """任务队列里手动点「AI 缩写」。返回 (新正文, 说明)；失败时新正文为空。"""
     from ..core.matcher import extract_must_include
     with get_conn() as conn:
         acc = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
@@ -156,7 +156,7 @@ def _delete(item_id: int) -> None:
         conn.execute("DELETE FROM review_queue WHERE id=?", (item_id,))
         if row and row["target_tweet_id"] and row["status"] not in ("sent",):
             conn.execute("UPDATE target_tweets SET process_status='no_match', "
-                         "llm_relevance_reason='审核队列条目已被手动删除，可重新选素材 / AI 撰写' WHERE id=? AND process_status='queued'",
+                         "llm_relevance_reason='任务队列条目已被手动删除，可重新选素材 / AI 撰写' WHERE id=? AND process_status='queued'",
                          (row["target_tweet_id"],))
         conn.commit()
 
@@ -174,7 +174,7 @@ def register(jobs) -> None:
     def queue_page():
         with shell("/queue"):
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label("审核队列").classes("text-2xl font-bold")
+                ui.label("任务队列").classes("text-2xl font-bold")
                 with ui.row().classes("items-center gap-2"):
                     status_sel = ui.select(_status_options(), value="pending").props("dense outlined")
                     recheck_btn = ui.button("重新判断全部已跳过", icon="refresh").props("outline dense") \
@@ -226,7 +226,7 @@ def register(jobs) -> None:
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最新的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb)
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb, restore_failed_cb)
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -289,6 +289,12 @@ def register(jobs) -> None:
                 ui.notify(("已放回待审核，可在「待审核」里批准" if ok else f"仍不通过：{detail}"),
                           type="positive" if ok else "warning", multi_line=True)
                 render()
+
+            def restore_failed_cb(it):
+                done, detail = jobs.guard.restore_failed(it["id"])
+                ui.notify(detail, type="positive" if done else "negative", multi_line=True)
+                if done:
+                    render()
 
             async def force_cb(it):
                 reason = SKIP_REASON_LABEL.get(it["skip_reason"] or "", it["skip_reason"] or "未记录原因")
@@ -373,12 +379,15 @@ async def _attach_dialog(initial: list[str]):
     return await dlg
 
 
-def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None, force_cb=None, send_now_cb=None):
+def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None, force_cb=None, send_now_cb=None,
+          restore_failed_cb=None):
     files = media.parse_files(it["final_media_files"])
     limits = _account_limits()
     cur_acc = {"id": it["account_id"]}
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
+            if it["status"] == "pending" and it["error_msg"]:
+                ui.label(f"上次发送失败：{it['error_msg']}（已捞回，批准前请确认问题已解决）").classes("text-xs text-red-600 w-full")
             if it["status"] == "pending":
                 opts = _active_account_options()
                 if it["account_id"] not in opts:
@@ -485,6 +494,10 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                     .tooltip("按现在的情况把跳过规则再查一遍（黑名单 / 是否已回复过 / 作者冷却 / 时效）；都不成立就放回待审核")
                 ui.button("强制放回待审核", icon="lock_open", on_click=lambda: force_cb(it)).props("outline dense color=orange") \
                     .tooltip("人工放行：不管跳过原因直接放回待审核，发送时也不再按冷却 / 黑名单 / 时效拦（已回复过的除外）")
+            elif it["status"] == "failed":
+                ui.label("发送失败" + (f" · {it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-red-600")
+                ui.button("捞回待审核", icon="restore", on_click=lambda: restore_failed_cb(it)).props("outline dense color=orange") \
+                    .tooltip("放回待审核、重试次数清零，批准后按正常流程重新发；失败原因会留在条目上供参考")
             else:
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
                          + (f" · {it['skip_reason']}" if it["skip_reason"] else "")

@@ -71,7 +71,7 @@ _ADDED_COLUMNS = [
     ("accounts", "is_premium", "INTEGER NOT NULL DEFAULT 0"),
     # v14：定时发帖（AI 按主题创作）的附件方式——fixed=每次都带这几个；pool=从素材池里每次随机挑一个
     ("scheduled_posts", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
-    # v15：审核队列条目人工放行——从「已跳过」强制放回待审核，发送时不再按冷却 / 黑名单 / 时效拦
+    # v15：任务队列条目人工放行——从「已跳过」强制放回待审核，发送时不再按冷却 / 黑名单 / 时效拦
     ("review_queue", "force_send", "INTEGER NOT NULL DEFAULT 0"),
     # v16：抓取记录保存附件元信息（图片直链 / 视频封面，JSON 列表）；规则可选把它们一并送给打分模型
     ("target_tweets", "media", "TEXT NOT NULL DEFAULT '[]'"),

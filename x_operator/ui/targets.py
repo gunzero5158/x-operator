@@ -1,6 +1,6 @@
 """抓取记录：监控/搜索抓回来的每一条推文都在这里——打分、被过滤的原因、处理状态一目了然。
 
-这一页回答「跑了监控/搜索之后到底抓到了什么、为什么没进审核队列」。
+这一页回答「跑了监控/搜索之后到底抓到了什么、为什么没进任务队列」。
 支持 URL 参数直达：/targets?source=search&rule=3&status=filtered
 可对未匹配/已过滤的推文手动「重新匹配」，也可删除、拉黑作者、批量清理。
 """
@@ -65,14 +65,14 @@ def _delete(tid: int) -> str:
     with get_conn() as conn:
         ref = conn.execute("SELECT COUNT(*) AS c FROM review_queue WHERE target_tweet_id=?", (tid,)).fetchone()["c"]
         if ref:
-            return "该推文已进入审核队列，请先在「审核队列」里删除对应条目"
+            return "该推文已进入任务队列，请先在「任务队列」里删除对应条目"
         conn.execute("DELETE FROM target_tweets WHERE id=?", (tid,))
         conn.commit()
     return ""
 
 
 def _delete_bulk(statuses: list[str]) -> tuple[int, int]:
-    """删除指定状态的抓取记录（跳过被审核队列引用的）。返回 (删除数, 保留数)。"""
+    """删除指定状态的抓取记录（跳过被任务队列引用的）。返回 (删除数, 保留数)。"""
     with get_conn() as conn:
         marks = ",".join("?" * len(statuses))
         ids = [r["id"] for r in conn.execute(
@@ -121,7 +121,7 @@ def register(jobs) -> None:
             tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
             with ui.expansion("各状态是什么意思？为什么会被过滤？", icon="help_outline").classes("w-full text-sm"):
                 ui.markdown(
-                    "- **已进审核队列**：达标且配到了素材，回复草稿已生成，去「审核队列」批准即可发送。\n"
+                    "- **已进任务队列**：达标且配到了素材，回复草稿已生成，去「任务队列」批准即可发送。\n"
                     "- **达标但没配到素材**：相关性够了，但素材库里没有合适语言/场景的「回复」素材（或 AI 认为都不合适）。"
                     "补充素材后点「重新匹配」。\n"
                     "- **未达标 / 被过滤**：下面几种情况之一，每条卡片上都写了具体原因——\n"
@@ -139,15 +139,15 @@ def register(jobs) -> None:
                 n = sum(c.get(s, 0) for s in statuses)
                 if not n:
                     ui.notify("没有可清理的记录", type="info"); return
-                if await confirm(f"删除 {n} 条抓取记录？", "已进入审核队列的记录会保留。", ok_label="删除"):
+                if await confirm(f"删除 {n} 条抓取记录？", "已进入任务队列的记录会保留。", ok_label="删除"):
                     done, kept = _delete_bulk(statuses)
-                    ui.notify(f"已删除 {done} 条" + (f"，{kept} 条因在审核队列中而保留" if kept else ""), type="positive")
+                    ui.notify(f"已删除 {done} 条" + (f"，{kept} 条因在任务队列中而保留" if kept else ""), type="positive")
                     render()
 
             async def rematch(tid: int):
                 outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
                 if outcome is not None:
-                    ui.notify(("已生成回复并进入审核队列：" if outcome.status == "queued" else "仍未匹配：") + outcome.reason,
+                    ui.notify(("已生成回复并进入任务队列：" if outcome.status == "queued" else "仍未匹配：") + outcome.reason,
                               type="positive" if outcome.status == "queued" else "warning", multi_line=True, close_button=True)
                 render()
 
@@ -279,7 +279,7 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
         tweet_link(t["author_handle"], t["tweet_id"])
         with ui.row().classes("gap-2 items-center flex-wrap"):
             if t["process_status"] == "queued" and t["queue_id"]:
-                ui.link(f"查看审核队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
+                ui.link(f"查看任务队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
             elif t["process_status"] in ("no_match", "filtered", "expired", "new"):
                 ui.button("选素材", icon="checklist", on_click=lambda: pick(t)).props("dense outline color=primary") \
                     .tooltip("从素材库里手动挑一条（可改文案），进待审核")

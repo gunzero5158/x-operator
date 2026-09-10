@@ -1,4 +1,4 @@
-"""各页共用的两个弹窗：手动选素材、AI 按要求撰写。抓取记录页与审核队列页都会用到。"""
+"""各页共用的两个弹窗：手动选素材、AI 按要求撰写。抓取记录页与任务队列页都会用到。"""
 from __future__ import annotations
 
 from nicegui import run, ui
@@ -103,7 +103,7 @@ REPLY_HINTS = {
                 "回复要先接对方的话再提一句，像同行聊天，结尾带 @你的官号。",
     "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
     "reply_account": "这条规则/推主抓到的推文由哪个账号回复。自动轮流=在启用中的小号里挑最闲的（按今天已回+待发条数，跳过已到日上限的），"
-                     "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。审核队列里每条也能临时改。推荐自动轮流。",
+                     "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。任务队列里每条也能临时改。推荐自动轮流。",
 }
 
 
@@ -169,7 +169,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
             all_sw = ui.switch(f"显示所有语言的素材（默认只显示与推文相同的「{LANG_NAME.get(lang or 'und', lang)}」）", value=not lang)
         state = {"mid": None}
         listbox = ui.column().classes("w-full gap-1")
-        ui.label("选中一条后可在下面改文案，改完的内容会进审核队列（不会改素材库原文）。").classes("text-xs text-gray-400")
+        ui.label("选中一条后可在下面改文案，改完的内容会进任务队列（不会改素材库原文）。").classes("text-xs text-gray-400")
         ta = ui.textarea("最终文案", value="").classes("w-full").props("outlined autogrow")
 
         def render():

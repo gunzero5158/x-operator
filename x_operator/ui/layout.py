@@ -11,7 +11,7 @@ from ..db.database import get_conn
 # (路径, 名称, material 图标)
 NAV = [
     ("/", "仪表盘", "dashboard"),
-    ("/queue", "审核队列", "rate_review"),
+    ("/queue", "任务队列", "rate_review"),
     ("/targets", "抓取记录", "travel_explore"),
     ("/materials", "素材库", "inventory_2"),
     ("/watched", "监控推主", "visibility"),
@@ -188,7 +188,7 @@ def tweet_link(author_handle: str | None, tweet_id: str | None):
 
 TARGET_STATUS_LABEL = {
     "new": "待匹配",
-    "queued": "已进审核队列",
+    "queued": "已进任务队列",
     "no_match": "达标但未生成回复",
     "filtered": "已过滤/未达标",
     "expired": "已过期",

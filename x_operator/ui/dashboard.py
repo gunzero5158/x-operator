@@ -52,7 +52,7 @@ def register(jobs) -> None:
                 with body:
                     with ui.row().classes("gap-4 w-full"):
                         _card("今日发送", str(s["sent_today"]), "已发出的推文/回复")
-                        _card("待审核", str(s["pending"]), "审核队列积压", warn=s["pending"] > 0, link="/queue")
+                        _card("待审核", str(s["pending"]), "任务队列积压", warn=s["pending"] > 0, link="/queue")
                         _card("待发送", str(s["approved"]), "已批准、等分发器发出", link="/queue")
                         _card("今日抓取", str(s["targets_today"]), f"累计 {s['total_targets']} 条", link="/targets")
                         rate = f'{(s["no_match"] / s["total_targets"] * 100):.0f}%' if s["total_targets"] else "—"
@@ -130,7 +130,7 @@ def register(jobs) -> None:
                                                                              result_link=("查看抓取记录", "/targets?source=search")))
                             ui.button("生成到点定时推文", icon="schedule", on_click=lambda: _run_sched(jobs, render))
                             ui.button("触发发送分发", icon="send", on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render))
-                        ui.label("运行结果会弹出提示；抓到的推文去「抓取记录」看，生成的回复去「审核队列」看。").classes("text-xs text-gray-400")
+                        ui.label("运行结果会弹出提示；抓到的推文去「抓取记录」看，生成的回复去「任务队列」看。").classes("text-xs text-gray-400")
 
                     with ui.card().classes("w-full"):
                         ui.label("最近异常").classes("font-semibold")
@@ -168,7 +168,7 @@ def _check(ok: bool, ok_text: str, bad_text: str, link: str):
 def _run_sched(jobs, refresh) -> None:
     try:
         n = jobs.run_scheduled_posts()
-        ui.notify(f"生成 {n} 条定时推文到审核队列" if n else "没有到点的定时发帖计划（到「定时发帖计划」页可「立即生成一次」）", type="positive" if n else "info")
+        ui.notify(f"生成 {n} 条定时推文到任务队列" if n else "没有到点的定时发帖计划（到「定时发帖计划」页可「立即生成一次」）", type="positive" if n else "info")
     except Exception as e:
         ui.notify(f"出错：{e}", type="negative")
     refresh()

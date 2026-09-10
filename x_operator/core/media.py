@@ -280,7 +280,7 @@ def fmt_size(n: int) -> str:
 
 
 def referenced_files() -> set[str]:
-    """库里（素材含回收站、审核队列、定时发帖）还在引用的附件相对路径。"""
+    """库里（素材含回收站、任务队列、定时发帖）还在引用的附件相对路径。"""
     refs: set[str] = set()
     with database.get_conn() as conn:
         for table, col in (("materials", "media_files"), ("review_queue", "final_media_files"), ("scheduled_posts", "media_files")):

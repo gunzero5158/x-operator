@@ -90,7 +90,7 @@ def register(jobs) -> None:
                                   result_link=("查看抓取记录", "/targets?source=search"))
                               ).props("outline").tooltip("把所有「启用」的规则各跑一次；只想跑某一条就点该规则卡片上的「运行此规则」")
             ui.label("推文来源可选：关键词搜索，或直接读某个小号的推荐流 / 关注流（热门内容多，观看量高）。之后统一走：按语义条件给每条推文打 0-10 分 → "
-                     "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进审核队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
+                     "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进任务队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
                      ).classes("text-xs text-gray-400")
             llm_on = jobs.llm.configured
             if not llm_on:
@@ -114,7 +114,7 @@ def register(jobs) -> None:
                        "去掉链接、@、#、表情后不足 12 个字 → 2。\n")
                     + "5. **生成回复**（按规则的「回复方式」）：匹配素材库只要素材库里有启用的回复素材就一定给一条草稿（优先同语言、AI 择优，AI 拒绝或拿不准时按规则兜底）；AI 创作需要 LLM 和创作要求；"
                     "「只抓取」则等你手动处理。没生成成功的标为「达标但未生成回复」，可在抓取记录里手动「选素材」或「AI 撰写」。\n\n"
-                    "过关的才生成回复草稿进「审核队列」，最后由你决定发不发。"
+                    "过关的才生成回复草稿进「任务队列」，最后由你决定发不发。"
                 ).classes("text-xs text-gray-600")
 
             body = ui.column().classes("w-full gap-2")
@@ -171,7 +171,7 @@ def register(jobs) -> None:
                                 ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
                                     "text-xs " + ("text-gray-500" if r["ai_brief"] else "text-red-500"))
                             if total:
-                                ui.label(f"累计抓取 {total} 条：进审核队列 {c.get('queued', 0)} · 达标但未生成回复 {c.get('no_match', 0)}"
+                                ui.label(f"累计抓取 {total} 条：进任务队列 {c.get('queued', 0)} · 达标但未生成回复 {c.get('no_match', 0)}"
                                          f" · 未达标/被过滤 {c.get('filtered', 0)} · 待匹配 {c.get('new', 0)} · 已过期 {c.get('expired', 0)}"
                                          ).classes("text-xs text-gray-500")
                             else:

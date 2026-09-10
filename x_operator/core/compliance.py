@@ -26,7 +26,7 @@ class GuardCode(str, Enum):
     TARGET_EXPIRED = "target_expired"              # 硬
 
 
-# 审核队列「已跳过」条目上 skip_reason 的中文；分发器写 GuardCode.value，人工跳过写 manual_skip / blacklist
+# 任务队列「已跳过」条目上 skip_reason 的中文；分发器写 GuardCode.value，人工跳过写 manual_skip / blacklist
 SKIP_REASON_LABEL = {
     GuardCode.AUTHOR_IN_COOLDOWN.value: "作者冷却期内（最近刚回过这个作者）",
     GuardCode.ALREADY_REPLIED.value: "该推文已回复过（去重账本）",
@@ -222,6 +222,34 @@ class ComplianceGuard:
                              (item["target_tweet_id"],))
             conn.commit()
         return True, "已人工放行到待审核"
+
+    def restore_failed(self, item_id: int) -> tuple[bool, str]:
+        """「失败」条目捞回任务队列：放回待审核（人再看一眼、批准后重新发），重试计数清零，上次的错误原因保留在条目上；
+        时效已过的按当前设置重新给一段时效。「已回复过」的不能捞（去重账本只记一次）。返回 (是否成功, 说明)。"""
+        with get_conn() as conn:
+            item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                return False, "条目不存在"
+            if item["status"] != "failed":
+                return False, "只有「失败」的条目能捞回"
+            if item["action_type"] == "reply" and item["target_tweet_id"]:
+                tgt = conn.execute("SELECT tweet_id FROM target_tweets WHERE id=?", (item["target_tweet_id"],)).fetchone()
+                if tgt and conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?", (tgt["tweet_id"],)).fetchone():
+                    return False, "该推文已回复过（上次其实发出去了），去重账本不允许再回一次"
+            now = datetime.now(timezone.utc)
+            expires = parse_iso(item["expires_at"])
+            new_exp = item["expires_at"]
+            note = ""
+            if item["action_type"] == "reply" and expires and expires <= now and not item["force_send"]:
+                new_exp = to_iso(now + timedelta(hours=config.get_int("reply_ttl_hours", 48)))
+                note = "，时效已过、按当前设置重新计时"
+            conn.execute("UPDATE review_queue SET status='pending', decided_at=NULL, retry_count=0, expires_at=? WHERE id=?",
+                         (new_exp, item_id))
+            if item["target_tweet_id"]:
+                conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=? AND process_status IN ('expired','no_match','filtered')",
+                             (item["target_tweet_id"],))
+            conn.commit()
+        return True, "已捞回待审核" + note + "。上次失败原因仍显示在条目上，批准前请先看一眼"
 
     def recheck_all_skipped(self, now: datetime | None = None) -> dict:
         """批量重新判断所有「已跳过」条目。返回 {restored, still, reasons:{原因: 条数}}。"""

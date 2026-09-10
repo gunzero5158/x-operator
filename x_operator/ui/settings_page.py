@@ -118,7 +118,7 @@ def _run_panel(jobs):
     cur_disp = display_tz_name()
     disp_tz = ui.select(_TZ_CHOICES if cur_disp in _TZ_CHOICES else [cur_disp] + _TZ_CHOICES, value=cur_disp,
                         label="界面显示时区").classes("w-72").props("outlined dense")
-    ui.label("审核队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
+    ui.label("任务队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
              "每日上限、定时计划到点时间仍按各账号自己的时区判断。").classes("text-xs text-gray-400 -mt-1 mb-1")
 
     status_box = ui.column().classes("w-full gap-0")
@@ -362,7 +362,7 @@ def _accounts_panel():
     ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
              "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
     ui.label("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 预算「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
-             "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，审核队列里每条也能临时改。"
+             "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可指定固定的回复账号，任务队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
              "发帖的账号在定时发帖计划里选。").classes("text-xs text-gray-400")
     sys_proxy = detect_system_proxy()
@@ -740,7 +740,7 @@ def _del_bl(bid):
 # ====================================================================================
 def _data_panel():
     ui.label("数据清理").classes("font-semibold")
-    ui.label("测试期可以把抓取记录和审核队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。").classes("text-xs text-gray-400")
+    ui.label("测试期可以把抓取记录和任务队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。").classes("text-xs text-gray-400")
     info = ui.label("").classes("text-sm")
 
     def refresh_info():
@@ -748,11 +748,11 @@ def _data_panel():
             t = conn.execute("SELECT COUNT(*) AS c FROM target_tweets").fetchone()["c"]
             q = conn.execute("SELECT COUNT(*) AS c FROM review_queue").fetchone()["c"]
             i = conn.execute("SELECT COUNT(*) AS c FROM interactions").fetchone()["c"]
-        info.text = f"当前：抓取记录 {t} 条 · 审核队列 {q} 条 · 去重账本 {i} 条"
+        info.text = f"当前：抓取记录 {t} 条 · 任务队列 {q} 条 · 去重账本 {i} 条"
     refresh_info()
 
     async def clear_all():
-        if await confirm("清空全部抓取记录与审核队列？", "包括真实数据。去重账本（防止重复回复）会保留。", ok_label="全部清空"):
+        if await confirm("清空全部抓取记录与任务队列？", "包括真实数据。去重账本（防止重复回复）会保留。", ok_label="全部清空"):
             with get_conn() as conn:
                 conn.execute("DELETE FROM review_queue")
                 conn.execute("DELETE FROM target_tweets")
@@ -762,7 +762,7 @@ def _data_panel():
             ui.notify("已清空", type="positive"); refresh_info()
 
     with ui.row().classes("gap-2"):
-        ui.button("清空全部抓取记录与审核队列", icon="delete_forever", on_click=clear_all).props("outline color=negative")
+        ui.button("清空全部抓取记录与任务队列", icon="delete_forever", on_click=clear_all).props("outline color=negative")
 
     ui.separator()
     _media_storage_panel()
@@ -786,7 +786,7 @@ def _media_storage_panel():
             if st["orphans"]:
                 with ui.expansion(f"其中 {len(st['orphans'])} 个已没有任何素材 / 条目引用（{media.fmt_size(st['orphan_bytes'])}），删掉不影响功能",
                                   icon="cleaning_services").classes("w-full text-sm"):
-                    ui.label("按大小从大到小排；其余文件仍被素材库（含回收站）、审核队列或定时发帖引用，删了会导致发送时找不到附件。").classes("text-xs text-gray-400")
+                    ui.label("按大小从大到小排；其余文件仍被素材库（含回收站）、任务队列或定时发帖引用，删了会导致发送时找不到附件。").classes("text-xs text-gray-400")
                     for rel, size in st["orphans"][:200]:
                         ui.label(f"{rel}　{media.fmt_size(size)}").classes("text-xs font-mono")
                     if len(st["orphans"]) > 200:

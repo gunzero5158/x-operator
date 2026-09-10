@@ -192,7 +192,7 @@ async def test_display_timezone_setting(user: User):
 
 
 async def test_queue_skipped_recheck(user: User):
-    """审核队列「已跳过」：原因显示中文、有「重新判断」按钮；顶部「重新判断全部已跳过」只在该筛选下出现；点了能放回待审核。"""
+    """任务队列「已跳过」：原因显示中文、有「重新判断」按钮；顶部「重新判断全部已跳过」只在该筛选下出现；点了能放回待审核。"""
     _pages()
     with get_conn() as conn:
         conn.execute("INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, tweet_created_at, source, process_status) "
@@ -222,7 +222,7 @@ async def test_queue_legend(user: User):
 
 
 async def test_queue_shows_target_tweet_metrics(user: User):
-    """审核队列里引用的原推文，要带上和「抓取记录」一样的相关性 / 语言 / 观看量小标签。"""
+    """任务队列里引用的原推文，要带上和「抓取记录」一样的相关性 / 语言 / 观看量小标签。"""
     _pages()
     with get_conn() as c:
         c.execute("UPDATE target_tweets SET view_count=15000, llm_relevance_score=8 WHERE id=1")
@@ -240,11 +240,11 @@ async def test_tag_legends(user: User):
     _pages()
     await user.open("/targets")
     await user.should_see("标签颜色：")
-    await user.should_see("已进审核队列")
+    await user.should_see("已进任务队列")
     # 颜色真的能生效：badge 不能带 Quasar 的 color 属性（它会加 !important 的主题蓝把 Tailwind 类压掉）
     for b in [e for e in user.find(kind=ui.badge).elements]:
         assert "color" not in b._props, (b.text, b._props)
-    st = [e for e in user.find("已进审核队列").elements if isinstance(e, ui.badge)][0]
+    st = [e for e in user.find("已进任务队列").elements if isinstance(e, ui.badge)][0]
     assert "bg-green-600" in st._classes, st._classes
     await user.open("/queue")
     await user.should_see("标签颜色：")
@@ -378,7 +378,7 @@ async def test_settings_read_pool_panel_and_dashboard(user: User):
 
 
 async def test_queue_orders_by_status_time_desc(user: User):
-    """审核队列各状态按自己的时间倒序：待审核按创建时间、已发送按发送时间、已跳过按决定时间，最新在前。"""
+    """任务队列各状态按自己的时间倒序：待审核按创建时间、已发送按发送时间、已跳过按决定时间，最新在前。"""
     from x_operator.ui.queue import _load
     with get_conn() as c:
         c.execute("DELETE FROM review_queue WHERE final_text LIKE 'ord_%'")
@@ -400,3 +400,27 @@ async def test_queue_orders_by_status_time_desc(user: User):
     assert order("skipped") == ["ord_k_new", "ord_k_old"], order("skipped")
     with get_conn() as c:
         c.execute("DELETE FROM review_queue WHERE final_text LIKE 'ord_%'"); c.commit()
+
+
+async def test_queue_failed_restore_button(user: User):
+    """任务队列「失败」筛选：每条有「捞回待审核」按钮，点了回到待审核并显示上次失败原因；页面标题已改为任务队列。"""
+    _pages()
+    with get_conn() as c:
+        c.execute("DELETE FROM review_queue WHERE final_text='rf_text'")
+        c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, error_msg, created_at, decided_at) "
+                  "VALUES (1,'reply',1,1,'rf_text','failed','X 返回 403',?,?)", (utcnow_iso(), utcnow_iso()))
+        c.commit()
+    await user.open("/queue")
+    await user.should_see("任务队列")
+    status_sel = [e for e in user.find(kind=ui.select).elements if "failed" in e.options][0]
+    UserInteraction(user, {status_sel}, None).trigger("update:modelValue", {"value": list(status_sel.options).index("failed")})
+    await user.should_see("发送失败 · X 返回 403")
+    _click_button(user, "捞回待审核")
+    await user.should_see("已捞回待审核")
+    with get_conn() as c:
+        row = c.execute("SELECT status, error_msg FROM review_queue WHERE final_text='rf_text'").fetchone()
+        assert row["status"] == "pending" and row["error_msg"] == "X 返回 403", dict(row)
+    await user.open("/queue")
+    await user.should_see("上次发送失败：X 返回 403")
+    with get_conn() as c:
+        c.execute("DELETE FROM review_queue WHERE final_text='rf_text'"); c.commit()

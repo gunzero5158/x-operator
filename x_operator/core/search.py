@@ -138,7 +138,7 @@ class SearchStats:
 
     def as_msg(self) -> str:
         head = (f"搜索完成：运行 {self.rules_run} 条规则，拉取 {self.tweets_fetched} 条，"
-                f"进审核队列 {self.queued}，达标但没配到素材 {self.no_match}，未达标/被过滤 {self.filtered}，错误 {self.errors}")
+                f"进任务队列 {self.queued}，达标但没配到素材 {self.no_match}，未达标/被过滤 {self.filtered}，错误 {self.errors}")
         if self.notes:
             head += "。\n" + "\n".join(self.notes[:12])
         return head

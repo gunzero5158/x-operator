@@ -54,7 +54,7 @@ def register(jobs) -> None:
                 ui.button("运行一次监控", icon="play_arrow",
                           on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
                                                                  result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
-            ui.label("添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其新推文 → 预检 → 按该推主的「回复方式」生成草稿 → 进审核队列。"
+            ui.label("添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其新推文 → 预检 → 按该推主的「回复方式」生成草稿 → 进任务队列。"
                      " 抓到的推文（含被过滤的及原因）都在「抓取记录」页。新添加的推主默认：首次回溯 24 小时、不含回复、匹配素材库——点「编辑」可改。"
                      ).classes("text-xs text-gray-400")
 

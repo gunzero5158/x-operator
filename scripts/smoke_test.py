@@ -1043,7 +1043,7 @@ client.post = orig_post
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 print("[6f16] 推文长度：计数单位 / 免费账号超限 AI 缩写 / 会员不限 / 发送前拦截 OK")
 
-# [6f17] 审核队列「已跳过」重新判断：作者冷却期内 → 仍跳过；冷却过了 → 放回待审核并重算时效；黑名单 → 仍跳过且原因更新；批量统计
+# [6f17] 任务队列「已跳过」重新判断：作者冷却期内 → 仍跳过；冷却过了 → 放回待审核并重算时效；黑名单 → 仍跳过且原因更新；批量统计
 from datetime import timedelta as _td
 from x_operator.core.compliance import ComplianceGuard as _CG
 _g = _CG()
@@ -1245,6 +1245,27 @@ with get_conn() as conn:
     conn.execute("UPDATE accounts SET read_paused_until=NULL"); conn.execute("UPDATE watched_users SET enabled=0 WHERE handle LIKE 'rp_w%'"); conn.commit()
 config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40); config.set_value("rate_limit_pause_minutes", 15)
 print("[6f19] 监控账号池：多小号分摊 / 到上限暂停并记住推主、到点续跑 / 撞 429 暂停该号换号重试、全撞了才停 / 搜索同样换号重试 OK")
+
+# [6f20] 失败条目捞回任务队列：放回待审核、重试清零、错误原因保留；时效过了按当前设置重算；已回复过的不能捞；非失败状态拒绝
+with get_conn() as conn:
+    tt_f = conn.execute("INSERT INTO target_tweets(tweet_id,author_id,author_handle,text,tweet_created_at,source,process_status) "
+                        "VALUES ('rf_t1','rf_author','rf','hi',?,'monitor','expired')", (utcnow_iso(),)).lastrowid
+    rq_f = conn.execute("INSERT INTO review_queue(account_id,action_type,target_tweet_id,final_text,status,retry_count,error_msg,expires_at,decided_at,created_at) "
+                        "VALUES (?,'reply',?,'x','failed',3,'网络错误',?,?,?)",
+                        (acc_row["id"], tt_f, to_iso(datetime.now(timezone.utc) - _td(hours=1)), utcnow_iso(), utcnow_iso())).lastrowid
+    conn.commit()
+ok, why = _g.restore_failed(rq_f); assert ok and "重新计时" in why and "上次失败原因" in why, (ok, why)
+with get_conn() as conn:
+    row = conn.execute("SELECT * FROM review_queue WHERE id=?", (rq_f,)).fetchone()
+    assert row["status"] == "pending" and row["retry_count"] == 0 and row["error_msg"] == "网络错误" and row["decided_at"] is None, dict(row)
+    assert parse_iso(row["expires_at"]) > datetime.now(timezone.utc) + _td(hours=40), row["expires_at"]
+    assert conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (tt_f,)).fetchone()["process_status"] == "queued"
+ok, why = _g.restore_failed(rq_f); assert not ok and "失败" in why, (ok, why)          # 已不是失败状态
+with get_conn() as conn:
+    conn.execute("UPDATE review_queue SET status='failed' WHERE id=?", (rq_f,))
+    conn.execute("INSERT INTO interactions(account_id,action,tweet_id,author_id,sent_at) VALUES (?,'reply','rf_t1','rf_author',?)", (acc_row["id"], utcnow_iso())); conn.commit()
+ok, why = _g.restore_failed(rq_f); assert not ok and "已回复过" in why, (ok, why)
+print("[6f20] 失败条目捞回任务队列 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

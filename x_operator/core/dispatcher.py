@@ -1,4 +1,4 @@
-"""Dispatcher（design-v1.1 §7.5）：从审核队列取 approved 条目，经合规校验后发送。
+"""Dispatcher（design-v1.1 §7.5）：从任务队列取 approved 条目，经合规校验后发送。
 
 每账号一把锁 + 串行取最老 approved 条目（UI「触发发送」和后台 60 秒 tick 可能同时来，
 锁保证同一账号的「限速检查 → 发送 → 记账」不会交错，日上限/间隔才真的有效）；
@@ -66,7 +66,7 @@ class Dispatcher:
             report.notes.append("没有状态为「启用」的账号")
             return report
         if approved_total == 0:
-            report.notes.append("审核队列里没有「待发送」（已批准）的条目")
+            report.notes.append("任务队列里没有「待发送」（已批准）的条目")
             return report
         for account in accounts:
             try:
@@ -202,7 +202,7 @@ class Dispatcher:
                 return False
         if textlimit.over_by(item["final_text"], account):
             self._set_status(item["id"], "failed", error_msg=textlimit.over_message(item["final_text"], account)
-                             + "。请在审核队列删减正文或换 Premium 账号后重新处理")
+                             + "。请在任务队列删减正文或换 Premium 账号后重新处理")
             return False
         files = media.parse_files(item["final_media_files"] if "final_media_files" in item.keys() else None)
         try:

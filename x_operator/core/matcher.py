@@ -1,4 +1,4 @@
-"""MatchEngine（design-v1.1 §7.3）：为一条命中推文生成回复草稿，写入审核队列。
+"""MatchEngine（design-v1.1 §7.3）：为一条命中推文生成回复草稿，写入任务队列。
 
 三条路线（由来源规则/推主的 reply_mode 决定，抓取记录页也可对单条手动触发）：
 - material ：从素材库挑同语言、启用中的「回复」素材。有 LLM 时由 LLM 择优，否则启发式；
@@ -226,7 +226,7 @@ class MatchEngine:
             if target is None:
                 return None, None, "记录不存在", ""
             if target["process_status"] == "queued":
-                return None, None, "该推文已在审核队列中（先到审核队列删除/跳过那条，再重新处理）", ""
+                return None, None, "该推文已在任务队列中（先到任务队列删除/跳过那条，再重新处理）", ""
             dup = conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?",
                                (target["tweet_id"],)).fetchone()
             if dup:

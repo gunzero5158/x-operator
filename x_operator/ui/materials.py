@@ -93,7 +93,7 @@ def _restore(mid: int) -> None:
 
 
 def _hard_delete(mid: int) -> str:
-    """彻底删除。被定时发帖计划引用则拒绝（返回原因）；审核队列里的引用置空后删除。"""
+    """彻底删除。被定时发帖计划引用则拒绝（返回原因）；任务队列里的引用置空后删除。"""
     with get_conn() as conn:
         n = conn.execute("SELECT COUNT(*) AS c FROM scheduled_posts WHERE material_id=?", (mid,)).fetchone()["c"]
         if n:

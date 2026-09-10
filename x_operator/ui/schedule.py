@@ -71,7 +71,7 @@ def register(jobs) -> None:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("定时发帖").classes("text-2xl font-bold")
                 ui.button("新建发帖计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-            ui.label("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进审核队列（勾了自动批准则直接进待发送），"
+            ui.label("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），"
                      "再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。"
                      "周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。").classes("text-xs text-gray-400")
 
@@ -84,7 +84,7 @@ def register(jobs) -> None:
             async def fire_now(sp):
                 ui.notify("正在生成…（AI 模式要几秒）", type="info")
                 ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
-                ui.notify(("已生成一条到审核队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
+                ui.notify(("已生成一条到任务队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
                           multi_line=True, close_button=True, timeout=12000)
                 render()
 
@@ -138,7 +138,7 @@ def register(jobs) -> None:
                                     ui.button("暂停", on_click=lambda s=sp: (_set_status(s["id"], "paused"), render())).props("flat dense")
                                 elif sp["status"] in ("paused", "done", "missed"):
                                     ui.button("恢复/重新启用", on_click=lambda s=sp: (_reactivate(s), render())).props("flat dense")
-                                ui.button("立即生成一次", icon="bolt", on_click=lambda s=sp: fire_now(s)).props("flat dense").tooltip("不等到点，现在就按内容来源生成一条到审核队列（不改下次运行时间）")
+                                ui.button("立即生成一次", icon="bolt", on_click=lambda s=sp: fire_now(s)).props("flat dense").tooltip("不等到点，现在就按内容来源生成一条到任务队列（不改下次运行时间）")
                                 ui.button("删除", icon="delete", on_click=lambda s=sp: delete(s)).props("flat dense color=negative")
 
             render()
