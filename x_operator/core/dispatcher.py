@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import random
-import re
 import sqlite3
 import threading
 import time
@@ -392,9 +391,7 @@ class Dispatcher:
         factory.invalidate(account_id)
 
 
-_URL_RE = re.compile(r"https?://\S+")
-
-
 def _text_key(s: str) -> str:
-    """比较「是不是同一条正文」：X 会把链接改写成 t.co，所以去掉链接再比。"""
+    """比较「是不是同一条正文」：X 会把链接（含裸域名）改写成 t.co，所以去掉链接再比。"""
+    from .textlimit import _URL_RE
     return " ".join(_URL_RE.sub("", s or "").split())

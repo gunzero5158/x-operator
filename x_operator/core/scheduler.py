@@ -269,7 +269,7 @@ AUTO_JOBS = {
     "monitor": ("自动监控", "把所有启用的监控推主各拉一次（受总开关 + 读额度熔断）", "monitor_auto_enabled", 50, "09:00, 13:00, 18:00"),
 }
 ALWAYS_JOBS = {
-    "dispatcher": ("发送分发", "每分钟检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
+    "dispatcher": ("发送分发", "每隔 N 秒（可设，默认 60）检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
     "scheduled_check": ("定时发帖计划 + 过期清扫 + 监控续跑", "每分钟检查到点的定时发帖计划，生成到任务队列；顺带把超时的待审核条目标过期；监控因限流暂停的到点接着跑。始终开启", None),
 }
 
@@ -318,6 +318,13 @@ def describe_schedule(job: str) -> str:
     return f"每隔 {minutes} 分钟（从程序启动/改设置那一刻起算）"
 
 
+DISPATCH_INTERVAL_MIN, DISPATCH_INTERVAL_MAX = 10, 3600
+
+
+def dispatch_interval_seconds() -> int:
+    return max(DISPATCH_INTERVAL_MIN, min(DISPATCH_INTERVAL_MAX, config.get_int("dispatch_interval_seconds", 60)))
+
+
 def job_enabled(job: str) -> bool:
     if job in AUTO_JOBS:
         return config.get_bool("auto_jobs_enabled", False) and config.get_bool(AUTO_JOBS[job][2], True)
@@ -330,6 +337,7 @@ def reschedule_auto_jobs(sched: BackgroundScheduler | None) -> None:
         return
     for job in AUTO_JOBS:
         sched.reschedule_job(job, trigger=build_trigger(job))
+    sched.reschedule_job("dispatcher", trigger=IntervalTrigger(seconds=dispatch_interval_seconds()))
 
 
 def next_runs(sched: BackgroundScheduler | None) -> dict[str, datetime | None]:
@@ -383,7 +391,7 @@ def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
                   max_instances=1, coalesce=True, misfire_grace_time=300)
     sched.add_job(scheduled_check, "interval", seconds=60, id="scheduled_check",
                   max_instances=1, coalesce=True, misfire_grace_time=60)
-    sched.add_job(dispatcher_tick, "interval", seconds=60, id="dispatcher",
+    sched.add_job(dispatcher_tick, "interval", seconds=dispatch_interval_seconds(), id="dispatcher",
                   max_instances=1, coalesce=True, misfire_grace_time=60)
     jobs.scheduler = sched
     return sched

@@ -424,3 +424,31 @@ async def test_queue_failed_restore_button(user: User):
     await user.should_see("上次发送失败：X 返回 403")
     with get_conn() as c:
         c.execute("DELETE FROM review_queue WHERE final_text='rf_text'"); c.commit()
+
+
+async def test_settings_auto_run_dispatch_interval_and_auto_approve(user: User):
+    """设置 → 自动运行：发送分发检查间隔可改（随「保存节奏设置」落库、有上下限）；免审核开关默认关、阈值可改、打开时弹警告。"""
+    _pages()
+    await user.open("/settings")
+    user.find("自动运行").click()
+    await user.should_see("每隔多少秒检查一次待发送")
+    await user.should_see("免审核（搜索 / 监控自动生成的回复直接进待发送）")
+    sw = [e for e in user.find(kind=ui.switch).elements if e.text.startswith("开启免审核")][0]
+    assert sw.value is False
+    UserInteraction(user, {sw}, None).trigger("update:modelValue", True)
+    await user.should_see("发出前没有人看")
+    thr = [e for e in user.find("置信度 ≥ 多少才免审核").elements if isinstance(e, ui.number)][0]
+    thr.set_value(0.85)
+    UserInteraction(user, {thr}, None).trigger("update:modelValue", 0.85)
+    await user.should_see("免审核阈值改为 0.85")
+    secs = [e for e in user.find("每隔多少秒检查一次待发送").elements if isinstance(e, ui.number)][0]
+    secs.set_value(45)
+    _click_button(user, "保存节奏设置")
+    await user.should_see("已保存")
+    with get_conn() as c:
+        vals = {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM app_settings WHERE key IN ('auto_approve_enabled','auto_approve_min_confidence','dispatch_interval_seconds')")}
+    assert vals == {"auto_approve_enabled": "1", "auto_approve_min_confidence": "0.85", "dispatch_interval_seconds": "45"}, vals
+    with get_conn() as c:
+        c.execute("UPDATE app_settings SET value='0' WHERE key='auto_approve_enabled'")
+        c.execute("UPDATE app_settings SET value='0.7' WHERE key='auto_approve_min_confidence'")
+        c.execute("UPDATE app_settings SET value='60' WHERE key='dispatch_interval_seconds'"); c.commit()

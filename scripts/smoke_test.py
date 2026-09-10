@@ -1314,5 +1314,53 @@ with get_conn() as conn:
 ok, why = _g.restore_failed(rq_f); assert not ok and "已回复过" in why, (ok, why)
 print("[6f20] 失败条目捞回任务队列 OK")
 
+# [6f21] 长度计数：裸域名也按 23 算（和 X 一致）；Cookie 通道超过 280 单位按长推文发；分发间隔设置有上下限
+from x_operator.core.textlimit import weighted_len as _wl  # noqa: E402
+from x_operator.core.scheduler import dispatch_interval_seconds  # noqa: E402
+_jp = ("顔出しなしでAIアイドルのファンビジネスやるハードル、完全に消えた。\n\nhotube.me はSeedance等のモデルで成人向けAI短編が生成可能。"
+       "理想のフェチ動画を自給自足するのも最高だし、専属キャラで副業マネタイズ狙うのも現実的。\n\nhotube.me\n\n#AI副業 #AI動画 #マネタイズ #生成AI")
+assert _wl(_jp) == 288, _wl(_jp)                                   # 之前算 260 放行，X 按 288 拒（错误 186）
+assert _wl("see example.com/path?x=1 ok") == 4 + 23 + 3 and _wl("a@b.com @user.name 1.5 node.js") == len("a@b.com @user.name 1.5 node.js")
+assert not UnofficialXClient._is_note("x" * 280) and UnofficialXClient._is_note("x" * 281) and UnofficialXClient._is_note("汉" * 141)
+config.set_value("dispatch_interval_seconds", 3); assert dispatch_interval_seconds() == 10
+config.set_value("dispatch_interval_seconds", 99999); assert dispatch_interval_seconds() == 3600
+config.set_value("dispatch_interval_seconds", 45); assert dispatch_interval_seconds() == 45
+config.set_value("dispatch_interval_seconds", 60)
+print("[6f21] 裸域名按链接计数 / 长推文标记 / 分发间隔上下限 OK")
+
+# [6f22] 免审核：默认关 → 流水线生成的进待审核；开了且置信度 ≥ 阈值 → 直接待发送（auto_approve=1、decided_at 有值、理由注明）；
+#        低于阈值仍待审核；手动 rematch 不受影响；AI 撰写按固定置信度 0.9 判断
+from x_operator.core.matcher import AI_WRITE_CONFIDENCE, auto_approve_threshold  # noqa: E402
+assert auto_approve_threshold() is None and AI_WRITE_CONFIDENCE == 0.9
+orig_match = jobs.llm.match_reply
+with get_conn() as conn:
+    mat_id = conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' LIMIT 1").fetchone()["id"]
+jobs.llm.match_reply = lambda *a, **k: {"skip": False, "material_id": mat_id, "reply_text": "auto ok", "confidence": 0.8, "reason": "贴"}
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_mode='material', newest_id_cursor=NULL WHERE name='规则A'")
+    conn.execute("DELETE FROM interactions"); conn.commit()      # 清掉作者冷却干扰
+    rule = conn.execute("SELECT * FROM search_rules WHERE name='规则A'").fetchone()
+def _run_rule_get_new_queue():
+    with get_conn() as conn:
+        before = conn.execute("SELECT COALESCE(MAX(id),0) m FROM review_queue").fetchone()["m"]
+    st = jobs.search.run_once(rule_ids=[rule["id"]])
+    with get_conn() as conn:
+        return st, conn.execute("SELECT status, auto_approve, decided_at, llm_reason, llm_confidence FROM review_queue WHERE id>? AND origin='ai_match'", (before,)).fetchall()
+st, rows = _run_rule_get_new_queue()
+assert rows and all(r["status"] == "pending" and r["auto_approve"] == 0 for r in rows), (st.as_msg(), [dict(r) for r in rows])
+config.set_value("auto_approve_enabled", 1)                       # 阈值默认 0.7，置信度 0.8 → 免审核
+st, rows = _run_rule_get_new_queue()
+assert rows and all(r["status"] == "approved" and r["auto_approve"] == 1 and r["decided_at"] and "免审核" in r["llm_reason"] for r in rows), (st.as_msg(), [dict(r) for r in rows])
+config.set_value("auto_approve_min_confidence", 0.85)             # 阈值高于 0.8 → 仍待审核
+st, rows = _run_rule_get_new_queue()
+assert rows and all(r["status"] == "pending" for r in rows), [dict(r) for r in rows]
+config.set_value("auto_approve_min_confidence", 0.5)
+tid = _pick_unqueued(); out = jobs.match.rematch(tid)              # 手动重新匹配：不走免审核
+with get_conn() as conn:
+    assert conn.execute("SELECT status FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["status"] == "pending"
+jobs.llm.match_reply = orig_match
+config.set_value("auto_approve_enabled", 0); config.set_value("auto_approve_min_confidence", 0.7)
+print("[6f22] 免审核：默认关 / 达阈值直接待发送 / 低于阈值待审核 / 手动操作不受影响 OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

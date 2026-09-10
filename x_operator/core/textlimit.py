@@ -3,7 +3,7 @@
 X 的算法（回复和主贴一样）：
 - 拉丁字母、数字、标点等（U+0000–U+10FF、U+2000–U+200D、U+2010–U+201F、U+2032–U+2037）每个算 1 个单位；
 - 中文、日文、韩文、emoji 等其他字符每个算 2 个单位；
-- 每个 http(s) 链接不管多长固定算 23 个单位。
+- 每个链接不管多长固定算 23 个单位——包括没写 http 的裸域名（hotube.me、example.com/xx 这种，X 会自动识别成链接）。
 免费账号上限 280 单位（= 140 个汉字/假名，或 280 个英文字母）；订阅 X Premium 的账号上限 25000。
 """
 from __future__ import annotations
@@ -15,7 +15,16 @@ FREE_LIMIT = 280
 PREMIUM_LIMIT = 25000
 URL_WEIGHT = 23
 
-_URL_RE = re.compile(r"https?://\S+")
+# X 会把「裸域名 + 常见顶级域」自动识别成链接（twitter-text 的规则），也按 23 算；@handle、邮箱里的域名不算
+_TLDS = ("com|net|org|me|io|co|jp|cn|ai|app|dev|xyz|tv|cc|info|biz|us|uk|de|fr|ru|in|it|es|nl|br|au|ca|kr|tw|hk|sg|"
+         "link|site|online|shop|store|tech|ly|to|gg|fm|am|be|ch|se|no|dk|fi|pl|eu|asia|tokyo|top|club|vip|live|pro|one|"
+         "art|blog|cloud|design|digital|email|games|group|life|media|news|page|space|studio|team|today|video|wiki|work|"
+         "world|zone|edu|gov|mil|int|id|my|ph|th|vn|mx|ar|cl|za|ie|at|cz|pt|gr|tr|il|ae|sa|nz|moe|fun|cool|icu|bio|"
+         "codes|tools|run|sh|ws|is|so|st|re|kim|hu|ro|ua|sk|bg|hr|lt|lv|ee|by|kz|lol|wtf|inc|ltd|llc")
+_URL_RE = re.compile(
+    r"https?://\S+"
+    r"|(?<![\w@.\-/])(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+(?:" + _TLDS + r")(?![\w.\-@])(?:/[^\s]*)?",
+    re.IGNORECASE)
 _LIGHT_RANGES = ((0x0000, 0x10FF), (0x2000, 0x200D), (0x2010, 0x201F), (0x2032, 0x2037))
 
 

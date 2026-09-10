@@ -42,6 +42,11 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "search_schedule_mode": "interval",
     "search_interval_minutes": "720",
     "search_daily_times": "08:00, 20:00",
+    # 免审核：搜索 / 监控流水线自动生成的回复，置信度 ≥ 阈值时直接进待发送（默认关）
+    "auto_approve_enabled": "0",
+    "auto_approve_min_confidence": "0.7",
+    # 发送分发每隔多少秒检查一次待发送
+    "dispatch_interval_seconds": "60",
     "monitor_auto_enabled": "1",
     "monitor_schedule_mode": "interval",
     "monitor_interval_minutes": "50",

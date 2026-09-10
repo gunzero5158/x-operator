@@ -945,14 +945,22 @@ class UnofficialXClient(XClient):
                            scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
 
     # ---- 写 ----
+    @staticmethod
+    def _is_note(text: str) -> bool:
+        """超过 280 单位的推文必须按「长推文（Note Tweet）」发，否则 X 按普通推文的上限拒绝（错误 186），哪怕账号是 Premium。"""
+        from ..core.textlimit import FREE_LIMIT, weighted_len
+        return weighted_len(text) > FREE_LIMIT
+
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:
-        tw = self._call(lambda: self._client.create_tweet(text=text, media_ids=media_ids or None), "发推")
+        tw = self._call(lambda: self._client.create_tweet(text=text, media_ids=media_ids or None,
+                                                          is_note_tweet=self._is_note(text)), "发推")
         return PostResult(tweet_id=str(tw.id))
 
     def reply(self, text: str, in_reply_to_tweet_id: str,
               media_ids: list[str] | None = None) -> PostResult:
         tw = self._call(lambda: self._client.create_tweet(text=text, media_ids=media_ids or None,
-                                                  reply_to=in_reply_to_tweet_id), "回复推文")
+                                                          reply_to=in_reply_to_tweet_id,
+                                                          is_note_tweet=self._is_note(text)), "回复推文")
         return PostResult(tweet_id=str(tw.id))
 
     def upload_media(self, file_path: str, media_type: str, alt_text: str | None = None) -> str:

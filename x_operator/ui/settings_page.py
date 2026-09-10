@@ -110,8 +110,9 @@ _TZ_CHOICES = ["Asia/Shanghai", "Asia/Tokyo", "Asia/Taipei", "Asia/Singapore", "
 
 
 def _run_panel(jobs):
-    from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, describe_schedule, job_enabled, next_runs,
-                                  parse_daily_times, reschedule_auto_jobs)
+    from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, DISPATCH_INTERVAL_MAX, DISPATCH_INTERVAL_MIN, describe_schedule,
+                                  dispatch_interval_seconds, job_enabled, next_runs, parse_daily_times, reschedule_auto_jobs)
+    from ..core.matcher import AI_WRITE_CONFIDENCE
     ui.label("自动运行").classes("font-semibold")
     ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
              "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。").classes("text-xs text-gray-400")
@@ -143,7 +144,8 @@ def _run_panel(jobs):
                 rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关", "节奏": describe_schedule(jid),
                              "下次运行": fmt_next(nr.get(jid)), "说明": desc})
             for jid, (name, desc, _key) in ALWAYS_JOBS.items():
-                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关", "节奏": "每分钟",
+                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关",
+                             "节奏": f"每 {dispatch_interval_seconds()} 秒" if jid == "dispatcher" else "每分钟",
                              "下次运行": fmt_next(nr.get(jid)), "说明": desc})
             ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("功能", "状态", "节奏", "下次运行", "说明")],
                      rows=rows).classes("w-full").props("dense flat bordered wrap-cells")
@@ -191,8 +193,40 @@ def _run_panel(jobs):
             ui.label(desc).classes("text-xs text-gray-400")
         dsw.on("update:model-value", lambda e: (config.set_value(key, bool(dsw.value)),
                                                 ui.notify("发送分发已" + ("开启" if dsw.value else "关闭"), type="positive"), render_status()))
+        disp_secs = ui.number("每隔多少秒检查一次待发送", value=dispatch_interval_seconds(), min=DISPATCH_INTERVAL_MIN, max=DISPATCH_INTERVAL_MAX, step=10) \
+            .classes("w-64").props("outlined dense")
+        ui.label(f"允许 {DISPATCH_INTERVAL_MIN}~{DISPATCH_INTERVAL_MAX} 秒，默认 60。只是检查频率；真正多久发一条由各账号的发送间隔决定。"
+                 "随下面「保存节奏设置」一起保存、立即生效。").classes("text-xs text-gray-400 -mt-1")
         name2, desc2, _ = ALWAYS_JOBS["scheduled_check"]
         ui.label(f"{name2}：{desc2}").classes("text-xs text-gray-400")
+
+    with ui.card().classes("w-full"):
+        ui.label("免审核（搜索 / 监控自动生成的回复直接进待发送）").classes("font-semibold")
+        aa_sw = ui.switch("开启免审核（默认关）", value=config.get_bool("auto_approve_enabled", False))
+        aa_thr = ui.number("置信度 ≥ 多少才免审核（0~1）", value=config.get_float("auto_approve_min_confidence", 0.7), min=0, max=1, step=0.05) \
+            .classes("w-64").props("outlined dense")
+        ui.label("只对自动搜索 / 自动监控 / 「运行一次」流水线生成的回复生效：AI 匹配素材的置信度 ≥ 阈值就跳过人工审核、直接进待发送，"
+                 f"发送时的合规检查（黑名单 / 冷却 / 时效 / 日上限）照常。低于阈值的仍进待审核。AI 撰写的回复置信度固定记 {AI_WRITE_CONFIDENCE}，"
+                 f"想让 AI 撰写也免审核就把阈值设到 {AI_WRITE_CONFIDENCE} 及以下，反之设高一点。手动选素材 / 手动 AI 撰写 / 定时发帖不受此影响"
+                 "（定时发帖有自己的「自动批准」）。开着意味着发出去之前没有人看过，请先用小阈值范围试过再放开。"
+                 ).classes("text-xs text-gray-400 -mt-1")
+
+        def on_aa(e):
+            config.set_value("auto_approve_enabled", bool(aa_sw.value))
+            ui.notify("免审核已" + ("开启：达到阈值的自动回复会直接进待发送，发出前没有人看" if aa_sw.value else "关闭"),
+                      type="warning" if aa_sw.value else "positive", multi_line=True)
+        aa_sw.on("update:model-value", on_aa)
+
+        def on_thr(e):
+            try:
+                v = float(aa_thr.value)
+            except (TypeError, ValueError):
+                ui.notify("阈值要填 0~1 之间的数字", type="negative"); return
+            if not 0 <= v <= 1:
+                ui.notify("阈值要在 0~1 之间", type="negative"); return
+            config.set_value("auto_approve_min_confidence", round(v, 2))
+            ui.notify(f"免审核阈值改为 {v:.2f}", type="positive")
+        aa_thr.on("update:model-value", on_thr)
 
     def save():
         for jid, c in controls.items():
@@ -200,6 +234,13 @@ def _run_panel(jobs):
                 ui.notify(f"「{AUTO_JOBS[jid][0]}」选了固定时间点，但没填出有效的时间（写法 08:00, 20:30）", type="negative"); return
             if c["mode"].value == "interval" and int(c["minutes"].value or 0) < 5:
                 ui.notify(f"「{AUTO_JOBS[jid][0]}」间隔至少 5 分钟", type="negative"); return
+        try:
+            secs = int(disp_secs.value or 0)
+        except (TypeError, ValueError):
+            secs = 0
+        if not (DISPATCH_INTERVAL_MIN <= secs <= DISPATCH_INTERVAL_MAX):
+            ui.notify(f"「每隔多少秒检查一次待发送」要在 {DISPATCH_INTERVAL_MIN}~{DISPATCH_INTERVAL_MAX} 之间", type="negative"); return
+        config.set_value("dispatch_interval_seconds", secs)
         config.set_value("auto_jobs_timezone", tz.value or "Asia/Shanghai")
         for jid, c in controls.items():
             config.set_value(c["key"], bool(c["sw"].value))
