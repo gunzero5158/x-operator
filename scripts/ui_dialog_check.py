@@ -493,3 +493,28 @@ async def test_rule_dialog_ai_write_media(user: User):
     await user.should_see("📎 素材池 1 个附件")
     with get_conn() as c:
         c.execute("DELETE FROM search_rules WHERE name='带附件AI规则'"); c.commit()
+
+
+async def test_settings_llm_apimax_entry(user: User):
+    """设置 → LLM：有 apimax 入口和推荐模型；点「填入推荐配置」把两个模型名和 base_url 填好（不覆盖已填的 base_url），
+    保存后落库；api_key 仍要自己填。"""
+    from x_operator.ui.settings_page import APIMAX_BASE_URL, RECOMMENDED_LIGHT, RECOMMENDED_STRONG
+    _pages()
+    with get_conn() as c:
+        c.execute("UPDATE app_settings SET value='' WHERE key IN ('llm_base_url','llm_model_light','llm_model_strong')"); c.commit()
+    await user.open("/settings")
+    user.find("LLM").click()
+    await user.should_see("还没有 LLM 的 API？")
+    await user.should_see("去 apimax 注册购买 ↗")
+    await user.should_see(RECOMMENDED_LIGHT)
+    _click_button(user, "填入推荐配置")
+    await user.should_see("已填入推荐模型")
+    lt = [e for e in user.find("轻量模型").elements if isinstance(e, ui.input)][0]
+    st = [e for e in user.find("强模型").elements if isinstance(e, ui.input)][0]
+    bs = [e for e in user.find("base_url").elements if isinstance(e, ui.input)][0]
+    assert (lt.value, st.value, bs.value) == (RECOMMENDED_LIGHT, RECOMMENDED_STRONG, APIMAX_BASE_URL), (lt.value, st.value, bs.value)
+    _click_button(user, "保存 LLM 设置")
+    await user.should_see("已保存")
+    with get_conn() as c:
+        vals = {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM app_settings WHERE key LIKE 'llm_model%' OR key='llm_base_url'")}
+    assert vals["llm_model_light"] == RECOMMENDED_LIGHT and vals["llm_model_strong"] == RECOMMENDED_STRONG and vals["llm_base_url"] == APIMAX_BASE_URL, vals

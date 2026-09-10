@@ -227,12 +227,39 @@ def _run_panel(jobs):
     ui.button("保存节奏设置", on_click=save).props("color=primary")
 
 
+# 没有 LLM API 的用户去哪买、用哪两个模型（作者就是拿这两个测的）
+APIMAX_URL = "https://apimax.io"
+APIMAX_BASE_URL = "https://apimax.io/v1"
+RECOMMENDED_LIGHT = "gemini-3.1-flash-lite"
+RECOMMENDED_STRONG = "gemini-3.8-flash"
+
+
 def _llm_panel():
     ui.label("LLM 网关（OpenAI 兼容；留空则用启发式兜底，离线可测）").classes("font-semibold")
+
+    with ui.card().classes("w-full bg-blue-50 dark:bg-blue-900"):
+        with ui.row().classes("items-center gap-2 flex-wrap"):
+            ui.label("还没有 LLM 的 API？").classes("text-sm font-semibold")
+            ui.link("去 apimax 注册购买 ↗", APIMAX_URL, new_tab=True).classes("text-sm")
+        ui.label(f"apimax 是 OpenAI 兼容的中转站，注册后拿到 base_url 和 api_key 填到下面即可。"
+                 f"推荐轻量模型用 {RECOMMENDED_LIGHT}、强模型用 {RECOMMENDED_STRONG}——"
+                 f"作者就是基于这两个模型做的测试，速度快、价格便宜；也可以换成别的模型试试。"
+                 ).classes("text-xs text-gray-600 dark:text-gray-300")
+        ui.button("填入推荐配置", icon="auto_fix_high", on_click=lambda: fill_recommended()).props("outline dense color=primary")
+
     base = ui.input("base_url（例：https://api.openai.com/v1，或你用的中转站地址）", value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
     key = ui.input("api_key", value=config.get("llm_api_key") or "", password=True, password_toggle_button=True).classes("w-full").props("outlined")
     light = ui.input("轻量模型（便宜、快；量大判断简单的任务）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
     strong = ui.input("强模型（要写东西、要做取舍的任务）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
+
+    def fill_recommended():
+        """把两个模型名填进去；base_url 空着才顺便填上，不覆盖已填的中转站地址。api_key 永远要自己填。"""
+        light.set_value(RECOMMENDED_LIGHT)
+        strong.set_value(RECOMMENDED_STRONG)
+        if not (base.value or "").strip():
+            base.set_value(APIMAX_BASE_URL)
+        ui.notify("已填入推荐模型" + ("（base_url 也填了 apimax 的地址）" if base.value == APIMAX_BASE_URL else "")
+                  + "。api_key 要用你自己的，填好后点「保存并测试连接」", type="positive", multi_line=True)
     ui.label("哪些任务用哪档模型（对照表登记在代码 x_operator/llm/client.py 的 SCENE_TIERS；新功能必须先登记才能调用，所以这张表永远是最新的）：").classes("text-xs text-gray-500 mt-2")
     tier_rows = [{"任务": desc, "模型档": TIER_LABEL[tier],
                   "当前模型": (config.get(TIER_SETTING_KEY[tier]) or TIER_DEFAULT_MODEL[tier])}
@@ -261,7 +288,7 @@ def _llm_panel():
             ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True)
 
     with ui.row():
-        ui.button("保存", on_click=save).props("color=primary")
+        ui.button("保存 LLM 设置", on_click=save).props("color=primary")
         ui.button("保存并测试连接", on_click=test).props("outline")
 
 
