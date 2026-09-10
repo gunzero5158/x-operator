@@ -518,3 +518,18 @@ async def test_settings_llm_apimax_entry(user: User):
     with get_conn() as c:
         vals = {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM app_settings WHERE key LIKE 'llm_model%' OR key='llm_base_url'")}
     assert vals["llm_model_light"] == RECOMMENDED_LIGHT and vals["llm_model_strong"] == RECOMMENDED_STRONG and vals["llm_base_url"] == APIMAX_BASE_URL, vals
+
+
+async def test_targets_regenerate_hint(user: User):
+    """抓取记录：可重新生成的条目下面有一行说明，点明生成草稿不等于发得出去、发送前仍查冷却等。"""
+    _pages()
+    with get_conn() as c:
+        c.execute("UPDATE target_tweets SET process_status='filtered', "
+                  "llm_relevance_reason='预检拦下：作者处于冷却期（近期已互动过）' WHERE id=1")
+        c.commit()
+    await user.open("/targets")
+    await user.should_see("自动匹配")
+    await user.should_see("发送前还会再查一遍黑名单")
+    await user.should_see("强制放回待审核")
+    with get_conn() as c:
+        c.execute("UPDATE target_tweets SET process_status='queued', llm_relevance_reason=NULL WHERE id=1"); c.commit()

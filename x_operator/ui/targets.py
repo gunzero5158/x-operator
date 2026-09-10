@@ -286,6 +286,10 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
                 ui.button("AI 撰写", icon="auto_awesome", on_click=lambda: write(t)).props("dense outline color=purple") \
                     .tooltip("按你写的创作要求让 AI 现写一条回复，进待审核（需 LLM）")
                 ui.button("自动匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense") \
-                    .tooltip("跳过打分/预检，按来源规则的回复方式自动生成一次")
+                    .tooltip("跳过打分和预检，按来源规则的回复方式自动生成一次草稿，进待审核")
             if t["author_id"]:
                 ui.button("拉黑作者", on_click=lambda: blacklist(t["author_id"], t["author_handle"])).props("flat dense color=negative")
+        if t["process_status"] in ("no_match", "filtered", "expired", "new"):
+            ui.label("这三个按钮只负责生成草稿、进待审核，不代表发得出去：发送前还会再查一遍黑名单 / 是否已回复过 / 作者冷却 / 条目时效，"
+                     "还在冷却期内的会被拦下标「已跳过」。确实要发，就在任务队列里对它用「强制放回待审核」人工放行。"
+                     ).classes("text-xs text-gray-400")
