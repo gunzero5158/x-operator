@@ -24,7 +24,16 @@ VERIFY_LABEL = {"ok": ("已回查：X 上能查到 ✅", "text-green-600"),
 _LIMIT = 200
 
 
+# 各状态按「这个状态自己的时间」倒序：待审核看创建时间，已批准 / 发送中 / 失败 / 已跳过 / 已过期看决定时间，已发送看发送时间
+_ORDER_BY = {
+    "pending": "rq.created_at DESC, rq.id DESC",
+    "sent": "COALESCE(rq.sent_at, rq.decided_at, rq.created_at) DESC, rq.id DESC",
+}
+_ORDER_DEFAULT = "COALESCE(rq.decided_at, rq.created_at) DESC, rq.id DESC"
+
+
 def _load(status: str):
+    order = _ORDER_BY.get(status, _ORDER_DEFAULT)
     with get_conn() as conn:
         items = conn.execute(
             "SELECT rq.*, a.handle AS acc_handle, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
@@ -34,7 +43,7 @@ def _load(status: str):
             "FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
             "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
-            f"WHERE rq.status=? ORDER BY rq.created_at ASC LIMIT {_LIMIT}", (status,)).fetchall()
+            f"WHERE rq.status=? ORDER BY {order} LIMIT {_LIMIT}", (status,)).fetchall()
     return items
 
 
@@ -215,7 +224,7 @@ def register(jobs) -> None:
                         ui.label("此状态下暂无条目 🎉").classes("text-gray-400")
                         return
                     if len(items) >= _LIMIT:
-                        ui.label(f"只显示最早的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
+                        ui.label(f"只显示最新的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
                     for it in items:
                         _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb)
 

@@ -333,7 +333,8 @@ async def test_rule_dialog_read_media_switch(user: User):
     UserInteraction(user, {sw}, None).trigger("update:modelValue", True)
     await user.should_see("必须是支持图片输入的多模态模型")
     [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0].set_value("带图规则")
-    [e for e in user.find(kind=ui.textarea).elements][0].set_value("kw")
+    # user.find(...).elements 是集合、顺序不定，要按标签找
+    [e for e in user.find("关键词（逗号隔开").elements if isinstance(e, ui.textarea)][0].set_value("kw")
     [e for e in user.find("语义筛选条件").elements if isinstance(e, ui.textarea)][0].set_value("找人")
     _click_button(user, "保存")
     await user.should_see("已保存")
@@ -374,3 +375,28 @@ async def test_settings_read_pool_panel_and_dashboard(user: User):
     with get_conn() as c:
         c.execute("UPDATE accounts SET read_paused_until=NULL"); c.execute("UPDATE app_settings SET value='' WHERE key LIKE 'monitor_resume%'")
         c.execute("UPDATE app_settings SET value='0' WHERE key='read_official_enabled'"); c.commit()
+
+
+async def test_queue_orders_by_status_time_desc(user: User):
+    """审核队列各状态按自己的时间倒序：待审核按创建时间、已发送按发送时间、已跳过按决定时间，最新在前。"""
+    from x_operator.ui.queue import _load
+    with get_conn() as c:
+        c.execute("DELETE FROM review_queue WHERE final_text LIKE 'ord_%'")
+        rows = [  # (状态, 文案, 创建, 决定, 发送)
+            ("pending", "ord_p_old", "2026-01-01T00:00:00Z", None, None),
+            ("pending", "ord_p_new", "2026-02-01T00:00:00Z", None, None),
+            ("sent", "ord_s_late", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-03-01T00:00:00Z"),   # 创建最早、发送最晚
+            ("sent", "ord_s_early", "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z", "2026-01-07T00:00:00Z"),
+            ("skipped", "ord_k_old", "2026-01-09T00:00:00Z", "2026-01-10T00:00:00Z", None),
+            ("skipped", "ord_k_new", "2026-01-01T00:00:00Z", "2026-02-10T00:00:00Z", None),
+        ]
+        for st, txt, ca, da, sa in rows:
+            c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, created_at, decided_at, sent_at) "
+                      "VALUES (1,'reply',1,1,?,?,?,?,?)", (txt, st, ca, da, sa))
+        c.commit()
+    order = lambda st: [r["final_text"] for r in _load(st) if r["final_text"].startswith("ord_")]  # noqa: E731
+    assert order("pending") == ["ord_p_new", "ord_p_old"], order("pending")
+    assert order("sent") == ["ord_s_late", "ord_s_early"], order("sent")
+    assert order("skipped") == ["ord_k_new", "ord_k_old"], order("skipped")
+    with get_conn() as c:
+        c.execute("DELETE FROM review_queue WHERE final_text LIKE 'ord_%'"); c.commit()
