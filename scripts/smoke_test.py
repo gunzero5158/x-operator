@@ -77,7 +77,7 @@ with get_conn() as conn:
     rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
     assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
     assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
-assert ver == 18 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 19 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -1328,10 +1328,15 @@ config.set_value("dispatch_interval_seconds", 45); assert dispatch_interval_seco
 config.set_value("dispatch_interval_seconds", 60)
 print("[6f21] 裸域名按链接计数 / 长推文标记 / 分发间隔上下限 OK")
 
-# [6f22] 免审核：默认关 → 流水线生成的进待审核；开了且置信度 ≥ 阈值 → 直接待发送（auto_approve=1、decided_at 有值、理由注明）；
-#        低于阈值仍待审核；手动 rematch 不受影响；AI 撰写按固定置信度 0.9 判断
-from x_operator.core.matcher import AI_WRITE_CONFIDENCE, auto_approve_threshold  # noqa: E402
-assert auto_approve_threshold() is None and AI_WRITE_CONFIDENCE == 0.9
+# [6f22] 免审核按规则 / 推主各自设置：默认关 → 流水线生成的进待审核；规则开了且置信度 ≥ 该规则阈值 → 直接待发送（auto_approve=1、
+#        decided_at 有值、理由注明）；低于阈值仍待审核；手动 rematch 不受影响；AI 撰写用模型自评的 confidence；监控推主同样；旧全局键被清掉
+from x_operator.core.matcher import auto_approve_threshold  # noqa: E402
+from x_operator.llm.client import _coerce_conf  # noqa: E402
+assert [_coerce_conf(x) for x in ("0.8", "80%", 8, 0.95, None, "abc")] == [0.8, 0.8, 0.8, 0.95, 0.6, 0.6]
+with get_conn() as conn:
+    assert conn.execute("SELECT 1 FROM app_settings WHERE key IN ('auto_approve_enabled','auto_approve_min_confidence')").fetchone() is None
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_rules)")} | {r["name"] for r in conn.execute("PRAGMA table_info(watched_users)")}
+    assert {"auto_approve", "auto_approve_min_confidence"} <= cols
 orig_match = jobs.llm.match_reply
 with get_conn() as conn:
     mat_id = conn.execute("SELECT id FROM materials WHERE kind='reply' AND status='active' LIMIT 1").fetchone()["id"]
@@ -1340,27 +1345,57 @@ with get_conn() as conn:
     conn.execute("UPDATE search_rules SET reply_mode='material', newest_id_cursor=NULL WHERE name='规则A'")
     conn.execute("DELETE FROM interactions"); conn.commit()      # 清掉作者冷却干扰
     rule = conn.execute("SELECT * FROM search_rules WHERE name='规则A'").fetchone()
-def _run_rule_get_new_queue():
+assert auto_approve_threshold(rule) is None
+def _run_rule_get_new_queue(origin="ai_match"):
     with get_conn() as conn:
         before = conn.execute("SELECT COALESCE(MAX(id),0) m FROM review_queue").fetchone()["m"]
     st = jobs.search.run_once(rule_ids=[rule["id"]])
     with get_conn() as conn:
-        return st, conn.execute("SELECT status, auto_approve, decided_at, llm_reason, llm_confidence FROM review_queue WHERE id>? AND origin='ai_match'", (before,)).fetchall()
+        return st, conn.execute("SELECT status, auto_approve, decided_at, llm_reason, llm_confidence FROM review_queue WHERE id>? AND origin=?", (before, origin)).fetchall()
 st, rows = _run_rule_get_new_queue()
 assert rows and all(r["status"] == "pending" and r["auto_approve"] == 0 for r in rows), (st.as_msg(), [dict(r) for r in rows])
-config.set_value("auto_approve_enabled", 1)                       # 阈值默认 0.7，置信度 0.8 → 免审核
-st, rows = _run_rule_get_new_queue()
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET auto_approve=1, auto_approve_min_confidence=0.7 WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+assert auto_approve_threshold(rule) == 0.7
+st, rows = _run_rule_get_new_queue()                              # 置信度 0.8 ≥ 0.7 → 免审核
 assert rows and all(r["status"] == "approved" and r["auto_approve"] == 1 and r["decided_at"] and "免审核" in r["llm_reason"] for r in rows), (st.as_msg(), [dict(r) for r in rows])
-config.set_value("auto_approve_min_confidence", 0.85)             # 阈值高于 0.8 → 仍待审核
-st, rows = _run_rule_get_new_queue()
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET auto_approve_min_confidence=0.85 WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+st, rows = _run_rule_get_new_queue()                              # 阈值高于 0.8 → 仍待审核
 assert rows and all(r["status"] == "pending" for r in rows), [dict(r) for r in rows]
-config.set_value("auto_approve_min_confidence", 0.5)
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET auto_approve_min_confidence=0.5 WHERE id=?", (rule["id"],)); conn.commit()
 tid = _pick_unqueued(); out = jobs.match.rematch(tid)              # 手动重新匹配：不走免审核
 with get_conn() as conn:
     assert conn.execute("SELECT status FROM review_queue WHERE id=?", (out.queue_id,)).fetchone()["status"] == "pending"
+# AI 撰写：模型自评 confidence 进队列并参与免审核判断（阈值 0.5：0.9 过、0.3 不过）
+_orig_write = jobs.llm.write_reply
+_conf_box = {"v": 0.9}
+jobs.llm.write_reply = lambda *a, **k: {"reply_text": "ai text @MyBrand", "confidence": _conf_box["v"], "reason": "ok"}
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_mode='ai_write', ai_brief='推荐 @MyBrand' WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+st, rows = _run_rule_get_new_queue("ai_write")
+assert rows and all(r["status"] == "approved" and abs(r["llm_confidence"] - 0.9) < 1e-6 for r in rows), (st.as_msg(), [dict(r) for r in rows])
+_conf_box["v"] = 0.3
+st, rows = _run_rule_get_new_queue("ai_write")
+assert rows and all(r["status"] == "pending" and abs(r["llm_confidence"] - 0.3) < 1e-6 for r in rows), [dict(r) for r in rows]
+jobs.llm.write_reply = _orig_write
+# 监控推主：同样按推主自己的设置
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_mode='material', auto_approve=0, auto_approve_min_confidence=0.7 WHERE id=?", (rule["id"],))
+    conn.execute("UPDATE watched_users SET enabled=0")
+    wid = conn.execute("INSERT INTO watched_users(handle,x_user_id,reply_mode,auto_approve,auto_approve_min_confidence) VALUES ('aa_user','mock_user_aa_user','material',1,0.75)").lastrowid
+    conn.execute("DELETE FROM interactions"); conn.commit()
+m = jobs.monitor.run_once(); assert m.users_polled == 1 and m.queued >= 1, m.as_msg()
+with get_conn() as conn:
+    rows = conn.execute("SELECT rq.status, rq.auto_approve FROM review_queue rq JOIN target_tweets tt ON tt.id=rq.target_tweet_id WHERE tt.source_rule_id=? AND tt.source='monitor'", (wid,)).fetchall()
+    assert rows and all(r["status"] == "approved" and r["auto_approve"] == 1 for r in rows), [dict(r) for r in rows]
+    conn.execute("UPDATE watched_users SET enabled=0 WHERE id=?", (wid,)); conn.commit()
 jobs.llm.match_reply = orig_match
-config.set_value("auto_approve_enabled", 0); config.set_value("auto_approve_min_confidence", 0.7)
-print("[6f22] 免审核：默认关 / 达阈值直接待发送 / 低于阈值待审核 / 手动操作不受影响 OK")
+print("[6f22] 免审核按规则 / 推主：默认关 / 达阈值直接待发送 / 低于阈值待审核 / 手动操作不受影响 / AI 撰写用自评置信度 / 监控推主同样 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

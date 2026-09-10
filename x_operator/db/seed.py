@@ -42,9 +42,6 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "search_schedule_mode": "interval",
     "search_interval_minutes": "720",
     "search_daily_times": "08:00, 20:00",
-    # 免审核：搜索 / 监控流水线自动生成的回复，置信度 ≥ 阈值时直接进待发送（默认关）
-    "auto_approve_enabled": "0",
-    "auto_approve_min_confidence": "0.7",
     # 发送分发每隔多少秒检查一次待发送
     "dispatch_interval_seconds": "60",
     "monitor_auto_enabled": "1",
@@ -55,7 +52,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
 }
 
 # 已废弃、任何代码都不再读取的设置键：每次启动顺手删掉，免得设置页/导出里误导人
-OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota", "search_runs_per_day", "read_channel")
+OBSOLETE_SETTINGS = ("dry_run", "tweet_max_age_hours", "billing_mode", "monthly_read_quota", "search_runs_per_day", "read_channel",
+                     "auto_approve_enabled", "auto_approve_min_confidence")
 
 
 def seed_settings(conn: sqlite3.Connection, overrides: dict | None = None) -> None:

@@ -80,6 +80,11 @@ _ADDED_COLUMNS = [
     ("accounts", "read_paused_until", "TEXT"),
     # v18：主贴和回复各自一个发送冷却——next_allowed_at 只管回复，主贴看这个
     ("accounts", "next_allowed_post_at", "TEXT"),
+    # v19：免审核改为每条搜索规则 / 每个监控推主各自设置（开关 + 置信度阈值）
+    ("search_rules", "auto_approve", "INTEGER NOT NULL DEFAULT 0"),
+    ("search_rules", "auto_approve_min_confidence", "REAL NOT NULL DEFAULT 0.7"),
+    ("watched_users", "auto_approve", "INTEGER NOT NULL DEFAULT 0"),
+    ("watched_users", "auto_approve_min_confidence", "REAL NOT NULL DEFAULT 0.7"),
 ]
 
 

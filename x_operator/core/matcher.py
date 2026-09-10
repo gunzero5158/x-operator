@@ -32,15 +32,14 @@ class MatchOutcome:
     reason: str
 
 
-# AI 撰写的回复没有真正的匹配置信度，统一记这个值（免审核阈值填得比它高就能把 AI 撰写排除在外）
-AI_WRITE_CONFIDENCE = 0.9
-
-
-def auto_approve_threshold() -> float | None:
-    """设置里的「免审核」：关着返回 None；开着返回置信度阈值（0~1）。"""
-    if not config.get_bool("auto_approve_enabled", False):
+def auto_approve_threshold(cfg) -> float | None:
+    """这条规则 / 这个推主的「免审核」：关着返回 None；开着返回置信度阈值（0~1）。"""
+    if not _cfg_get(cfg, "auto_approve", 0):
         return None
-    return min(max(config.get_float("auto_approve_min_confidence", 0.7), 0.0), 1.0)
+    try:
+        return min(max(float(_cfg_get(cfg, "auto_approve_min_confidence", 0.7)), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return 0.7
 
 
 def _cfg_get(cfg, key: str, default):
@@ -102,7 +101,7 @@ class MatchEngine:
     def run(self, target: sqlite3.Row, account: sqlite3.Row, cfg: sqlite3.Row | None = None,
             pipeline: bool = True) -> MatchOutcome:
         """account = 抓取用的账号；真正用哪个账号回复由规则/推主的「回复账号」决定（见 core/accounts.py）。
-        pipeline：搜索 / 监控自动调用为 True（才可能按设置免审核）；界面上人点的「重新匹配」传 False。"""
+        pipeline：搜索 / 监控自动调用为 True（才按这条规则 / 推主的「免审核」设置决定是否直接进待发送）；界面上人点的「重新匹配」传 False。"""
         if cfg is None:
             cfg = load_source_cfg(target)
         mode = _cfg_get(cfg, "reply_mode", "material")
@@ -110,16 +109,17 @@ class MatchEngine:
             self._mark_no_match(target["id"], "规则设置为「只抓取，手动处理」：请在这里点「选素材」或「AI 撰写」")
             return MatchOutcome("no_match", None, "等待手动处理")
         reply_acc, acc_note = choose_reply_account(cfg, account)
+        auto_thr = auto_approve_threshold(cfg) if pipeline else None
         if mode == "ai_write":
             brief = (_cfg_get(cfg, "ai_brief", "") or "").strip()
             if not brief:
                 self._mark_no_match(target["id"], "规则选了「AI 按要求创作」但没填创作要求，请编辑规则补上")
                 return MatchOutcome("no_match", None, "缺少创作要求")
-            return self.ai_write(target["id"], brief, account=reply_acc, origin="ai_write", acc_note=acc_note, pipeline=pipeline)
-        return self._match_material(target, reply_acc, bool(_cfg_get(cfg, "allow_polish", 0)), acc_note=acc_note, pipeline=pipeline)
+            return self.ai_write(target["id"], brief, account=reply_acc, origin="ai_write", acc_note=acc_note, auto_threshold=auto_thr)
+        return self._match_material(target, reply_acc, bool(_cfg_get(cfg, "allow_polish", 0)), acc_note=acc_note, auto_threshold=auto_thr)
 
     def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool,
-                        acc_note: str = "", pipeline: bool = False) -> MatchOutcome:
+                        acc_note: str = "", auto_threshold: float | None = None) -> MatchOutcome:
         """「宽进」：只要素材库里有启用的回复素材，就一定给出一条草稿进待审核——AI 择优；AI 拒绝/出错/说跳过/信心太低时
         退回到规则挑选（同语言里用得最少的一条），理由里写明，让审核的人知道这条是兜底出来的。"""
         lang = target["lang"] or "ja"
@@ -166,7 +166,7 @@ class MatchEngine:
         reply_text, len_note = textlimit.fit(reply_text, account, self.llm, extract_must_include(reply_text), lang)
         if len_note:
             reason += f"｜{len_note}"
-        qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match", pipeline=pipeline,
+        qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match", auto_threshold=auto_threshold,
                             media_files=media.parse_files(chosen["media_files"]))
         return MatchOutcome("queued", qid, reason)
 
@@ -192,9 +192,9 @@ class MatchEngine:
 
     def ai_write(self, target_id: int, brief: str, account: sqlite3.Row | None = None,
                  origin: str = "ai_write", acc_note: str = "", media_files: list[str] | None = None,
-                 pipeline: bool = False) -> MatchOutcome:
+                 auto_threshold: float | None = None) -> MatchOutcome:
         """按创作要求让 LLM 现写回复 → 进待审核。account 不传时按来源规则的「回复账号」选；media_files 是随回复一起发的附件。
-        pipeline=True 表示搜索 / 监控流水线自动调用（才可能按设置免审核）。"""
+        auto_threshold：流水线传入的免审核阈值（None = 不免审核）；模型自评的 confidence ≥ 它就直接进待发送。"""
         target, account, err, note = self._prepare(target_id, account)
         if err:
             return MatchOutcome("no_match", None, err)
@@ -214,8 +214,8 @@ class MatchEngine:
         reply_text, len_note = textlimit.fit(res["reply_text"], account, self.llm, must, target["lang"] or "")
         if len_note:
             reason += f"｜{len_note}"
-        qid = self._enqueue(account["id"], target["id"], None, reply_text, reason, AI_WRITE_CONFIDENCE, origin=origin,
-                            media_files=media_files, pipeline=pipeline)
+        qid = self._enqueue(account["id"], target["id"], None, reply_text, reason, float(res.get("confidence", 0.6)), origin=origin,
+                            media_files=media_files, auto_threshold=auto_threshold)
         return MatchOutcome("queued", qid, reason)
 
     def rematch(self, target_id: int) -> MatchOutcome:
@@ -256,15 +256,15 @@ class MatchEngine:
 
     def _enqueue(self, account_id: int, target_id: int, material_id: int | None, text: str,
                  reason: str, confidence: float, origin: str, media_files: list[str] | None = None,
-                 pipeline: bool = False) -> int:
-        """写入任务队列。pipeline=True（搜索 / 监控自动生成）且设置里开了「免审核」、置信度 ≥ 阈值 → 直接进待发送。"""
+                 auto_threshold: float | None = None) -> int:
+        """写入任务队列。auto_threshold 不为 None（这条规则 / 推主开了免审核）且置信度 ≥ 它 → 直接进待发送。"""
         ttl_hours = config.get_int("reply_ttl_hours", 48)
         expires_at = to_iso(datetime.now(timezone.utc) + timedelta(hours=ttl_hours))
         confidence = min(max(confidence, 0.0), 1.0)
         status, auto_ok = "pending", 0
-        if pipeline and auto_approve_threshold() is not None and confidence >= auto_approve_threshold():
+        if auto_threshold is not None and confidence >= auto_threshold:
             status, auto_ok = "approved", 1
-            reason += f"｜置信度 {confidence:.2f} ≥ {auto_approve_threshold():.2f}，按设置免审核直接进待发送"
+            reason += f"｜置信度 {confidence:.2f} ≥ {auto_threshold:.2f}，按这条规则的免审核设置直接进待发送"
         with get_conn() as conn:
             cur = conn.execute(
                 "INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, "

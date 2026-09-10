@@ -14,7 +14,7 @@ from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_fe
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
 from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell, tag
-from .pickers import reply_mode_fields, reply_mode_invalid
+from .pickers import auto_approve_values, reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
 
@@ -51,17 +51,17 @@ def _save(rid, data: dict):
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
                          "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
-                         "source_kind=?, feed_account_id=?, read_media=? WHERE id=?",
+                         "source_kind=?, feed_account_id=?, read_media=?, auto_approve=?, auto_approve_min_confidence=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
                           data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
-                          data["source_kind"], data["feed_account_id"], data["read_media"], rid))
+                          data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
                          "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id, "
-                         "read_media) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "read_media, auto_approve, auto_approve_min_confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
                           data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
-                          data["source_kind"], data["feed_account_id"], data["read_media"]))
+                          data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"]))
         conn.commit()
 
 
@@ -148,6 +148,9 @@ def register(jobs) -> None:
                                     tag(f"观看 ≥ {fmt_views(r['min_views'])}", "metric", "观看量门槛，抓取端就过滤")
                                 if r["read_media"]:
                                     tag("🖼 读附图打分", "metric", "附图 / 视频封面会一起送给打分 AI（token 消耗更高，需要多模态模型）")
+                                if r["auto_approve"] and r["reply_mode"] != "manual":
+                                    tag(f"免审核 ≥ {float(r['auto_approve_min_confidence'] or 0.7):.2f}", "attn",
+                                        "置信度达到阈值的回复不经人工审核直接进待发送")
                                 tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
                                     "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
                                 tag("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）")),
@@ -236,8 +239,9 @@ def register(jobs) -> None:
                     ui.notify("已打开「读取附图打分」：每条带图推文的 token 消耗会明显增加；并且「设置 → LLM」的轻量模型必须是支持图片输入的多模态模型，"
                               "否则这条规则的打分会失败", type="warning", multi_line=True, timeout=8000)
             read_media.on("update:model-value", warn_media)
-            mode, brief, polish, acc = reply_mode_fields(g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0),
-                                                         "抓到达标推文后", g("reply_account_id", 0))
+            mode, brief, polish, acc, auto_sw, auto_thr = reply_mode_fields(
+                g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后", g("reply_account_id", 0),
+                bool(g("auto_approve", 0)), float(g("auto_approve_min_confidence", 0.7) or 0.7))
 
             def do_save():
                 if not (name.value or "").strip() or not (sc.value or "").strip():
@@ -255,7 +259,8 @@ def register(jobs) -> None:
                             lookback=max(1, int(lookback.value or 24)),
                             min_views=max(0, int(min_views.value or 0)), read_media=1 if read_media.value else 0,
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0,
-                            reply_account_id=(int(acc.value) or None) if acc.value else None)
+                            reply_account_id=(int(acc.value) or None) if acc.value else None,
+                            auto_approve=auto_approve_values(auto_sw, auto_thr)[0], auto_thr=auto_approve_values(auto_sw, auto_thr)[1])
                 try:
                     _save(r["id"] if r else None, data)
                 except Exception as e:

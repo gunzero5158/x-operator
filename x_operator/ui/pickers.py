@@ -102,6 +102,10 @@ REPLY_HINTS = {
     "ai_brief": "给 AI 的创作要求：主题/立场、必须带的链接或 @账号（直接写在这里，会强制原样出现）、语气。例：我们做 XX 产品，"
                 "回复要先接对方的话再提一句，像同行聊天，结尾带 @你的官号。",
     "polish": "开=允许 AI 在素材基础上轻微改写以衔接对方的话（不改核心信息和链接/@）；关=一字不改用素材原文。推荐关，除非素材是通用模板。",
+    "auto_approve": "默认关：生成的回复进「待审核」，你看过批准才发。开了以后，AI 给这条回复的置信度 ≥ 下面的阈值就跳过人工审核、直接进「待发送」，"
+                    "发送前的黑名单 / 冷却 / 时效 / 日上限检查照常。置信度：匹配素材 = AI 对「这条素材贴不贴这条推文」的信心；"
+                    "AI 按要求创作 = AI 对「写出来的回复切题、可以直接发」的自评；低于阈值的仍进待审核。只对自动搜索 / 自动监控 / 「运行一次」生效，"
+                    "手动选素材、手动 AI 撰写、「重新匹配」不受影响。开着意味着发出去之前没有人看过，建议先用高阈值试。",
     "reply_account": "这条规则/推主抓到的推文由哪个账号回复。自动轮流=在启用中的小号里挑最闲的（按今天已回+待发条数，跳过已到日上限的），"
                      "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。任务队列里每条也能临时改。推荐自动轮流。",
 }
@@ -113,8 +117,10 @@ def hint(text: str, after_row: bool = False):
 
 
 def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str,
-                      account_value: int | None = 0):
-    """画出「回复方式 / AI 创作要求 / 允许润色 / 回复账号」控件（带说明、按模式显隐），返回 (mode, brief, polish, acc)。"""
+                      account_value: int | None = 0, auto_approve_value: bool = False,
+                      auto_threshold_value: float = 0.7):
+    """画出「回复方式 / AI 创作要求 / 允许润色 / 回复账号 / 免审核」控件（带说明、按模式显隐），
+    返回 (mode, brief, polish, acc, auto_sw, auto_thr)。"""
     ui.separator()
     ui.label("回复方式").classes("font-semibold text-sm")
     mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
@@ -132,12 +138,36 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
     polish_hint = ui.label(REPLY_HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
 
+    auto_box = ui.column().classes("w-full gap-4")
+    with auto_box:
+        with ui.row().classes("w-full items-center gap-3 no-wrap"):
+            auto_sw = ui.switch("免审核：置信度达标直接进待发送", value=bool(auto_approve_value))
+            auto_thr = ui.number("置信度阈值（0~1）", value=auto_threshold_value if auto_threshold_value is not None else 0.7,
+                                 min=0, max=1, step=0.05).props("outlined dense").classes("w-44")
+        hint(REPLY_HINTS["auto_approve"], after_row=True)
+
+    def warn_auto(e):
+        if e.args:
+            ui.notify("已打开免审核：这条规则 / 推主生成的回复只要置信度达到阈值，就会不经人看直接进待发送", type="warning", multi_line=True, timeout=8000)
+    auto_sw.on("update:model-value", warn_auto)
+
     def sync():
         is_ai = mode.value == "ai_write"
         brief.set_visibility(is_ai); brief_hint.set_visibility(is_ai); tpl_box.set_visibility(is_ai)
         polish.set_visibility(mode.value == "material"); polish_hint.set_visibility(mode.value == "material")
-    mode.on("update:model-value", lambda e: sync()); sync()
-    return mode, brief, polish, acc
+        auto_box.set_visibility(mode.value != "manual")     # 只抓取模式没有自动生成的回复，免审核无意义
+        auto_thr.set_visibility(bool(auto_sw.value))
+    mode.on("update:model-value", lambda e: sync()); auto_sw.on("update:model-value", lambda e: sync()); sync()
+    return mode, brief, polish, acc, auto_sw, auto_thr
+
+
+def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
+    """保存时取免审核开关与阈值（阈值钳到 0~1，填错按 0.7）。"""
+    try:
+        thr = min(max(float(auto_thr.value), 0.0), 1.0)
+    except (TypeError, ValueError):
+        thr = 0.7
+    return (1 if auto_sw.value else 0), round(thr, 2)
 
 
 def reply_mode_invalid(mode, brief) -> str:

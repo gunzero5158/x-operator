@@ -112,7 +112,6 @@ _TZ_CHOICES = ["Asia/Shanghai", "Asia/Tokyo", "Asia/Taipei", "Asia/Singapore", "
 def _run_panel(jobs):
     from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, DISPATCH_INTERVAL_MAX, DISPATCH_INTERVAL_MIN, describe_schedule,
                                   dispatch_interval_seconds, job_enabled, next_runs, parse_daily_times, reschedule_auto_jobs)
-    from ..core.matcher import AI_WRITE_CONFIDENCE
     ui.label("自动运行").classes("font-semibold")
     ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
              "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。").classes("text-xs text-gray-400")
@@ -199,34 +198,6 @@ def _run_panel(jobs):
                  "随下面「保存节奏设置」一起保存、立即生效。").classes("text-xs text-gray-400 -mt-1")
         name2, desc2, _ = ALWAYS_JOBS["scheduled_check"]
         ui.label(f"{name2}：{desc2}").classes("text-xs text-gray-400")
-
-    with ui.card().classes("w-full"):
-        ui.label("免审核（搜索 / 监控自动生成的回复直接进待发送）").classes("font-semibold")
-        aa_sw = ui.switch("开启免审核（默认关）", value=config.get_bool("auto_approve_enabled", False))
-        aa_thr = ui.number("置信度 ≥ 多少才免审核（0~1）", value=config.get_float("auto_approve_min_confidence", 0.7), min=0, max=1, step=0.05) \
-            .classes("w-64").props("outlined dense")
-        ui.label("只对自动搜索 / 自动监控 / 「运行一次」流水线生成的回复生效：AI 匹配素材的置信度 ≥ 阈值就跳过人工审核、直接进待发送，"
-                 f"发送时的合规检查（黑名单 / 冷却 / 时效 / 日上限）照常。低于阈值的仍进待审核。AI 撰写的回复置信度固定记 {AI_WRITE_CONFIDENCE}，"
-                 f"想让 AI 撰写也免审核就把阈值设到 {AI_WRITE_CONFIDENCE} 及以下，反之设高一点。手动选素材 / 手动 AI 撰写 / 定时发帖不受此影响"
-                 "（定时发帖有自己的「自动批准」）。开着意味着发出去之前没有人看过，请先用小阈值范围试过再放开。"
-                 ).classes("text-xs text-gray-400 -mt-1")
-
-        def on_aa(e):
-            config.set_value("auto_approve_enabled", bool(aa_sw.value))
-            ui.notify("免审核已" + ("开启：达到阈值的自动回复会直接进待发送，发出前没有人看" if aa_sw.value else "关闭"),
-                      type="warning" if aa_sw.value else "positive", multi_line=True)
-        aa_sw.on("update:model-value", on_aa)
-
-        def on_thr(e):
-            try:
-                v = float(aa_thr.value)
-            except (TypeError, ValueError):
-                ui.notify("阈值要填 0~1 之间的数字", type="negative"); return
-            if not 0 <= v <= 1:
-                ui.notify("阈值要在 0~1 之间", type="negative"); return
-            config.set_value("auto_approve_min_confidence", round(v, 2))
-            ui.notify(f"免审核阈值改为 {v:.2f}", type="positive")
-        aa_thr.on("update:model-value", on_thr)
 
     def save():
         for jid, c in controls.items():

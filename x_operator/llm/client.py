@@ -66,6 +66,23 @@ _NEGATIVE_HINTS = ["ニュース", "求人", "募集", "tutorial", "guide", "リ
                    "イベント", "开课", "教程", "招聘", "新闻", "发布", "news", "hiring", "job"]
 
 
+def _coerce_conf(v, default: float = 0.6) -> float:
+    """模型给的 confidence 可能是 "0.8"、"80%"、8（十分制）之类；统一成 0~1。"""
+    try:
+        if isinstance(v, str):
+            v = v.strip().rstrip("%")
+            f = float(v)
+            if "%" in str(v) or f > 1:
+                f = f / 100 if f > 10 else f / 10
+        else:
+            f = float(v)
+            if f > 1:
+                f = f / 100 if f > 10 else f / 10
+    except (TypeError, ValueError):
+        return default
+    return min(max(f, 0.0), 1.0)
+
+
 class LLMClient:
     def __init__(self):
         pass
@@ -233,7 +250,8 @@ class LLMClient:
             raise LLMError(f"{what}需要 LLM：请先到「设置 → LLM」填好网关 base_url 和 api_key")
 
     def write_reply(self, tweet_text: str, tweet_lang: str, brief: str, must_include: list[str], limit: int = 280) -> dict:
-        """按创作要求为一条推文写回复。返回 {reply_text, reason}；必须包含项缺失会重试一次。limit：账号的长度上限（计数单位）。"""
+        """按创作要求为一条推文写回复。返回 {reply_text, confidence, reason}；必须包含项缺失会重试一次。limit：账号的长度上限（计数单位）。
+        confidence 是模型自评的贴切度（0~1），模型没给或给错时按 0.6（拿不准）。"""
         self._require("AI 撰写回复")
         messages = [
             {"role": "system", "content": prompts.WRITE_SYSTEM},
@@ -244,7 +262,7 @@ class LLMClient:
             text = str(obj.get("reply_text") or "")
             missing = [m for m in must_include if m and m not in text]
             if not missing:
-                return {"reply_text": text, "reason": str(obj.get("reason") or "")}
+                return {"reply_text": text, "confidence": _coerce_conf(obj.get("confidence")), "reason": str(obj.get("reason") or "")}
             messages = messages + [
                 {"role": "assistant", "content": json.dumps(obj, ensure_ascii=False)},
                 {"role": "user", "content": "你的回复缺少了必须原样包含的字符串：" + "、".join(missing) + "。请重写，务必包含。"},
