@@ -232,6 +232,19 @@ def tag(text: str, kind: str = "metric", tooltip: str | None = None):
     return b
 
 
+_FEED_KIND_WORD = {"feed_for_you": "推荐流", "feed_following": "关注流"}
+
+
+def source_label(source: str | None, rule_name: str | None, rule_kind: str | None, watched_handle: str | None) -> str:
+    """抓取记录 / 任务队列共用：这条推文是哪条搜索规则 / 哪个监控推主抓来的。
+    例：搜索「日本开发者」、推荐流「养号 A」、监控 @someone；规则或推主被删了也给个说法。"""
+    if source == "monitor":
+        return f"监控 @{watched_handle}" if watched_handle else "监控（推主已删）"
+    if rule_name:
+        return f"{_FEED_KIND_WORD.get(rule_kind or '', '搜索')}「{rule_name}」"
+    return "搜索（规则已删）"
+
+
 def tag_legend(kinds: list[str] | None = None):
     """页顶一行「标签颜色说明」。kinds 不传 = 全部；传了只显示这几类。"""
     items = [(t, k) for t, k in TAG_LEGEND if kinds is None or k in kinds]

@@ -14,7 +14,7 @@ from ..adapters.base import MEDIA_KIND_LABEL
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
 from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job, tag, tag_legend,
-                     run_job_with_progress, shell, tweet_link)
+                     run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
 _LIMIT = 150
@@ -245,10 +245,8 @@ def media_tags(media_json: str | None) -> list[tuple[str, str]]:
 def _card(t, rematch, delete_one, blacklist, pick, write):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
-            kind_word = {"feed_for_you": "推荐流", "feed_following": "关注流"}.get(t["rule_kind"] or "", "搜索")
-            src = f"监控 @{t['watched_handle']}" if t["source"] == "monitor" and t["watched_handle"] else \
-                (f"{kind_word}「{t['rule_name']}」" if t["rule_name"] else ("监控" if t["source"] == "monitor" else "搜索（规则已删）"))
-            tag(src, "source", "这条推文是哪条规则 / 哪个推主抓来的")
+            tag(source_label(t["source"], t["rule_name"], t["rule_kind"], t["watched_handle"]), "source",
+                "这条推文是哪条规则 / 哪个推主抓来的")
             tag(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"]), _STATUS_KIND.get(t["process_status"], "off"),
                 "处理状态（页顶「各状态是什么意思」有解释）")
             if t["llm_relevance_score"] is not None:

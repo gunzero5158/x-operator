@@ -533,3 +533,35 @@ async def test_targets_regenerate_hint(user: User):
     await user.should_see("强制放回待审核")
     with get_conn() as c:
         c.execute("UPDATE target_tweets SET process_status='queued', llm_relevance_reason=NULL WHERE id=1"); c.commit()
+
+
+async def test_queue_shows_source_rule(user: User):
+    """任务队列每条回复除了「来源：AI 匹配素材」之外，还标出目标推文是哪条搜索规则 / 哪个监控推主抓来的；
+    推荐流规则写「推荐流「名」」，规则被删写「搜索（规则已删）」。抓取记录页用同一套措辞。"""
+    _pages()
+    with get_conn() as c:
+        rid = c.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria) VALUES ('队列来源规则','kw','找人')").lastrowid
+        fid = c.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, source_kind) VALUES ('养号流','','找人','feed_for_you')").lastrowid
+        wid = c.execute("INSERT INTO watched_users(handle, x_user_id) VALUES ('src_watch','9001')").lastrowid
+        made = []
+        for tid, src, srid, txt in (("qs1", "search", rid, "qs_a"), ("qs2", "search", fid, "qs_b"),
+                                    ("qs3", "monitor", wid, "qs_c"), ("qs4", "search", None, "qs_d")):
+            t = c.execute("INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, tweet_created_at, source, source_rule_id, process_status) "
+                          "VALUES (?,?,?,?,'ja',?,?,?,'queued')", (tid, "a_" + tid, "u_" + tid, "hi", utcnow_iso(), src, srid)).lastrowid
+            c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, origin, created_at) "
+                      "VALUES (1,'reply',?,?,'pending','ai_match',?)", (t, txt, utcnow_iso()))
+            made.append(t)
+        c.commit()
+    await user.open("/queue")
+    await user.should_see("搜索「队列来源规则」")
+    await user.should_see("推荐流「养号流」")
+    await user.should_see("监控 @src_watch")
+    await user.should_see("搜索（规则已删）")
+    await user.open("/targets")
+    await user.should_see("搜索「队列来源规则」")
+    await user.should_see("监控 @src_watch")
+    with get_conn() as c:
+        c.execute(f"DELETE FROM review_queue WHERE final_text IN ('qs_a','qs_b','qs_c','qs_d')")
+        c.execute(f"DELETE FROM target_tweets WHERE id IN ({','.join('?' * len(made))})", made)
+        c.execute("DELETE FROM search_rules WHERE id IN (?,?)", (rid, fid))
+        c.execute("DELETE FROM watched_users WHERE id=?", (wid,)); c.commit()

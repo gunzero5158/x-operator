@@ -11,7 +11,7 @@ from ..core import media, textlimit
 from ..core.compliance import SKIP_REASON_LABEL
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
-                     shell, tag, tag_legend, tweet_link)
+                     shell, source_label, tag, tag_legend, tweet_link)
 from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
 
@@ -39,10 +39,12 @@ def _load(status: str):
             "SELECT rq.*, a.handle AS acc_handle, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
             "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang, tt.view_count AS tgt_views, "
             "tt.llm_relevance_score AS tgt_score, tt.tweet_created_at AS tgt_created_at, tt.source AS tgt_source, "
-            "sr.min_llm_score AS rule_min "
+            "tt.source_rule_id AS tgt_rule_id, sr.min_llm_score AS rule_min, sr.name AS rule_name, sr.source_kind AS rule_kind, "
+            "wu.handle AS watched_handle "
             "FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
             "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
+            "LEFT JOIN watched_users wu ON wu.id=tt.source_rule_id AND tt.source='monitor' "
             f"WHERE rq.status=? ORDER BY {order} LIMIT {_LIMIT}", (status,)).fetchall()
     return items
 
@@ -407,6 +409,9 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                 "回复 = 回在别人推文下；发帖 = 自己账号发主贴")
             origin = it["origin"] or ("scheduled" if it["scheduled_post_id"] else "ai_match")
             tag("来源：" + ORIGIN_LABEL.get(origin, origin), "ai" if origin == "ai_write" else "source", "这条文案是怎么来的")
+            if it["target_tweet_id"] and it["tgt_source"]:
+                tag(source_label(it["tgt_source"], it["rule_name"], it["rule_kind"], it["watched_handle"]), "source",
+                    "目标推文是哪条搜索规则 / 哪个监控推主抓来的（回复方式、免审核、回复账号都按它的设置）")
             if it["is_auto_translated"]:
                 tag("自动翻译", "warn", "文案是机器翻译过来的，发之前重点检查")
             if it["force_send"]:
