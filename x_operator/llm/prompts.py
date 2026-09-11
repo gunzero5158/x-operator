@@ -4,11 +4,14 @@
 - match：为命中推文从候选素材里选最佳回复 + 微调（决定回复内容）
 
 其余场景（translate / write / detect_lang）在 llm/services.py 里用轻量 prompt 直接实现。
-所有 reason 类字段一律简体中文（给审核者看）；回复正文用目标推文语言。
+所有 reason 类字段一律简体中文（给审核者看）；回复正文用目标推文语言（中文分简繁，跟目标推文一致）。
+提示里的语言都经 lang_for_llm 写成「繁体中文（zh-Hant），全文用繁体字」这样的说明，不直接丢语言码给模型。
 """
 from __future__ import annotations
 
 import json
+
+from ..core.langdetect import lang_for_llm
 
 RELEVANCE_SYSTEM = """你是 X（推特）运营工具的候选推文打分助手。这些推文已经通过关键词搜索命中，
 你的任务不是"严格筛选"，而是"剔除明显不值得回复的"，其余都保留给人工审核决定。
@@ -71,7 +74,8 @@ MATCH_SYSTEM = """你是 X（推特）运营的回复助手。给定一条目标
 若跳过：{{"skip": true, "material_id": null, "reply_text": "", "confidence": 0.0, "reason": "中文原因"}}"""
 
 POLISH_ALLOWED = ("reply_text 以所选素材为底稿，可做轻微润色使其自然衔接目标推文，但不得改变素材的核心信息、"
-                  "不得删掉素材里的链接或 @ 账号；使用目标推文的语言。")
+                  "不得删掉素材里的链接或 @ 账号；使用目标推文的语言——中文要分简繁，"
+                  "目标推文是繁体就把素材转成繁体字，是简体就用简体字。")
 POLISH_FORBIDDEN = "reply_text 必须与所选素材的 text 一字不差，不做任何改写。"
 
 
@@ -81,7 +85,7 @@ def match_system(allow_polish: bool) -> str:
 
 def match_user(tweet_text: str, tweet_lang: str, candidates: list[dict]) -> str:
     cand_json = json.dumps(candidates, ensure_ascii=False)
-    return (f"目标推文（语言 {tweet_lang}）：\n{tweet_text}\n\n"
+    return (f"目标推文（语言：{lang_for_llm(tweet_lang)}）：\n{tweet_text}\n\n"
             f"候选回复素材（JSON 数组，含 material_id 与 text）：\n{cand_json}")
 
 
@@ -89,7 +93,7 @@ def match_user(tweet_text: str, tweet_lang: str, candidates: list[dict]) -> str:
 WRITE_SYSTEM = """你是 X（推特）上的真人运营者，正在别人的推文下面回复。
 你会收到：目标推文、运营者写的「创作要求」（主题、立场、必须带的链接或 @账号、语气等）。
 请写一条回复，要求：
-1. 用目标推文的语言写（除非创作要求另有指定）。
+1. 用目标推文的语言写（除非创作要求另有指定）；中文要分简繁：目标推文是繁体字就全用繁体字，是简体字就全用简体字。
 2. 先真的回应对方说的内容（表现出看懂了、有共鸣或有帮助的信息），再自然地带出创作要求里的主题，不要一上来就推销。
 3. 创作要求里标注「必须包含」的字符串（链接、@账号、产品名）必须原样出现在正文里，一个都不能少、不能改写。
 4. 像真人随手写的：口语、简短、不用官腔，不堆 emoji，不堆话题标签（最多 1 个）。
@@ -102,7 +106,7 @@ WRITE_SYSTEM = """你是 X（推特）上的真人运营者，正在别人的推
 
 def write_user(tweet_text: str, tweet_lang: str, brief: str, must_include: list[str]) -> str:
     must = "、".join(f"「{m}」" for m in must_include) if must_include else "（无）"
-    return (f"目标推文（语言 {tweet_lang}）：\n{tweet_text}\n\n创作要求：\n{brief}\n\n"
+    return (f"目标推文（语言：{lang_for_llm(tweet_lang)}）：\n{tweet_text}\n\n创作要求：\n{brief}\n\n"
             f"必须原样包含的字符串：{must}")
 
 
@@ -119,13 +123,13 @@ X 的长度按「计数单位」算：英文字母/数字/标点每个 1 单位�
 铁律：
 1. 意思、立场、语气不变；删掉铺垫、重复、客套，合并句子，用更短的说法。
 2. 「必须原样保留」的链接、@账号、产品名一个都不能删、不能改。
-3. 用原文的语言。宁可缩得比上限再短一点，也不要刚好卡在上限。
+3. 用原文的语言（中文的简繁也不能变）。宁可缩得比上限再短一点，也不要刚好卡在上限。
 4. 只输出 JSON：{"text": "缩短后的正文", "reason": "中文一句话说明删了什么"}"""
 
 
 def shorten_user(text: str, lang: str, limit: int, current: int, must_include: list[str]) -> str:
     must = ("\n必须原样保留：" + "、".join(must_include)) if must_include else ""
-    return f"原文（语言 {lang}，现在 {current} 单位，上限 {limit} 单位，至少要删掉 {current - limit} 单位）：\n{text}{must}"
+    return f"原文（语言：{lang_for_llm(lang)}；现在 {current} 单位，上限 {limit} 单位，至少要删掉 {current - limit} 单位）：\n{text}{must}"
 
 
 # ---------------- AI 生成搜索规则 ----------------
@@ -138,7 +142,8 @@ RULE_GEN_SYSTEM = """你是 X（推特）搜索专家，帮运营者把「想找
 要求：
 1. keywords 是「命中任意一个即可」的词表，8~20 个，覆盖目标人群会用的各种说法、俚语、缩写、多语言写法；
    每个词 1~4 个单词或 2~8 个汉字/假名；不要写 OR、括号、引号、lang: 等语法。
-2. langs 从 ja/en/zh/ko/es/fr/de/pt/id/th 里选，按目标人群实际使用的语言给，通常 1~3 个。
+2. langs 从 ja/en/zh-Hans/zh-Hant/ko/es/fr/de/pt/id/th 里选，按目标人群实际使用的语言给，通常 1~3 个。
+   中文分简繁：zh-Hans = 简体中文（中国大陆、新加坡等），zh-Hant = 繁体中文（台湾、香港、澳门等）；两边都要就两个都给。
 3. semantic_criteria 用两三句话写清「保留什么」「排除什么」，避免抽象词。
 4. 只输出 JSON。"""
 
@@ -163,7 +168,7 @@ MATERIAL_GEN_SYSTEM = """你是 X（推特）文案写手，按运营者的要�
 def material_gen_user(kind: str, lang: str, topic: str, style: str, scenario: str,
                       must_include: list[str], count: int) -> str:
     must = "、".join(f"「{m}」" for m in must_include) if must_include else "（无）"
-    return (f"素材类型：{kind}\n语言：{lang}\n主题：{topic}\n风格：{style or '自然、口语、像真人'}\n"
+    return (f"素材类型：{kind}\n语言：{lang_for_llm(lang)}\n主题：{topic}\n风格：{style or '自然、口语、像真人'}\n"
             f"使用场景：{scenario or '通用'}\n必须包含：{must}\n数量：{count}")
 
 
@@ -172,7 +177,7 @@ POST_REWRITE_SYSTEM = """你是 X（推特）运营的文案改写助手。给�
 意思、立场、卖点不变，但措辞、句式、开头结尾要明显不同——X 会拒绝完全重复的推文，读者也不该觉得在刷屏。
 铁律：
 1. 素材里的链接和 @账号必须原样出现、一个不少；话题标签可增减。
-2. 用素材原来的语言；长度按用户消息末尾给的上限来（中日韩每字算 2 个单位，链接算 23）。
+2. 用素材原来的语言（中文的简繁也不能变）；长度按用户消息末尾给的上限来（中日韩每字算 2 个单位，链接算 23）。
 3. 不要出现"改写版""变体"之类的字样，不要解释。
 4. 如果给了「最近发过的内容」，新变体要和它们都明显不同。
 5. 只输出 JSON：{"text": "新推文正文", "reason": "中文一句话说明改了什么"}"""
@@ -180,14 +185,14 @@ POST_REWRITE_SYSTEM = """你是 X（推特）运营的文案改写助手。给�
 
 def post_rewrite_user(text: str, lang: str, recent: list[str]) -> str:
     recent_block = ("\n\n最近发过的内容（要避开）：\n" + json.dumps(recent[:8], ensure_ascii=False)) if recent else ""
-    return f"素材原文（语言 {lang}）：\n{text}{recent_block}"
+    return f"素材原文（语言：{lang_for_llm(lang)}）：\n{text}{recent_block}"
 
 
 POST_WRITE_SYSTEM = """你是 X（推特）账号的文案写手，按运营者给的「主题要求」写一条可以直接发出的推文。
 铁律：
 1. 像账号主人在日常发帖，不像广告：要有一个具体的切入点（一个观察、一段经验、一个小结论），不空泛。
 2. 要求里出现的链接和 @账号必须原样出现在正文里。
-3. 用指定的语言；长度按用户消息末尾给的上限来（中日韩每字算 2 个单位，链接算 23）。
+3. 用指定的语言（指定简体就全用简体字、繁体就全用繁体字）；长度按用户消息末尾给的上限来（中日韩每字算 2 个单位，链接算 23）。
 4. 如果给了「最近发过的内容」，这条要换一个角度，不重复它们的说法。
 5. 只输出 JSON：{"text": "推文正文", "reason": "中文一句话说明切入点"}"""
 
@@ -195,4 +200,4 @@ POST_WRITE_SYSTEM = """你是 X（推特）账号的文案写手，按运营者�
 def post_write_user(brief: str, lang: str, must_include: list[str], recent: list[str]) -> str:
     must = ("\n必须原样包含：" + "、".join(must_include)) if must_include else ""
     recent_block = ("\n\n最近发过的内容（换个角度，别重复）：\n" + json.dumps(recent[:8], ensure_ascii=False)) if recent else ""
-    return f"主题要求：\n{brief}\n\n语言：{lang}{must}{recent_block}"
+    return f"主题要求：\n{brief}\n\n语言：{lang_for_llm(lang)}{must}{recent_block}"

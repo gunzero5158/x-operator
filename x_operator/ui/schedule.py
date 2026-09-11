@@ -12,7 +12,7 @@ from nicegui import run, ui
 from ..core import media
 from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
-from ..core.search import LANG_LABEL
+from ..core.langdetect import LANG_LABEL, lang_name
 from ..db.database import get_conn, to_iso, utcnow_iso
 from .layout import confirm, fmt_time, shell, tag
 from .media_widget import MediaField, media_badge
@@ -56,7 +56,7 @@ def _post_langs() -> dict:
         rows = conn.execute("SELECT DISTINCT lang FROM materials WHERE kind='post' AND deleted_at IS NULL ORDER BY lang").fetchall()
     opts = {"": "不限"}
     for r in rows:
-        opts[r["lang"]] = LANG_LABEL.get(r["lang"], r["lang"])
+        opts[r["lang"]] = lang_name(r["lang"])
     return opts
 
 
@@ -126,7 +126,7 @@ def register(jobs) -> None:
                             if mode == "fixed":
                                 ui.label((sp["mat_text"] or "（素材不存在）")[:140]).classes("text-sm")
                             elif mode == "pool":
-                                ui.label("素材池：" + ("语言 " + LANG_LABEL.get(sp["pool_lang"], sp["pool_lang"]) if sp["pool_lang"] else "语言不限")
+                                ui.label("素材池：" + ("语言 " + lang_name(sp["pool_lang"]) if sp["pool_lang"] else "语言不限")
                                          + ("，标签 " + sp["pool_tags"] if sp["pool_tags"] else "，全部发帖素材")).classes("text-sm")
                             else:
                                 ui.label("主题要求：" + (sp["ai_brief"] or "（未填！）")[:140]).classes("text-sm " + ("" if sp["ai_brief"] else "text-red-500"))

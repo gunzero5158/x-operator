@@ -11,6 +11,7 @@ from nicegui import run, ui
 import json
 
 from ..adapters.base import MEDIA_KIND_LABEL
+from ..core.langdetect import lang_name
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
 from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job, tag, tag_legend,
@@ -255,7 +256,7 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
                 tag(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if t["source"] == "search" else ""),
                     "metric_ok" if sc >= thr else "metric_bad", "AI 给的相关性分；绿 = 达到规则的达标分，红 = 没达到")
             if t["lang"]:
-                tag(t["lang"], "metric", "推文语言")
+                tag(lang_name(t["lang"]), "metric", "推文语言")
             if t["view_count"] is not None:
                 tag(f"👁 {fmt_views(t['view_count'])}", "metric", "抓取时的观看量")
             for label, tip in media_tags(t["media"]):

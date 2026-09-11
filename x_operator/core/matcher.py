@@ -21,6 +21,7 @@ from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import media, textlimit
 from .accounts import choose_reply_account, fallback_reply_account
+from .langdetect import lang_name, material_lang_tiers
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
 
@@ -78,16 +79,29 @@ class MatchEngine:
         self.llm = llm
 
     # ---------------- 素材候选 ----------------
-    def pick_candidates(self, lang: str, tags: list[str], limit: int = 15) -> tuple[list[sqlite3.Row], bool]:
-        """返回 (候选列表, 是否同语言)。优先同语言的启用回复素材；一条都没有就退回全部语言（宁可给一条让人审，也不空手）。"""
+    def pick_candidates(self, lang: str, tags: list[str], limit: int = 15) -> tuple[list[sqlite3.Row], str]:
+        """返回 (候选列表, 语言说明)。优先同语言的启用回复素材；繁体推文没有繁体素材时先退到简体（反之亦然），
+        再没有就退回全部语言（宁可给一条让人审，也不空手）。语言说明为空 = 用的是同语言素材。"""
         base = "SELECT * FROM materials WHERE kind='reply' AND status='active' AND deleted_at IS NULL"
+        order = " ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC"
+        same, sibling = material_lang_tiers(lang)
+        note = ""
         with get_conn() as conn:
-            rows = conn.execute(base + " AND lang=? ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC", (lang,)).fetchall()
-            same_lang = bool(rows)
+            def by_langs(codes: list[str]) -> list[sqlite3.Row]:
+                if not codes:
+                    return []
+                return conn.execute(base + f" AND lang IN ({','.join('?' * len(codes))})" + order, codes).fetchall()
+            rows = by_langs(same)
             if not rows:
-                rows = conn.execute(base + " ORDER BY usage_count ASC, COALESCE(last_used_at,'') ASC").fetchall()
+                rows = by_langs(sibling)
+                if rows:
+                    note = (f"（素材库没有{lang_name(lang)}的回复素材，这次用的是{lang_name(sibling[0])}素材，审核时注意简繁"
+                            "——规则里打开「允许 AI 轻微润色」可以让 AI 顺手转成推文的字形）")
+            if not rows:
+                rows = conn.execute(base + order).fetchall()
+                note = f"（素材库没有「{lang_name(lang)}」的回复素材，这次从全部语言里挑的，审核时注意语言）"
         if not rows:
-            return [], same_lang
+            return [], note
         tagset = set(t for t in tags if t)
 
         def overlap(m: sqlite3.Row) -> int:
@@ -95,7 +109,7 @@ class MatchEngine:
             return 1 if (tagset & mtags) else 0
 
         rows_sorted = sorted(rows, key=lambda m: (-overlap(m),))
-        return rows_sorted[:limit], same_lang
+        return rows_sorted[:limit], note
 
     # ---------------- 自动路线 ----------------
     def run(self, target: sqlite3.Row, account: sqlite3.Row, cfg: sqlite3.Row | None = None,
@@ -109,6 +123,9 @@ class MatchEngine:
             self._mark_no_match(target["id"], "规则设置为「只抓取，手动处理」：请在这里点「选素材」或「AI 撰写」")
             return MatchOutcome("no_match", None, "等待手动处理")
         reply_acc, acc_note = choose_reply_account(cfg, account)
+        if reply_acc is None:
+            self._mark_no_match(target["id"], acc_note)
+            return MatchOutcome("no_match", None, acc_note)
         auto_thr = auto_approve_threshold(cfg) if pipeline else None
         if mode == "ai_write":
             brief = (_cfg_get(cfg, "ai_brief", "") or "").strip()
@@ -149,12 +166,11 @@ class MatchEngine:
         退回到规则挑选（同语言里用得最少的一条），理由里写明，让审核的人知道这条是兜底出来的。"""
         lang = target["lang"] or "ja"
         tags = _infer_tags(target["text"])
-        candidates, same_lang = self.pick_candidates(lang, tags)
+        candidates, lang_note = self.pick_candidates(lang, tags)
         if not candidates:
             reason = "素材库里没有任何状态为「启用」的回复素材。到素材库添加（或用「AI 生成素材」）后再点「自动匹配」，也可在这里「AI 撰写」"
             self._mark_no_match(target["id"], reason)
             return MatchOutcome("no_match", None, reason)
-        lang_note = "" if same_lang else f"（素材库没有「{lang}」语言的回复素材，这次从全部语言里挑的，审核时注意语言）"
 
         cand_payload = [{"material_id": c["id"], "text": c["text"], "lang": c["lang"]} for c in candidates]
         decision: dict = {}
@@ -276,6 +292,8 @@ class MatchEngine:
         if fallback is None:
             return None, None, "没有状态为「启用」的账号，请到「设置 → 账号」添加并启用一个", ""
         reply_acc, note = choose_reply_account(load_source_cfg(target), fallback)
+        if reply_acc is None:
+            return None, None, note, ""
         return target, reply_acc, "", note
 
     def _enqueue(self, account_id: int, target_id: int, material_id: int | None, text: str,

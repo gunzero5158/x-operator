@@ -21,6 +21,7 @@ from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import budget
 from .langdetect import LANG_LABEL  # noqa: F401  规则页等处仍从 search 取
+from .langdetect import lang_allowed, lang_name, rule_langs_normalized, x_search_code
 from .matcher import MatchEngine
 from .monitor import (FILTER_REASONS, _log_read, _row_int,
                       precheck, read_is_billed, store_target)
@@ -35,12 +36,12 @@ SCAN_CAP = 500
 
 
 def rule_langs(rule: sqlite3.Row | dict) -> list[str]:
-    """规则的语言列表（存储为逗号分隔，如 'ja,en'）。"""
-    return [x.strip() for x in (rule["lang"] or "").split(",") if x.strip()]
+    """规则的语言列表（存储为逗号分隔，如 'ja,zh-Hant'）。旧数据里的 zh 展开成简繁两个。"""
+    return rule_langs_normalized(x.strip() for x in (rule["lang"] or "").split(",") if x.strip())
 
 
 def langs_label(langs: list[str]) -> str:
-    return " / ".join(LANG_LABEL.get(x, x) for x in langs) if langs else "不限"
+    return " / ".join(lang_name(x) for x in langs) if langs else "不限"
 
 
 _CJK_RE = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
@@ -104,7 +105,8 @@ def effective_query(rule: sqlite3.Row | dict) -> str:
     if " OR " in q and not q.startswith("("):
         q = f"({q})"
     if langs and "lang:" not in q:
-        q += " (" + " OR ".join(f"lang:{x}" for x in langs) + ")"
+        codes = list(dict.fromkeys(x_search_code(x) for x in langs))   # 简繁都选时只写一个 lang:zh
+        q += " (" + " OR ".join(f"lang:{x}" for x in codes) + ")"
     if "is:retweet" not in q:
         q += " -is:retweet"
     return q
@@ -304,9 +306,9 @@ class SearchJob:
         pre: list[ScoredCandidate] = []
         to_score: list[TweetData] = []
         for t in tweets:
-            # 语言不符（X 偶尔会返回别的语言）—— 不花 LLM
-            if langs and t.lang and t.lang not in ("und", "qme", "zxx") and t.lang not in langs:
-                pre.append(ScoredCandidate(t, 0, "", f"推文语言是 {LANG_LABEL.get(t.lang, t.lang)}，不在规则选的语言（{langs_label(langs)}）内"))
+            # 语言不符（X 偶尔会返回别的语言；X 搜 lang:zh 简繁都会回来，这里按本地判断的简繁再筛）—— 不花 LLM
+            if not lang_allowed(t.lang, langs):
+                pre.append(ScoredCandidate(t, 0, "", f"推文语言是 {lang_name(t.lang)}，不在规则选的语言（{langs_label(langs)}）内"))
                 continue
             code = precheck(t, account["handle"], max_age_h=max_age)
             if code:

@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 
+from ..core.langdetect import refine_tweet_lang
+
 
 class XClientError(Exception):
     """所有适配器异常基类。"""
@@ -89,6 +91,10 @@ class TweetData:
     in_reply_to_tweet_id: str | None
     view_count: int | None = None   # 观看量（官方 impression_count / 非官方 view_count）；拿不到为 None
     media: tuple[MediaData, ...] = ()   # 附件元信息（图片直链 / 视频预览图）；两条通道都不额外计费
+
+    def __post_init__(self):
+        # X 给中文推文基本只标 zh：按正文字形细分成简体 zh-Hans / 繁体 zh-Hant（看不出来保留 zh），各通道统一在这里做
+        object.__setattr__(self, "lang", refine_tweet_lang(self.lang, self.text))
 
 
 @dataclass(frozen=True)

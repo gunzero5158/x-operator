@@ -41,6 +41,8 @@ def lang_hint_text(selected: str, text: str) -> str:
     code = langdetect.detect(text)
     if not code:
         return "自动判断：暂时判不出语言（只有表情 / 链接 / 数字？），保存前请手选一个。"
+    if code == langdetect.ZH_HANS and not langdetect.zh_script(text):
+        return "自动判断：识别为中文，但这段字简繁写法一样、看不出是哪种，先按「简体中文」存；要当繁体素材用请在上面手选「繁体中文」。"
     return f"自动判断：识别为「{LANG_LABEL.get(code, code)}」，保存时按这个存；不对请在上面手选。"
 
 
@@ -202,7 +204,7 @@ def register(jobs) -> None:
                             with ui.row().classes("items-center gap-2"):
                                 kt, kc, ktip = KIND_BADGE.get(m["kind"], (m["kind"], "bg-slate-500", ""))
                                 ui.badge(kt, color=None).classes(kc).tooltip(ktip)
-                                ui.badge(m["lang"], color=None).classes(TAG["metric"]).tooltip("语言")
+                                ui.badge(langdetect.lang_name(m["lang"]), color=None).classes(TAG["metric"]).tooltip("语言")
                                 st, sc, stip = STATUS_BADGE.get(m["status"], (m["status"], "bg-gray-500", ""))
                                 ui.badge(st, color=None).classes(sc).tooltip(stip)
                                 if m["created_by"] == "ai":
@@ -238,7 +240,7 @@ def register(jobs) -> None:
             ui.label("编辑素材" if m else "新建素材").classes("text-lg font-bold")
             kind = ui.select({"reply": "回复", "post": "发帖"}, value=m["kind"] if m else "reply", label="类型").classes("w-full").props("outlined")
             lang_opts = {AUTO_LANG: "自动判断（按正文内容）", **LANG_LABEL}
-            lang_init = (m["lang"] if m and m["lang"] in LANG_LABEL else AUTO_LANG)
+            lang_init = (m["lang"] if m and m["lang"] in LANG_LABEL else AUTO_LANG)   # 旧数据的 zh（简繁未定）按自动判断重新识别
             lang = ui.select(lang_opts, value=lang_init, label="语言").classes("w-full").props("outlined")
             text = ui.textarea("正文", value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
             lang_hint = ui.label().classes("text-xs text-gray-400 -mt-2 mb-1")
@@ -282,7 +284,7 @@ def register(jobs) -> None:
             ui.label("AI 生成素材").classes("text-lg font-bold")
             with ui.row().classes("w-full gap-3 no-wrap"):
                 kind = ui.select({"reply": "回复（在别人推文下用）", "post": "发帖（自己发的推文）"}, value="reply", label="类型").classes("flex-1").props("outlined")
-                lang = ui.select({"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语"}, value="ja", label="语言").classes("flex-1").props("outlined")
+                lang = ui.select(LANG_LABEL, value="ja", label="语言").classes("flex-1").props("outlined")
                 count = ui.number("生成条数", value=5, min=1, max=20, step=1).classes("w-32").props("outlined")
             ui.label("类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。").classes("text-xs text-gray-400 -mt-2 mb-1")
             topic = ui.textarea("主题 / 要传达的信息", value="").classes("w-full").props("outlined autogrow")

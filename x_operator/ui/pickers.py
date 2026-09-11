@@ -1,11 +1,14 @@
 """各页共用的两个弹窗：手动选素材、AI 按要求撰写。抓取记录页与任务队列页都会用到。"""
 from __future__ import annotations
 
+import json
+
 from nicegui import run, ui
 
 from ..core import media
+from ..core.langdetect import lang_name, material_lang_tiers
 from ..db.database import get_conn, utcnow_iso
-from ..core.accounts import account_options
+from ..core.accounts import REPLY_ACCOUNT_MODE_LABEL, account_options, reply_account_setting
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
 from .layout import confirm, notify_long
 from .media_widget import MediaField, media_badge
@@ -93,7 +96,6 @@ def template_controls(brief) -> None:
             ui.notify("已删除", type="positive")
     del_btn.on_click(on_delete)
 
-LANG_NAME = {"ja": "日语", "en": "英语", "zh": "中文", "ko": "韩语", "und": "未知"}
 
 # 搜索规则 / 监控推主共用的「回复方式」三个字段及其说明
 REPLY_HINTS = {
@@ -110,7 +112,9 @@ REPLY_HINTS = {
                   "素材池=下面放一批图片 / 视频（最多 30 个），每条回复随机挑 1 个，优先挑这条规则 / 推主最近没用过的。"
                   "匹配素材库模式的附件跟着素材走，在素材库里给素材加。",
     "reply_account": "这条规则/推主抓到的推文由哪个账号回复。自动轮流=在启用中的小号里挑最闲的（按今天已回+待发条数，跳过已到日上限的），"
-                     "主号不参与；一个小号都没有时才退回主号。指定某个账号就固定用它。任务队列里每条也能临时改。推荐自动轮流。",
+                     "主号不参与；一个小号都没有时才退回主号。只用指定的账号=选 1 个就固定用它，选多个就只在这几个里按同样的规则轮流"
+                     "（主号选进来也参与）。排除某些账号=照常自动轮流，但名单里的号不参与，排除完一个都不剩时不会生成草稿。"
+                     "任务队列里每条也能临时改。推荐自动轮流。",
 }
 
 
@@ -123,19 +127,51 @@ MEDIA_MODE_LABEL = {"fixed": "固定：每条回复都带下面这几个", "pool
 MEDIA_FIELD_LABEL = {"fixed": "随 AI 写的回复一起发的配图 / 视频（选填）", "pool": "配图 / 视频素材池（选填，每条随机挑 1 个）"}
 
 
+class ReplyAccountField:
+    """「回复账号」：设法下拉（自动轮流 / 只用指定的 / 排除某些）+ 账号多选名单（自动轮流时隐藏）。"""
+    LIST_LABEL = {"include": "用哪些账号回复（选 1 个 = 固定，多个 = 轮流）", "exclude": "不参与轮流的账号"}
+
+    def __init__(self, cfg=None):
+        mode_value, ids_value = reply_account_setting(cfg)
+        opts = account_options(with_auto=False)
+        self.mode = ui.select(REPLY_ACCOUNT_MODE_LABEL, value=mode_value, label="回复账号").classes("w-full").props("outlined")
+        self.ids = ui.select(opts, value=[i for i in ids_value if i in opts], multiple=True,
+                             label=self.LIST_LABEL.get(mode_value, "账号")).classes("w-full").props("outlined use-chips")
+        self.mode.on("update:model-value", lambda e: self._sync()); self._sync()
+
+    def _sync(self):
+        listed = self.mode.value in self.LIST_LABEL
+        self.ids.set_visibility(listed)
+        if listed:
+            self.ids._props["label"] = self.LIST_LABEL[self.mode.value]
+            self.ids.update()
+
+    def values(self) -> tuple[str, str]:
+        """保存时取 (reply_account_mode, reply_account_ids JSON)。自动轮流时名单清空。"""
+        mode = self.mode.value if self.mode.value in REPLY_ACCOUNT_MODE_LABEL else "auto"
+        ids = [int(i) for i in (self.ids.value or []) if i] if mode != "auto" else []
+        return mode, json.dumps(ids)
+
+    def invalid(self) -> str:
+        if self.mode.value == "include" and not self.ids.value:
+            return "回复账号选了「只用指定的账号」，但名单里一个账号都没选"
+        if self.mode.value == "exclude" and not self.ids.value:
+            return "回复账号选了「排除某些账号」，但没选要排除哪些（不排除就选「自动轮流」）"
+        return ""
+
+
 def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mode_label: str,
-                      account_value: int | None = 0, auto_approve_value: bool = False,
+                      account_cfg=None, auto_approve_value: bool = False,
                       auto_threshold_value: float = 0.7, media_files_value: str = "[]", media_mode_value: str = "fixed"):
     """画出「回复方式 / AI 创作要求 / AI 创作附件 / 允许润色 / 回复账号 / 免审核」控件（带说明、按模式显隐），
-    返回 (mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf)。"""
+    account_cfg：规则 / 推主那一行（新建时 None），用来读回复账号的设法。
+    返回 (mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf)，acc 是 ReplyAccountField。"""
     ui.separator()
     ui.label("回复方式").classes("font-semibold text-sm")
     mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
                      label=mode_label).classes("w-full").props("outlined")
     hint(REPLY_HINTS["reply_mode"])
-    opts = account_options()
-    acc = ui.select(opts, value=(account_value or 0) if (account_value or 0) in opts else 0,
-                    label="回复账号").classes("w-full").props("outlined")
+    acc = ReplyAccountField(account_cfg)
     hint(REPLY_HINTS["reply_account"])
     brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
     brief_hint = ui.label(REPLY_HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
@@ -193,8 +229,10 @@ def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
     return (1 if auto_sw.value else 0), round(thr, 2)
 
 
-def reply_mode_invalid(mode, brief, media_mode=None, mf=None) -> str:
+def reply_mode_invalid(mode, brief, media_mode=None, mf=None, acc: ReplyAccountField | None = None) -> str:
     """保存前校验，返回中文错误（空串 = 没问题）。"""
+    if acc is not None and acc.invalid():
+        return acc.invalid()
     if mode.value == "ai_write" and not (brief.value or "").strip():
         return "选了「AI 按要求创作」就必须填创作要求"
     if mode.value == "ai_write" and mf is not None and mf.files:
@@ -209,7 +247,8 @@ def _load_materials(lang: str | None, all_langs: bool):
     q = "SELECT * FROM materials WHERE kind='reply' AND status='active' AND deleted_at IS NULL"
     args: list = []
     if lang and not all_langs:
-        q += " AND lang=?"; args.append(lang)
+        codes = material_lang_tiers(lang)[0]   # 繁体推文也列出旧的「中文（简繁未定）」素材；简繁未定的推文简繁都列
+        q += f" AND lang IN ({','.join('?' * len(codes))})"; args.extend(codes)
     q += " ORDER BY usage_count ASC, id DESC"
     with get_conn() as conn:
         return conn.execute(q, args).fetchall()
@@ -224,7 +263,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
             ui.label("目标推文").classes("text-xs text-gray-500")
             ui.label(tweet_text).classes("text-sm whitespace-pre-wrap")
         with ui.row().classes("items-center gap-3"):
-            all_sw = ui.switch(f"显示所有语言的素材（默认只显示与推文相同的「{LANG_NAME.get(lang or 'und', lang)}」）", value=not lang)
+            all_sw = ui.switch(f"显示所有语言的素材（默认只显示与推文相同的「{lang_name(lang or 'und')}」）", value=not lang)
         state = {"mid": None}
         listbox = ui.column().classes("w-full gap-1")
         ui.label("选中一条后可在下面改文案，改完的内容会进任务队列（不会改素材库原文）。").classes("text-xs text-gray-400")
@@ -244,7 +283,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
                     sel = state["mid"] == m["id"]
                     with ui.card().classes("w-full cursor-pointer " + ("border-2 border-sky-500 bg-sky-50" if sel else "hover:bg-gray-50")).on("click", choose):
                         with ui.row().classes("items-center gap-2"):
-                            ui.badge(m["lang"], color=None).classes("bg-slate-500")
+                            ui.badge(lang_name(m["lang"]), color=None).classes("bg-slate-500")
                             if m["scenario_tags"]:
                                 ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
                             ui.label(f"用过 {m['usage_count']} 次").classes("text-xs text-gray-400")

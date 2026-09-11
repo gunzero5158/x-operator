@@ -15,6 +15,7 @@ import time
 import httpx
 
 from .. import config
+from ..core.langdetect import material_lang_tiers, rule_langs_normalized
 from ..db.database import get_conn, utcnow_iso
 from . import prompts
 
@@ -201,7 +202,8 @@ class LLMClient:
 
     def match_heuristic(self, tweet_text: str, tweet_lang: str, candidates: list[dict]) -> dict:
         # 选与推文同语言的第一条候选；没有则跳过（真实 LLM 会做语义匹配）
-        same_lang = [c for c in candidates if c.get("lang") == tweet_lang]
+        same_codes = material_lang_tiers(tweet_lang)[0]
+        same_lang = [c for c in candidates if c.get("lang") in same_codes]
         pick = (same_lang or candidates)
         if not pick:
             return {"skip": True, "material_id": None, "reply_text": "", "confidence": 0.0,
@@ -330,7 +332,7 @@ class LLMClient:
         obj = self.chat_json("rule_gen", messages, required_keys=["name", "keywords", "semantic_criteria", "langs"],
                              temperature=0.5)
         obj["keywords"] = [str(k).strip() for k in (obj.get("keywords") or []) if str(k).strip()]
-        obj["langs"] = [str(x).strip().lower() for x in (obj.get("langs") or []) if str(x).strip()]
+        obj["langs"] = rule_langs_normalized(str(x) for x in (obj.get("langs") or []) if str(x).strip())
         return obj
 
     def generate_materials(self, kind: str, lang: str, topic: str, style: str, scenario: str,

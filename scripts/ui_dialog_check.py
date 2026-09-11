@@ -12,7 +12,7 @@ from pathlib import Path
 
 os.environ["X_OPERATOR_MOCK"] = "1"
 
-from nicegui import ui  # noqa: E402
+from nicegui import ElementFilter, ui  # noqa: E402
 from nicegui.testing import User  # noqa: E402
 from nicegui.testing.user_interaction import UserInteraction  # noqa: E402
 
@@ -94,7 +94,7 @@ async def test_material_new_defaults_to_auto_lang_and_saves_detected(user: User)
 
 
 async def test_material_manual_lang_overrides_auto(user: User):
-    """手选托底：语言下拉手选「中文」后，即使正文是英文也按手选存；判不出语言且没手选时会拦下来。"""
+    """手选托底：语言下拉手选「繁体中文」后，即使正文判不出也按手选存；判不出语言且没手选时会拦下来。"""
     _pages()
     await user.open("/materials")
     user.find("新建素材").click()
@@ -103,13 +103,13 @@ async def test_material_manual_lang_overrides_auto(user: User):
     await user.should_see("暂时判不出语言")
     _click_button(user, "保存")
     await user.should_see("请在「语言」里手选一个")
-    _choose(user, "语言", "zh")
-    await user.should_see("手选：中文")
+    _choose(user, "语言", "zh-Hant")
+    await user.should_see("手选：繁体中文")
     _click_button(user, "保存")
     await user.should_see("已保存")
     with get_conn() as conn:
         row = conn.execute("SELECT lang FROM materials WHERE text=?", ("🎉🎉 https://example.com",)).fetchone()
-    assert row and row["lang"] == "zh", dict(row) if row else row
+    assert row and row["lang"] == "zh-Hant", dict(row) if row else row
 
 
 async def test_material_edit_keeps_stored_lang(user: User):
@@ -592,3 +592,71 @@ async def test_rule_dialog_views_range(user: User):
         row = c.execute("SELECT min_views, max_views FROM search_rules WHERE name='区间规则'").fetchone()
         assert (row["min_views"], row["max_views"]) == (1000, 50000), dict(row)
         c.execute("DELETE FROM search_rules WHERE name='区间规则'"); c.commit()
+
+
+async def test_material_detects_zh_script(user: User):
+    """素材语言自动判断分简繁：繁体字识别成繁体中文；简繁写法一样的提示按简体存、可手选繁体。"""
+    _pages()
+    await user.open("/materials")
+    user.find("新建素材").click()
+    sel = [e for e in user.find("语言").elements if isinstance(e, ui.select)][0]
+    assert {"zh-Hans", "zh-Hant"} <= set(sel.options) and "zh" not in sel.options
+    ta = [e for e in user.find(kind=ui.textarea).elements][0]
+    ta.set_value("這個工具真的很好用")
+    await user.should_see("识别为「繁体中文」")
+    ta.set_value("我在日本工作")
+    await user.should_see("看不出是哪种")
+
+
+async def test_rule_dialog_reply_account_list_and_zh_langs(user: User):
+    """规则弹窗：语言可选简体 / 繁体中文；回复账号可选「只用指定的账号」（多选名单）或「排除某些账号」，
+    名单为空拒绝保存；保存落库，卡片显示「轮流：@acc1、@small1」/「自动轮流，排除 @small1」。"""
+    _pages()
+    with get_conn() as c:
+        aid = {r["handle"]: r["id"] for r in c.execute("SELECT id, handle FROM accounts")}
+
+    def fields():
+        with user.client:   # user.find 只找可见的；名单下拉在「自动轮流」时是隐藏的
+            sels = list(ElementFilter(kind=ui.select))
+        mode = [e for e in sels if e._props.get("label") == "回复账号"][0]
+        ids = [e for e in sels if e.multiple and e.options and all(isinstance(k, int) for k in e.options)][0]
+        return mode, ids
+
+    def fill(name):
+        [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0].set_value(name)
+        [e for e in user.find("关键词（逗号隔开").elements if isinstance(e, ui.textarea)][0].set_value("kw")
+        [e for e in user.find("语义筛选条件").elements if isinstance(e, ui.textarea)][0].set_value("找人")
+
+    await user.open("/rules")
+    _click_button(user, "新建规则")
+    lang = [e for e in user.find("推文语言（可多选）").elements if isinstance(e, ui.select)][0]
+    assert {"zh-Hans", "zh-Hant"} <= set(lang.options) and "zh" not in lang.options, list(lang.options)
+    lang.set_value(["zh-Hans", "zh-Hant"])
+    mode, ids = fields()
+    assert mode.value == "auto" and not ids.visible
+    UserInteraction(user, {mode}, None).trigger("update:modelValue", {"value": list(mode.options).index("include")})
+    await user.should_see("用哪些账号回复（选 1 个 = 固定，多个 = 轮流）")
+    assert ids.visible
+    fill("名单规则")
+    _click_button(user, "保存")
+    await user.should_see("名单里一个账号都没选")
+    ids.set_value([aid["acc1"], aid["small1"]])
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    await user.should_see("回复账号：轮流：@acc1、@small1")
+    await user.should_see("简体中文 / 繁体中文")
+
+    _click_button(user, "新建规则")
+    mode, ids = fields()
+    UserInteraction(user, {mode}, None).trigger("update:modelValue", {"value": list(mode.options).index("exclude")})
+    await user.should_see("不参与轮流的账号")
+    ids.set_value([aid["small1"]])
+    fill("排除规则")
+    _click_button(user, "保存")
+    await user.should_see("回复账号：自动轮流，排除 @small1")
+    with get_conn() as c:
+        got = {r["name"]: (r["lang"], r["reply_account_mode"], r["reply_account_ids"], r["reply_account_id"])
+               for r in c.execute("SELECT * FROM search_rules WHERE name IN ('名单规则','排除规则')")}
+        c.execute("DELETE FROM search_rules WHERE name IN ('名单规则','排除规则')"); c.commit()
+    assert got["名单规则"] == ("zh-Hans,zh-Hant", "include", f"[{aid['acc1']}, {aid['small1']}]", None), got
+    assert got["排除规则"][1:] == ("exclude", f"[{aid['small1']}]", None), got

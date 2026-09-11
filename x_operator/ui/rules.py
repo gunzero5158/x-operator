@@ -9,7 +9,7 @@ from nicegui import run, ui
 
 from .. import config
 from ..core import media
-from ..core.accounts import account_options
+from ..core.accounts import account_options, reply_account_summary
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule, views_range_text,
                            langs_label, rule_langs, rule_source_kind)
@@ -28,7 +28,8 @@ HINTS = {
     "keywords": "最简单：逗号隔开多个词，命中任意一个即可（中文词会自动整词匹配）。高级：直接写 X 语法，空格=同时包含、OR=或、-词=排除。"
                 "语言不用写，下面勾选；转推默认排除。",
     "semantic": "写给打分 AI 看的：要什么样的人/内容、排除什么。例：作者本人在抱怨某类工具太贵或在找替代；排除新闻、教程、招聘、广告。",
-    "langs": "只保留这些语言的推文。推荐按目标人群勾 1~3 个；留空=不限。",
+    "langs": "只保留这些语言的推文。推荐按目标人群勾 1~3 个；留空=不限。中文分简体 / 繁体：X 只能按「中文」搜，"
+             "简繁由本工具按推文用字判断后再筛（看不出简繁的短推文两边都放行）；两种都要就都勾。",
     "min_score": "AI 给每条推文打 0-10 分，≥ 此分才进下一步。原则是默认保留：沾边就 ≥6，新闻/广告 3~5，看不懂 0~2。推荐 5；想更严 7。",
     "max_results": "每次运行最多拉多少条。推荐 15~30；官方 API 按条计费（约 $0.005/条），小号 Cookie 通道建议 ≤50 防风控。",
     "lookback": "首次运行（或重置游标后）往回抓多少小时内的推文；之后每次只抓上次之后的新内容。推荐 24；冷门词可 72~168。"
@@ -53,18 +54,18 @@ def _save(rid, data: dict):
     with get_conn() as conn:
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
-                         "max_results_per_run=?, lookback_hours=?, min_views=?, max_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
+                         "max_results_per_run=?, lookback_hours=?, min_views=?, max_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=NULL, reply_account_mode=?, reply_account_ids=?, "
                          "source_kind=?, feed_account_id=?, read_media=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_mode"], data["reply_account_ids"],
                           data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"],
                           data["media_mode"], data["media_files"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, min_views, max_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id, "
-                         "read_media, auto_approve, auto_approve_min_confidence, media_mode, media_files) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, max_views, reply_mode, ai_brief, allow_polish, reply_account_mode, reply_account_ids, source_kind, feed_account_id, "
+                         "read_media, auto_approve, auto_approve_min_confidence, media_mode, media_files) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_mode"], data["reply_account_ids"],
                           data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"],
                           data["media_mode"], data["media_files"]))
         conn.commit()
@@ -133,7 +134,7 @@ def register(jobs) -> None:
                 with get_conn() as conn:
                     rows = conn.execute("SELECT * FROM search_rules ORDER BY id").fetchall()
                 counts = _rule_counts()
-                acc_opts = account_options()
+                acc_opts = account_options(with_auto=False)
                 with body:
                     if not rows:
                         ui.label("暂无搜索规则。点「新建规则」手动填，或点「AI 生成规则」用大白话描述你想找谁。").classes("text-gray-400")
@@ -163,8 +164,7 @@ def register(jobs) -> None:
                                         "置信度达到阈值的回复不经人工审核直接进待发送")
                                 tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
                                     "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
-                                tag("回复账号：" + ("自动轮流" if not r["reply_account_id"] else acc_opts.get(r["reply_account_id"], "（已删除→自动轮流）")),
-                                    "account", "用哪个账号回")
+                                tag("回复账号：" + reply_account_summary(r, acc_opts), "account", "用哪个账号回")
                                 if not r["enabled"]:
                                     tag("已停用", "off", "「运行所有规则」会跳过它；卡片上的「运行此规则」仍可单独跑")
                                 ui.label(f"上次运行 {fmt_time(r['last_run_at']) if r['last_run_at'] else '未运行'}"
@@ -252,7 +252,7 @@ def register(jobs) -> None:
                               "否则这条规则的打分会失败", type="warning", multi_line=True, timeout=8000)
             read_media.on("update:model-value", warn_media)
             mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf = reply_mode_fields(
-                g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后", g("reply_account_id", 0),
+                g("reply_mode", "material"), g("ai_brief", ""), g("allow_polish", 0), "抓到达标推文后", r,
                 bool(g("auto_approve", 0)), float(g("auto_approve_min_confidence", 0.7) or 0.7),
                 g("media_files", "[]") or "[]", g("media_mode", "fixed") or "fixed")
 
@@ -264,10 +264,11 @@ def register(jobs) -> None:
                 lo, hi = max(0, int(min_views.value or 0)), max(0, int(max_views.value or 0))
                 if lo and hi and lo > hi:
                     ui.notify(f"观看量下限 {lo} 比上限 {hi} 还大，这样一条都抓不到；请调一下，或把其中一个填 0", type="negative", multi_line=True); return
-                problem = reply_mode_invalid(mode, brief, media_mode, mf)
+                problem = reply_mode_invalid(mode, brief, media_mode, mf, acc)
                 if problem:
                     ui.notify(problem, type="negative", multi_line=True); return
                 mm, mfiles = media_values(media_mode, mf)
+                acc_mode, acc_ids = acc.values()
                 data = dict(name=name.value.strip(), kq=(kq.value or "").strip() if src.value == "search" else "", sc=sc.value.strip(),
                             source_kind=src.value, feed_account_id=(int(feed_acc.value) or None) if (src.value != "search" and feed_acc.value) else None,
                             lang=",".join(x for x in (lang.value or []) if x),
@@ -276,7 +277,7 @@ def register(jobs) -> None:
                             lookback=max(1, int(lookback.value or 24)),
                             min_views=lo, max_views=hi, read_media=1 if read_media.value else 0,
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0,
-                            reply_account_id=(int(acc.value) or None) if acc.value else None,
+                            reply_account_mode=acc_mode, reply_account_ids=acc_ids,
                             auto_approve=auto_approve_values(auto_sw, auto_thr)[0], auto_thr=auto_approve_values(auto_sw, auto_thr)[1],
                             media_mode=mm if mode.value == "ai_write" else "fixed", media_files=mfiles if mode.value == "ai_write" else "[]")
                 try:

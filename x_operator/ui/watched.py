@@ -9,7 +9,7 @@ from nicegui import run, ui
 from ..adapters import factory
 from ..adapters.base import XClientError
 from ..core import media
-from ..core.accounts import account_options
+from ..core.accounts import account_options, reply_account_summary
 from ..core.matcher import REPLY_MODE_LABEL
 from ..core.readpool import ReadPool
 from ..db.database import get_conn, utcnow_iso
@@ -87,7 +87,7 @@ def register(jobs) -> None:
                 body.clear()
                 with get_conn() as conn:
                     rows = conn.execute("SELECT * FROM watched_users ORDER BY id").fetchall()
-                acc_opts = account_options()
+                acc_opts = account_options(with_auto=False)
                 with body:
                     if not rows:
                         ui.label("暂无监控推主").classes("text-gray-400")
@@ -103,8 +103,7 @@ def register(jobs) -> None:
                                         tag(f"首次回溯 {u['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
                                         tag("回复方式：" + REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"]),
                                             "ai" if u["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
-                                        tag("回复账号：" + ("自动轮流" if not u["reply_account_id"] else acc_opts.get(u["reply_account_id"], "（已删除→自动轮流）")),
-                                            "account", "用哪个账号回")
+                                        tag("回复账号：" + reply_account_summary(u, acc_opts), "account", "用哪个账号回")
                                         if u["reply_mode"] == "ai_write" and media.parse_files(u["media_files"]):
                                             n = len(media.parse_files(u["media_files"]))
                                             tag(f"📎 {'素材池 ' if u['media_mode'] == 'pool' else ''}{n} 个附件", "metric",
@@ -140,23 +139,24 @@ def register(jobs) -> None:
             incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
             hint(HINTS["include"])
             mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf = reply_mode_fields(
-                u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后", u["reply_account_id"],
+                u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后", u,
                 bool(u["auto_approve"]), float(u["auto_approve_min_confidence"] or 0.7), u["media_files"] or "[]", u["media_mode"] or "fixed")
 
             def save():
-                problem = reply_mode_invalid(mode, brief, media_mode, mf)
+                problem = reply_mode_invalid(mode, brief, media_mode, mf, acc)
                 if problem:
                     ui.notify(problem, type="negative", multi_line=True); return
                 with get_conn() as conn:
                     aa, thr = auto_approve_values(auto_sw, auto_thr)
                     mm, mfiles = media_values(media_mode, mf)
+                    acc_mode, acc_ids = acc.values()
                     if mode.value != "ai_write":
                         mm, mfiles = "fixed", "[]"
                     conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=?, "
-                                 "reply_account_id=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
+                                 "reply_account_id=NULL, reply_account_mode=?, reply_account_ids=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
                                  ((note.value or "").strip(), 1 if incl.value else 0, max(1, int(lookback.value or 24)), mode.value,
                                   (brief.value or "").strip(), 1 if polish.value else 0,
-                                  (int(acc.value) or None) if acc.value else None, aa, thr, mm, mfiles, u["id"]))
+                                  acc_mode, acc_ids, aa, thr, mm, mfiles, u["id"]))
                     conn.commit()
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 

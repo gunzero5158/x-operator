@@ -9,6 +9,7 @@ from nicegui import run, ui
 
 from ..core import media, textlimit
 from ..core.compliance import SKIP_REASON_LABEL
+from ..core.langdetect import lang_name
 from ..db.database import get_conn, utcnow_iso
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
                      shell, source_label, tag, tag_legend, tweet_link)
@@ -436,7 +437,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                         tag(f"相关性 {sc}/10" + (f"（达标线 {thr}）" if it["tgt_source"] == "search" else ""),
                             "metric_ok" if sc >= thr else "metric_bad", "AI 给的相关性分；绿 = 达到规则的达标分，红 = 没达到")
                     if it["tgt_lang"]:
-                        tag(it["tgt_lang"], "metric", "推文语言")
+                        tag(lang_name(it["tgt_lang"]), "metric", "推文语言")
                     if it["tgt_views"] is not None:
                         tag(f"👁 {fmt_views(it['tgt_views'])}", "metric", "抓取时的观看量")
                     if it["tgt_created_at"]:

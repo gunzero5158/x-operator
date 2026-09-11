@@ -77,9 +77,42 @@ with get_conn() as conn:
     rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
     assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
     assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
-assert ver == 21 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == schema.SCHEMA_VERSION and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
+
+# ---------- 1b. v21→v22：「中文」拆成简体 / 繁体；指定的回复账号改成账号名单 ----------
+fresh_conn_state()
+v21 = TMP / 'v21.db'
+c = sqlite3.connect(v21); c.row_factory = sqlite3.Row
+c.executescript(schema.DDL); c.execute("INSERT INTO schema_version(version) VALUES (21)")
+c.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES ('a1','unofficial','{}')")
+for text in ("我們的工具很好用", "这个工具很好用", "我在日本工作"):
+    c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply',?,'zh','active')", (text,))
+c.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('post','這是發帖素材','zh','active')")
+c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,reply_account_id) VALUES ('r','k','s','zh,ja',1)")
+c.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang) VALUES ('r2','k','s','ja')")
+c.execute("INSERT INTO watched_users(handle,x_user_id,reply_account_id) VALUES ('w','1',1)")
+for i, text in enumerate(("請問這個多少錢", "这个多少钱", "我在日本工作")):
+    c.execute("INSERT INTO target_tweets(tweet_id,author_id,author_handle,text,lang,tweet_created_at,source,process_status) "
+              "VALUES (?,'x','x',?,'zh','2026-01-01T00:00:00Z','search','new')", (str(100 + i), text))
+c.execute("INSERT INTO scheduled_posts(account_id, content_mode, pool_lang, schedule_type, schedule_expr) VALUES (1,'pool','zh','daily','09:00')")
+c.commit(); c.close()
+init_db(v21)
+with get_conn() as conn:
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == schema.SCHEMA_VERSION
+    got = [r["lang"] for r in conn.execute("SELECT lang FROM materials ORDER BY id")]
+    assert got == ["zh-Hant", "zh-Hans", "zh-Hans", "zh-Hant"], got        # 看不出简繁的素材按简体
+    got = [r["lang"] for r in conn.execute("SELECT lang FROM target_tweets ORDER BY id")]
+    assert got == ["zh-Hant", "zh-Hans", "zh"], got                        # 看不出简繁的推文保留 zh（简繁未定）
+    got = [r["lang"] for r in conn.execute("SELECT lang FROM search_rules ORDER BY id")]
+    assert got == ["zh-Hans,zh-Hant,ja", "ja"], got                         # 选过「中文」= 简繁都要，行为不变
+    assert conn.execute("SELECT pool_lang FROM scheduled_posts").fetchone()["pool_lang"] == "zh-Hant"   # 发帖素材里繁体多
+    for tbl in ("search_rules", "watched_users"):
+        r = conn.execute(f"SELECT reply_account_id, reply_account_mode, reply_account_ids FROM {tbl} ORDER BY id").fetchone()
+        assert (r["reply_account_id"], r["reply_account_mode"], r["reply_account_ids"]) == (None, "include", "[1]"), (tbl, dict(r))
+    assert conn.execute("SELECT reply_account_mode FROM search_rules WHERE name='r2'").fetchone()["reply_account_mode"] == "auto"
+print("[1b] v21→v22 升级 OK：中文素材 / 抓取记录按字形分简繁、规则的「中文」变简 + 繁、定时发帖跟多数、指定回复账号改名单")
 
 # ---------- 2. 全新库：干干净净 ----------
 fresh_conn_state()
@@ -102,7 +135,7 @@ print("[3a] 无账号提示 OK:", m0.as_msg()[:40])
 with get_conn() as conn:
     conn.execute("INSERT INTO accounts(handle, access_type, is_primary, credentials, active_hours_start, active_hours_end, min_interval_sec, max_interval_sec) "
                  "VALUES ('tester','official',1,'{}','00:00','00:00',0,0)")
-    for lang, text in (("ja", "月額で悩んでいるなら、買い切りの選択肢もありますよ"), ("en", "If pricing is the blocker, there are cheaper options."), ("zh", "如果卡在价格上，可以试试便宜点的方案")):
+    for lang, text in (("ja", "月額で悩んでいるなら、買い切りの選択肢もありますよ"), ("en", "If pricing is the blocker, there are cheaper options."), ("zh-Hans", "如果卡在价格上，可以试试便宜点的方案")):
         conn.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply',?,?,'active')", (text, lang))
     conn.execute("INSERT INTO watched_users(handle,x_user_id) VALUES ('someone','1234567')")
     conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score,max_results_per_run) VALUES ('规则A','(API cost) -is:retweet','找为成本发愁的人','ja,en',6,15)")
@@ -587,7 +620,7 @@ def _pick_unqueued():
 tid = _pick_unqueued()
 with get_conn() as conn:
     conn.execute("UPDATE target_tweets SET lang='ko' WHERE id=?", (tid,)); conn.commit()   # 素材库里没有韩语素材
-out = jobs.match.rematch(tid); assert out.status == "queued" and "没有「ko」" in out.reason, out
+out = jobs.match.rematch(tid); assert out.status == "queued" and "没有「韩语」" in out.reason, out
 tid = _pick_unqueued()
 orig_match = jobs.llm.match_reply
 jobs.llm.match_reply = lambda *a, **k: (_ for _ in ()).throw(_LE("模型拒绝"))
@@ -943,7 +976,7 @@ for r_ in (rel1, rel2):
 assert mediam.describe([rel1, rel2]) == "2 张图片" and mediam.describe([mediam.new_rel_path("v.mp4")]) == "1 个视频"
 assert mediam.parse_files('["a","b"]') == ["a", "b"] and mediam.parse_files("bad json") == [] and mediam.parse_files(None) == []
 with get_conn() as conn:
-    conn.execute("INSERT INTO materials(kind,text,lang,status,media_files) VALUES ('reply','带图回复素材','zh','active',?)", (mediam.dump_files([rel1, rel2]),))
+    conn.execute("INSERT INTO materials(kind,text,lang,status,media_files) VALUES ('reply','带图回复素材','zh-Hans','active',?)", (mediam.dump_files([rel1, rel2]),))
     pic_mat = conn.execute("SELECT id FROM materials WHERE text='带图回复素材'").fetchone()["id"]
     t = conn.execute("SELECT id, tweet_id FROM target_tweets WHERE process_status IN ('filtered','no_match') "
                      "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) "
@@ -1511,6 +1544,119 @@ msg = _watched_add("someone_new", "")
 assert "无法解析用户" in msg and "上限 1" in msg, msg
 config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40)
 print("[6f24] 回归：读取账号池耗尽时手动生成草稿不受影响、查用户如实报原因 OK")
+
+# [6f25] 简体 / 繁体中文分开：识别、X 查询、规则筛选、挑素材、提示词
+from x_operator.core import langdetect as L  # noqa: E402
+from x_operator.llm import prompts as _pr  # noqa: E402
+assert L.detect("最近在做个小项目，订阅费顶不住了") == "zh-Hans" and L.detect("最近在做個小專案，訂閱費頂不住了") == "zh-Hant"
+assert L.detect("我在日本工作") == "zh-Hans" and L.zh_script("我在日本工作") == ""          # 看不出简繁：素材按简体
+assert L.detect("東京の天気") == "ja"                                                          # 有假名仍是日语
+assert TweetData(tweet_id="1", author_id="a", author_handle="a", text="請問這個多少錢", lang="zh", created_at=datetime.now(timezone.utc),
+                 is_retweet=False, in_reply_to_tweet_id=None).lang == "zh-Hant"
+assert TweetData(tweet_id="1", author_id="a", author_handle="a", text="我在日本工作", lang="zh", created_at=datetime.now(timezone.utc),
+                 is_retweet=False, in_reply_to_tweet_id=None).lang == "zh"
+assert TweetData(tweet_id="1", author_id="a", author_handle="a", text="我在日本工作", lang="zh-tw", created_at=datetime.now(timezone.utc),
+                 is_retweet=False, in_reply_to_tweet_id=None).lang == "zh-Hant"               # 字形看不出时信 X 的 zh-tw
+assert effective_query({"keyword_query": "kw", "lang": "zh-Hans,zh-Hant"}) == "kw (lang:zh) -is:retweet"
+assert effective_query({"keyword_query": "kw", "lang": "zh-Hant,ja"}) == "kw (lang:zh OR lang:ja) -is:retweet"
+assert L.lang_allowed("zh-Hans", ["zh-Hans"]) and not L.lang_allowed("zh-Hans", ["zh-Hant"])
+assert L.lang_allowed("zh", ["zh-Hant"]) and L.lang_allowed("zh-Hant", ["zh", "en"]) and L.lang_allowed("und", ["ja"])
+assert L.rule_langs_normalized(["zh", "ZH-TW", "ja"]) == ["zh-Hans", "zh-Hant", "ja"]
+assert "繁体中文" in _pr.write_user("t", "zh-Hant", "b", []) and "简体中文" in _pr.post_write_user("b", "zh-Hans", [], [])
+assert "zh-Hant" in _pr.RULE_GEN_SYSTEM and "简繁" in _pr.WRITE_SYSTEM
+# 规则只要繁体：mock 那条简体中文推文在抓取端就被挡下，理由写明语言
+with get_conn() as conn:
+    conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,min_llm_score,max_results_per_run) "
+                 "VALUES ('繁体规则','kw','找人','zh-Hant',6,15)"); conn.commit()
+    zr = conn.execute("SELECT id FROM search_rules WHERE name='繁体规则'").fetchone()["id"]
+_budget0 = config.get_int("daily_read_budget", 330); config.set_value("daily_read_budget", 0)
+jobs.search.run_once(rule_ids=[zr])
+config.set_value("daily_read_budget", _budget0)
+with get_conn() as conn:
+    rows = conn.execute("SELECT lang, llm_relevance_reason FROM target_tweets WHERE source_rule_id=? AND source='search' AND lang LIKE 'zh%'", (zr,)).fetchall()
+assert rows and all(r["lang"] == "zh-Hans" for r in rows), [dict(r) for r in rows]
+assert all("推文语言是 简体中文，不在规则选的语言（繁体中文）内" in (r["llm_relevance_reason"] or "") for r in rows), [dict(r) for r in rows]
+# 挑素材：繁体推文没有繁体素材 → 先用简体并提示简繁；有了繁体素材就用它；简繁未定的推文两边都算同语言
+cands, note = jobs.match.pick_candidates("zh-Hant", [])
+assert cands and all(c["lang"] == "zh-Hans" for c in cands) and "简繁" in note, (note, [c["lang"] for c in cands])
+with get_conn() as conn:
+    conn.execute("INSERT INTO materials(kind,text,lang,status) VALUES ('reply','這個方案真的很划算','zh-Hant','active')"); conn.commit()
+cands, note = jobs.match.pick_candidates("zh-Hant", [])
+assert note == "" and [c["lang"] for c in cands] == ["zh-Hant"], (note, [c["lang"] for c in cands])
+cands, note = jobs.match.pick_candidates("zh", [])
+assert note == "" and {c["lang"] for c in cands} == {"zh-Hans", "zh-Hant"}, (note, [c["lang"] for c in cands])
+with get_conn() as conn:
+    conn.execute("DELETE FROM materials WHERE text='這個方案真的很划算'")
+    conn.execute("DELETE FROM search_rules WHERE id=?", (zr,)); conn.commit()
+print("[6f25] 简繁中文分开（识别 / X 查询只写 lang:zh / 规则按简繁筛 / 繁体推文先用繁体素材 / 提示词写明字形）OK")
+
+# [6f26] 回复账号：只用指定的几个（轮流）/ 自动轮流但排除某些 / 排除光了不生成 / 卡片说法 / 旧的单个指定账号照认
+from x_operator.core.accounts import reply_account_setting, reply_account_summary  # noqa: E402
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='active' WHERE handle IN ('tester','small1','small2')"); conn.commit()
+    active = conn.execute("SELECT * FROM accounts WHERE status='active'").fetchall()
+aid = {a["handle"]: a["id"] for a in active}
+tester_row = next(a for a in active if a["handle"] == "tester")
+non_primary = [a["id"] for a in active if not a["is_primary"]]
+
+
+def _picks(cfg, n=200):
+    """连挑 n 次，每次给挑中的号塞一条待审核（模拟负载），返回挑中的 id 集合与最后一句说明；测完删掉塞的条目。"""
+    seen, note = set(), ""
+    try:
+        for _ in range(n):
+            acc, note = choose_reply_account(cfg, tester_row)
+            if acc is None:
+                return None, note
+            seen.add(acc["id"])
+            with get_conn() as conn:
+                any_tt = conn.execute("SELECT id FROM target_tweets LIMIT 1").fetchone()["id"]
+                conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at) "
+                             "VALUES (?,'reply',?,'__pool_test__','pending',?)", (acc["id"], any_tt, utcnow_iso())); conn.commit()
+            if len(seen) >= 2 and n > 20:
+                break
+        return seen, note
+    finally:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM review_queue WHERE final_text='__pool_test__'"); conn.commit()
+
+
+seen, note = _picks({"reply_account_mode": "include", "reply_account_ids": json.dumps([aid["tester"], aid["small1"]])})
+assert seen == {aid["tester"], aid["small1"]} and "在指定的 2 个账号里轮流" in note, (seen, note)   # 主号选进名单也参与
+seen, note = _picks({"reply_account_mode": "include", "reply_account_ids": json.dumps([aid["small2"]])}, n=5)
+assert seen == {aid["small2"]} and "由指定账号 @small2 回复" in note, (seen, note)
+seen, note = _picks({"reply_account_mode": "exclude", "reply_account_ids": json.dumps([aid["small1"]])}, n=30)
+assert aid["small1"] not in seen and aid["tester"] not in seen and "已排除 1 个账号" in note, (seen, note)
+seen, note = _picks({"reply_account_mode": "exclude", "reply_account_ids": json.dumps(non_primary)}, n=3)
+assert seen == {aid["tester"]} and "没有启用中的小号可轮流（已排除" in note, (seen, note)   # 小号全排除 → 主号
+seen, note = _picks({"reply_account_mode": "exclude", "reply_account_ids": json.dumps(list(aid.values()))}, n=1)
+assert seen is None and "排除之后没有启用中的账号可用" in note, (seen, note)
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='paused' WHERE handle='small2'"); conn.commit()
+seen, note = _picks({"reply_account_mode": "include", "reply_account_ids": json.dumps([aid["small2"]])}, n=1)
+assert aid["small2"] not in seen and "指定的回复账号已删除或未启用，改为自动轮流" in note, (seen, note)
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='active' WHERE handle='small2'"); conn.commit()
+# 流水线：规则把所有号都排除了 → 不生成草稿，原因写进抓取记录
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_account_mode='exclude', reply_account_ids=? WHERE id=?", (json.dumps(list(aid.values())), rule["id"]))
+    conn.commit()
+    tid = conn.execute("SELECT id FROM target_tweets WHERE source='search' AND source_rule_id=? AND process_status IN ('filtered','no_match') "
+                       "AND tweet_id NOT IN (SELECT tweet_id FROM interactions) "
+                       "AND id NOT IN (SELECT target_tweet_id FROM review_queue WHERE target_tweet_id IS NOT NULL) LIMIT 1", (rule["id"],)).fetchone()["id"]
+out = jobs.match.rematch(tid)
+assert out.status == "no_match" and "排除之后没有启用中的账号可用" in out.reason, out
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET reply_account_mode='auto', reply_account_ids='[]' WHERE id=?", (rule["id"],)); conn.commit()
+# 设法解析与卡片说法
+assert reply_account_setting({"reply_account_id": aid["small1"]}) == ("include", [aid["small1"]])       # 旧数据
+assert reply_account_setting({"reply_account_mode": "include", "reply_account_ids": "[]"}) == ("auto", [])
+assert reply_account_setting({"reply_account_mode": "exclude", "reply_account_ids": "坏数据"}) == ("auto", [])
+assert reply_account_summary(None) == "自动轮流"
+assert reply_account_summary({"reply_account_mode": "include", "reply_account_ids": json.dumps([aid["small1"], aid["small2"]])}) == "轮流：@small1、@small2"
+assert reply_account_summary({"reply_account_mode": "include", "reply_account_ids": json.dumps([aid["small1"]])}) == "@small1"
+assert reply_account_summary({"reply_account_mode": "exclude", "reply_account_ids": json.dumps([aid["small1"], 99999])}) == "自动轮流，排除 @small1、（已删除）"
+print("[6f26] 回复账号名单（指定几个轮流 / 排除某些 / 排除光了不生成 / 停用退回自动 / 卡片说法 / 旧数据兼容）OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

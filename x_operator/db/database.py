@@ -92,6 +92,11 @@ _ADDED_COLUMNS = [
     ("watched_users", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
     # v21：搜索规则观看量门槛可设上限，和下限组成区间（0 = 不限）
     ("search_rules", "max_views", "INTEGER NOT NULL DEFAULT 0"),
+    # v22：回复账号可选「自动轮流 / 只用指定的几个（1 个 = 固定）/ 自动轮流但排除几个」，账号 id 存 JSON 列表
+    ("search_rules", "reply_account_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("search_rules", "reply_account_ids", "TEXT NOT NULL DEFAULT '[]'"),
+    ("watched_users", "reply_account_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("watched_users", "reply_account_ids", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -117,8 +122,64 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
         _rebuild_scheduled_posts(conn)
     if current < 12:
         _rebuild_scheduled_posts(conn, reason="v12：计划类型新增 interval（每隔 N 小时）")
+    if current < 22:
+        changed = _split_zh_langs(conn)
+        changed += _reply_account_modes(conn)
+        if changed:
+            logging.getLogger("x_operator.db").info("v22 迁移：%s", "；".join(changed))
     if current != SCHEMA_VERSION:
         conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
+
+
+def _split_zh_langs(conn: sqlite3.Connection) -> list[str]:
+    """v22：语言「中文」拆成简体 zh-Hans / 繁体 zh-Hant。
+    素材、抓取记录按正文字形判断（素材看不出来按简体，抓取记录看不出来保留 zh = 简繁未定）；
+    搜索规则里选过「中文」的改成简繁都选（行为不变）；定时发帖的语言按发帖素材里多的那种。"""
+    from ..core.langdetect import ZH_HANS, normalize, refine_tweet_lang, rule_langs_normalized, zh_script
+    out: list[str] = []
+    n = 0
+    for r in conn.execute("SELECT id, text, lang FROM materials").fetchall():
+        if normalize(r["lang"]) in ("zh", "zh-Hans", "zh-Hant") and r["lang"] not in ("zh-Hans", "zh-Hant"):
+            new = zh_script(r["text"]) if normalize(r["lang"]) == "zh" else normalize(r["lang"])
+            conn.execute("UPDATE materials SET lang=? WHERE id=?", (new or ZH_HANS, r["id"])); n += 1
+    if n:
+        out.append(f"{n} 条中文素材分成了简体 / 繁体")
+    n = 0
+    for r in conn.execute("SELECT id, text, lang FROM target_tweets WHERE lang IS NOT NULL AND lower(lang) LIKE 'zh%'").fetchall():
+        new = refine_tweet_lang(r["lang"], r["text"] or "")
+        if new != r["lang"]:
+            conn.execute("UPDATE target_tweets SET lang=? WHERE id=?", (new, r["id"])); n += 1
+    if n:
+        out.append(f"{n} 条中文抓取记录标出了简繁")
+    n = 0
+    for r in conn.execute("SELECT id, lang FROM search_rules").fetchall():
+        old = [x.strip() for x in (r["lang"] or "").split(",") if x.strip()]
+        new = rule_langs_normalized(old)
+        if new != old:
+            conn.execute("UPDATE search_rules SET lang=? WHERE id=?", (",".join(new), r["id"])); n += 1
+    if n:
+        out.append(f"{n} 条搜索规则的「中文」改成简体 + 繁体")
+    rows = conn.execute("SELECT id FROM scheduled_posts WHERE lower(pool_lang) LIKE 'zh%' AND pool_lang NOT IN ('zh-Hans','zh-Hant')").fetchall()
+    if rows:
+        cnt = {r["lang"]: r["c"] for r in conn.execute(
+            "SELECT lang, COUNT(*) c FROM materials WHERE kind='post' AND lang IN ('zh-Hans','zh-Hant') GROUP BY lang")}
+        pick = "zh-Hant" if cnt.get("zh-Hant", 0) > cnt.get("zh-Hans", 0) else "zh-Hans"
+        conn.execute("UPDATE scheduled_posts SET pool_lang=? WHERE lower(pool_lang) LIKE 'zh%' AND pool_lang NOT IN ('zh-Hans','zh-Hant')", (pick,))
+        out.append(f"{len(rows)} 个定时发帖计划的语言「中文」改成{'繁体' if pick == 'zh-Hant' else '简体'}")
+    return out
+
+
+def _reply_account_modes(conn: sqlite3.Connection) -> list[str]:
+    """v22：原来指定了回复账号的规则 / 推主 → 「只用指定的账号」、名单里就这一个（行为不变）。"""
+    out = []
+    for table, what in (("search_rules", "搜索规则"), ("watched_users", "监控推主")):
+        rows = conn.execute(f"SELECT id, reply_account_id FROM {table} WHERE reply_account_id IS NOT NULL AND reply_account_id>0").fetchall()
+        for r in rows:
+            conn.execute(f"UPDATE {table} SET reply_account_mode='include', reply_account_ids=?, reply_account_id=NULL WHERE id=?",
+                         (f"[{int(r['reply_account_id'])}]", r["id"]))
+        if rows:
+            out.append(f"{len(rows)} 个{what}的指定回复账号改成新的账号名单")
+    return out
 
 
 def _rebuild_scheduled_posts(conn: sqlite3.Connection, reason: str = "v9：内容来源可选素材池 / AI 主题") -> None:
