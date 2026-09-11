@@ -40,6 +40,14 @@ def account_options() -> dict:
     return opts
 
 
+def fallback_reply_account() -> sqlite3.Row | None:
+    """没有小号可轮流时兜底回复的账号：主号优先，其次任一启用账号。
+    不看读取额度 / 15 分钟读取上限——回复和抓取是两回事，抓取账号池挑不出号不该让手动生成草稿失败。"""
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM accounts WHERE status='active' "
+                            "ORDER BY is_primary DESC, (access_type='official') DESC, id LIMIT 1").fetchone()
+
+
 def choose_reply_account(cfg, fallback: sqlite3.Row) -> tuple[sqlite3.Row, str]:
     """返回 (账号行, 一句中文说明)。fallback = 抓取用的账号，兜底用。"""
     wanted = int(_cfg_get(cfg, "reply_account_id", 0) or 0)

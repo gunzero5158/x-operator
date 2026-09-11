@@ -20,7 +20,7 @@ from .. import config
 from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import media, textlimit
-from .accounts import choose_reply_account
+from .accounts import choose_reply_account, fallback_reply_account
 
 REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创作", "manual": "只抓取，手动处理"}
 
@@ -260,7 +260,6 @@ class MatchEngine:
     # ---------------- 内部 ----------------
     def _prepare(self, target_id: int, account: sqlite3.Row | None):
         """返回 (target, 回复账号, 错误, 账号说明)。account 传了就用它；没传按来源规则的「回复账号」选。"""
-        from .monitor import get_primary_account
         with get_conn() as conn:
             target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (target_id,)).fetchone()
             if target is None:
@@ -273,9 +272,9 @@ class MatchEngine:
                 return None, None, "该推文已经回复过，不能再回复", ""
         if account is not None:
             return target, account, "", ""
-        fallback = get_primary_account()
+        fallback = fallback_reply_account()
         if fallback is None:
-            return None, None, "没有状态为「启用」的账号", ""
+            return None, None, "没有状态为「启用」的账号，请到「设置 → 账号」添加并启用一个", ""
         reply_acc, note = choose_reply_account(load_source_cfg(target), fallback)
         return target, reply_acc, "", note
 

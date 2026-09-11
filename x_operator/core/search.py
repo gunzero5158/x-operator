@@ -110,6 +110,18 @@ def effective_query(rule: sqlite3.Row | dict) -> str:
     return q
 
 
+def views_range_text(min_views: int, max_views: int) -> str:
+    """观看量区间的中文写法：≥ 1000 / ≤ 5万 / 1000~5万 / 不限。"""
+    from ..ui.layout import fmt_views   # 延迟导入：只借用数字格式化
+    if min_views and max_views:
+        return f"{fmt_views(min_views)}~{fmt_views(max_views)}"
+    if min_views:
+        return f"≥ {fmt_views(min_views)}"
+    if max_views:
+        return f"≤ {fmt_views(max_views)}"
+    return "不限"
+
+
 def coerce_score(v) -> int:
     """LLM 返回的分数可能是 8、8.0、"8"、"8/10"、"八"……只认得出数字的，认不出记 0，钳到 0-10。"""
     if isinstance(v, bool):
@@ -187,8 +199,11 @@ class SearchJob:
             lookback_h = OFFICIAL_SEARCH_MAX_HOURS
         max_results = int(rule["max_results_per_run"])
         min_views = _row_int(rule, "min_views", 0)
-        # 没有观看量门槛：有游标抓上次之后的全部；没有游标（首次/重置后）只抓最近 lookback_hours 小时。
-        # 有观看量门槛：按热度排序、始终按时间窗搜（热门排序不按时间，游标没意义），已抓过的靠数据库去重。
+        max_views = _row_int(rule, "max_views", 0)
+        views_on = bool(min_views or max_views)
+        # 没有观看量下限：有游标抓上次之后的全部；没有游标（首次/重置后）只抓最近 lookback_hours 小时。
+        # 有下限：按热度排序、始终按时间窗搜（热门排序不按时间，游标没意义），已抓过的靠数据库去重。
+        # 只有上限：仍按时间排、游标照用，只是一页不够会继续翻（高于上限的丢掉不入库）。
         since_id = rule["newest_id_cursor"]
         start_time = None
         if min_views:
@@ -197,7 +212,7 @@ class SearchJob:
         elif not since_id and lookback_h:
             start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_h)
         scan_limit = 0
-        if min_views:
+        if views_on:
             scan_limit = min(SCAN_CAP, max_results * SCAN_FACTOR)
             if read_is_billed(account):
                 b = budget.current()
@@ -213,38 +228,50 @@ class SearchJob:
                 scan_limit = max_results * 3
             kind_label = SOURCE_KIND_LABEL[rule_source_kind(rule)]
             _p(0.05, f"规则「{rule['name']}」：正在读取 @{account['handle']} 的{kind_label}（{window}"
-                     + (f"，观看量 ≥ {min_views}" if min_views else "") + f"，最多扫 {scan_limit} 条）…")
+                     + (f"，观看量 {views_range_text(min_views, max_views)}" if views_on else "") + f"，最多扫 {scan_limit} 条）…")
             result = client.get_home_timeline(kind="for_you" if rule_source_kind(rule) == "feed_for_you" else "following",
                                               max_results=max_results, min_views=min_views, scan_limit=scan_limit,
-                                              max_age_h=lookback_h or None)
+                                              max_age_h=lookback_h or None, max_views=max_views)
             _log_read(account["id"], client.api_kind, "home_timeline", result.reads_consumed)
             if notes is not None:
                 notes.append(f"规则「{rule['name']}」：读取 @{account['handle']} 的{kind_label}"
                              f"（{'官方 API，计费' if read_is_billed(account) else '小号通道，不计费'}），扫描 {result.scanned} 条")
         else:
             _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{window}"
-                     + (f"，按热度排序找观看量 ≥ {min_views} 的，不够就翻页，最多扫 {scan_limit} 条" if min_views else "") + "）…")
+                     + (f"，{'按热度排序' if min_views else '按时间排序'}找观看量 {views_range_text(min_views, max_views)} 的，"
+                        f"不够就翻页，最多扫 {scan_limit} 条" if views_on else "") + "）…")
             result = client.search_recent(effective_query(rule), since_id=since_id,
                                           start_time=start_time, max_results=max_results,
-                                          min_views=min_views, scan_limit=scan_limit)
+                                          min_views=min_views, scan_limit=scan_limit, max_views=max_views)
             _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
         tweets = result.tweets
-        if min_views and notes is not None and result.scanned:
-            tip = (f"规则「{rule['name']}」：按热度排序扫描 {result.scanned} 条（{window}），观看量低于 {min_views} 的 {result.dropped_low_views} 条已跳过（不入库），"
-                   f"达标 {len(tweets)} 条")
-            if result.max_views_seen is not None:
-                tip += f"；这次扫描到的最高观看量是 {result.max_views_seen}"
-                if not tweets:
-                    tip += f"——门槛要调到 {result.max_views_seen} 以下才会有结果"
+        if views_on and notes is not None and result.scanned:
+            dropped = []
+            if result.dropped_low_views:
+                dropped.append(f"低于下限 {min_views} 的 {result.dropped_low_views} 条")
+            if result.dropped_high_views:
+                dropped.append(f"高于上限 {max_views} 的 {result.dropped_high_views} 条")
+            tip = (f"规则「{rule['name']}」：{'按热度排序' if min_views else '按时间排序'}扫描 {result.scanned} 条（{window}），"
+                   f"观看量区间 {views_range_text(min_views, max_views)}，"
+                   + (("、".join(dropped) + "已跳过（不入库），") if dropped else "") + f"达标 {len(tweets)} 条")
+            seen = []
+            if result.min_views_seen is not None and result.max_views_seen is not None:
+                seen.append(f"这次扫描到的观看量在 {result.min_views_seen}~{result.max_views_seen} 之间")
+            if not tweets and result.max_views_seen is not None and min_views and result.max_views_seen < min_views:
+                seen.append(f"下限要调到 {result.max_views_seen} 以下才会有结果")
+            if not tweets and result.min_views_seen is not None and max_views and result.min_views_seen > max_views:
+                seen.append(f"上限要调到 {result.min_views_seen} 以上才会有结果")
+            if seen:
+                tip += "；" + "，".join(seen)
             if len(tweets) < max_results and scan_limit and result.scanned >= scan_limit:
-                tip += f"；已到本次扫描上限 {scan_limit} 条，想多抓可调低观看量门槛或调大「每次抓取条数」"
+                tip += f"；已到本次扫描上限 {scan_limit} 条，想多抓可放宽观看量区间或调大「每次抓取条数」"
             notes.append(("⚠ " if not tweets else "") + tip)
-        _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条" + (f"（扫描 {result.scanned} 条）" if min_views else "") + "，正在去重和预检…")
+        _p(0.3, f"规则「{rule['name']}」：抓到 {len(tweets)} 条" + (f"（扫描 {result.scanned} 条）" if views_on else "") + "，正在去重和预检…")
         if start_time:
             tweets = [t for t in tweets if t.created_at >= start_time]
         if not tweets and notes is not None:
-            if result.scanned and min_views:
-                pass   # 上面已经写了「扫描 N 条、观看量不足的都跳过、最高观看量是多少」
+            if result.scanned and views_on:
+                pass   # 上面已经写了「扫描 N 条、区间外的都跳过、观看量范围是多少」
             elif feed:
                 notes.append(f"⚠ 规则「{rule['name']}」：@{account['handle']} 的时间线里最近 {lookback_h} 小时内没有可用推文"
                              f"（扫描 {result.scanned} 条，转推/回复/太旧的已跳过）。推荐流内容取决于这个号平时关注谁、点什么赞——"

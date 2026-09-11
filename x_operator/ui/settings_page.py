@@ -714,13 +714,13 @@ def _set_acc_status(aid, status):
 def _resolve_blacklist_entry(raw: str) -> tuple[str, str, str]:
     """把用户输入变成 (x_user_id, handle, 备注)。填 @handle 时通过账号去 X 查数字 id（拦截时两者都会比对；
     查不到也照样按 handle 存，只是提示一下）。阻塞：在线程池里跑。"""
-    from ..core.monitor import get_primary_account
+    from ..core.readpool import ReadPool
     v = raw.strip().lstrip("@")
     if v.isdigit():
         return v, "", ""
-    account = get_primary_account()
+    account, why = ReadPool().pick()
     if account is None:
-        return v, v, "（没有启用的账号，无法查数字 id；按 @handle 拦截）"
+        return v, v, f"（{why}，无法查数字 id；按 @handle 拦截）"
     try:
         user = factory.get_client(account).get_user_by_handle(v)
         return user.user_id, user.handle, ""

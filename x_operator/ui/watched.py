@@ -11,7 +11,7 @@ from ..adapters.base import XClientError
 from ..core import media
 from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
-from ..core.monitor import get_primary_account
+from ..core.readpool import ReadPool
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, hint, media_values, reply_mode_fields, reply_mode_invalid
@@ -28,9 +28,9 @@ def _resolve_and_add(handle: str, note: str) -> str:
     handle = handle.lstrip("@").strip()
     if not handle:
         return "请输入 @handle"
-    account = get_primary_account()
+    account, why = ReadPool().pick()
     if account is None:
-        return "没有状态为「启用」的账号，无法解析用户。请先到「设置 → 账号」添加"
+        return f"无法解析用户：{why}"
     try:
         client = factory.get_client(account)
         user = client.get_user_by_handle(handle)

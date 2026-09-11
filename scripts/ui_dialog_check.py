@@ -561,7 +561,34 @@ async def test_queue_shows_source_rule(user: User):
     await user.should_see("搜索「队列来源规则」")
     await user.should_see("监控 @src_watch")
     with get_conn() as c:
-        c.execute(f"DELETE FROM review_queue WHERE final_text IN ('qs_a','qs_b','qs_c','qs_d')")
+        c.execute("DELETE FROM review_queue WHERE final_text IN ('qs_a','qs_b','qs_c','qs_d')")
         c.execute(f"DELETE FROM target_tweets WHERE id IN ({','.join('?' * len(made))})", made)
         c.execute("DELETE FROM search_rules WHERE id IN (?,?)", (rid, fid))
         c.execute("DELETE FROM watched_users WHERE id=?", (wid,)); c.commit()
+
+
+async def test_rule_dialog_views_range(user: User):
+    """规则弹窗：观看量下限 / 上限并排；下限大于上限时拒绝保存；合法区间落库，卡片显示「观看 1000~5万」。"""
+    _pages()
+    await user.open("/rules")
+    _click_button(user, "新建规则")
+    await user.should_see("观看量下限（0 = 不限）")
+    await user.should_see("观看量上限（0 = 不限）")
+    [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0].set_value("区间规则")
+    [e for e in user.find("关键词（逗号隔开").elements if isinstance(e, ui.textarea)][0].set_value("kw")
+    [e for e in user.find("语义筛选条件").elements if isinstance(e, ui.textarea)][0].set_value("找人")
+    lo = [e for e in user.find("观看量下限").elements if isinstance(e, ui.number)][0]
+    hi = [e for e in user.find("观看量上限").elements if isinstance(e, ui.number)][0]
+    lo.set_value(60000); hi.set_value(50000)
+    _click_button(user, "保存")
+    await user.should_see("比上限 50000 还大")
+    with get_conn() as c:
+        assert c.execute("SELECT 1 FROM search_rules WHERE name='区间规则'").fetchone() is None
+    lo.set_value(1000)
+    _click_button(user, "保存")
+    await user.should_see("已保存")
+    await user.should_see("观看 1000~5万")
+    with get_conn() as c:
+        row = c.execute("SELECT min_views, max_views FROM search_rules WHERE name='区间规则'").fetchone()
+        assert (row["min_views"], row["max_views"]) == (1000, 50000), dict(row)
+        c.execute("DELETE FROM search_rules WHERE name='区间规则'"); c.commit()

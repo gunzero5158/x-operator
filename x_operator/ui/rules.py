@@ -11,10 +11,10 @@ from .. import config
 from ..core import media
 from ..core.accounts import account_options
 from ..core.matcher import REPLY_MODE_LABEL
-from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule,
+from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule, views_range_text,
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, fmt_views, run_job_with_progress, shell, tag
+from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, media_values, reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -36,10 +36,12 @@ HINTS = {
     "read_media": "默认关。打开后把推文的附图、视频封面（低清）一起送给打分 AI，能看懂截图 / 配图里的信息。"
                   "代价：token 消耗明显增加（一张图约等于一条推文正文），而且「设置 → LLM」里的轻量模型必须支持图片输入（多模态），"
                   "否则打分会失败、退回关键词粗估。附件元信息（有没有图 / 视频）不管开不开都会记录。",
-    "min_views": "只要观看量 ≥ 此值的推文，0 = 不限。开了门槛后改按 X 的「热门」排序、在「首次回溯」时间窗内找（刚发的推文观看量都低，按时间倒序凑不到），"
-                 "一页不够会继续翻页，直到凑够「每次抓取条数」或扫到上限（每次抓取条数 × 10，最多 500 条，且不超过当日剩余读额度）；"
-                 "低于门槛的当场丢掉、不入库。运行结果会告诉你这次扫到的最高观看量，0 条时按它调门槛。官方 API 按扫描到的条数计费。"
-                 "推荐：想找有热度的帖子 1000~5000；冷门领域填 0。",
+    "min_views": "观看量区间，两个都填 0 = 不限；可以只填一边。\n"
+                 "下限：只要观看量 ≥ 它的。开了下限会改按 X 的「热门」排序、在「首次回溯」时间窗内找（刚发的推文观看量都低，按时间倒序凑不到）。\n"
+                 "上限：只要观看量 ≤ 它的，用来避开爆款大帖（回复会被淹没、对方也不太会看）。只填上限时仍按时间排序、游标照用。\n"
+                 "有任一门槛时一页不够会继续翻页，直到凑够「每次抓取条数」或扫到上限（每次抓取条数 × 10，最多 500 条，且不超过当日剩余读额度）；"
+                 "区间外的当场丢掉、不入库。拿不到观看量的推文按 0 算。运行结果会告诉你这次扫到的观看量范围，0 条时按它调区间。"
+                 "官方 API 按扫描到的条数计费。推荐：想找有热度但回复不被淹没的，1000~5 万；冷门领域都填 0。",
 }
 
 
@@ -51,18 +53,18 @@ def _save(rid, data: dict):
     with get_conn() as conn:
         if rid:
             conn.execute("UPDATE search_rules SET name=?, keyword_query=?, semantic_criteria=?, lang=?, min_llm_score=?, "
-                         "max_results_per_run=?, lookback_hours=?, min_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
+                         "max_results_per_run=?, lookback_hours=?, min_views=?, max_views=?, reply_mode=?, ai_brief=?, allow_polish=?, reply_account_id=?, "
                          "source_kind=?, feed_account_id=?, read_media=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
                           data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"],
                           data["media_mode"], data["media_files"], rid))
         else:
             conn.execute("INSERT INTO search_rules(name, keyword_query, semantic_criteria, lang, min_llm_score, "
-                         "max_results_per_run, lookback_hours, min_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id, "
-                         "read_media, auto_approve, auto_approve_min_confidence, media_mode, media_files) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "max_results_per_run, lookback_hours, min_views, max_views, reply_mode, ai_brief, allow_polish, reply_account_id, source_kind, feed_account_id, "
+                         "read_media, auto_approve, auto_approve_min_confidence, media_mode, media_files) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (data["name"], data["kq"], data["sc"], data["lang"], data["min_score"], data["max_results"],
-                          data["lookback"], data["min_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
+                          data["lookback"], data["min_views"], data["max_views"], data["reply_mode"], data["ai_brief"], data["polish"], data["reply_account_id"],
                           data["source_kind"], data["feed_account_id"], data["read_media"], data["auto_approve"], data["auto_thr"],
                           data["media_mode"], data["media_files"]))
         conn.commit()
@@ -147,8 +149,9 @@ def register(jobs) -> None:
                                 tag(f"达标分 ≥{r['min_llm_score']}", "metric", "AI 相关性打分达到这个分才进下一步")
                                 tag(f"每次 {r['max_results_per_run']} 条", "metric", "每次运行最多抓这么多条")
                                 tag(f"首次回溯 {r['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
-                                if r["min_views"]:
-                                    tag(f"观看 ≥ {fmt_views(r['min_views'])}", "metric", "观看量门槛，抓取端就过滤")
+                                if r["min_views"] or r["max_views"]:
+                                    tag(f"观看 {views_range_text(r['min_views'], r['max_views'])}", "metric",
+                                        "观看量区间，抓取端就过滤，区间外的不入库")
                                 if r["read_media"]:
                                     tag("🖼 读附图打分", "metric", "附图 / 视频封面会一起送给打分 AI（token 消耗更高，需要多模态模型）")
                                 if r["reply_mode"] == "ai_write" and media.parse_files(r["media_files"]):
@@ -236,8 +239,10 @@ def register(jobs) -> None:
                 max_results = ui.number("每次抓取条数（10-100）", value=g("max_results_per_run", 15), min=10, max=100, step=1).classes("flex-1").props("outlined")
                 lookback = ui.number("首次回溯（小时）", value=g("lookback_hours", 24), min=1, max=720, step=1).classes("flex-1").props("outlined")
             _hint("min_score", after_row=True); _hint("max_results"); _hint("lookback")
-            min_views = ui.number("观看量门槛（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("w-full").props("outlined")
-            _hint("min_views")
+            with ui.row().classes("w-full gap-3 no-wrap"):
+                min_views = ui.number("观看量下限（0 = 不限）", value=g("min_views", 0), min=0, step=100).classes("flex-1").props("outlined")
+                max_views = ui.number("观看量上限（0 = 不限）", value=g("max_views", 0), min=0, step=1000).classes("flex-1").props("outlined")
+            _hint("min_views", after_row=True)
             read_media = ui.switch("读取附图 / 视频封面一起打分", value=bool(g("read_media", 0)))
             _hint("read_media", after_row=True)
 
@@ -256,6 +261,9 @@ def register(jobs) -> None:
                     ui.notify("规则名 / 语义条件不能为空", type="negative"); return
                 if src.value == "search" and not (kq.value or "").strip():
                     ui.notify("关键词搜索要填关键词（改成「账号推荐流」就不用填）", type="negative"); return
+                lo, hi = max(0, int(min_views.value or 0)), max(0, int(max_views.value or 0))
+                if lo and hi and lo > hi:
+                    ui.notify(f"观看量下限 {lo} 比上限 {hi} 还大，这样一条都抓不到；请调一下，或把其中一个填 0", type="negative", multi_line=True); return
                 problem = reply_mode_invalid(mode, brief, media_mode, mf)
                 if problem:
                     ui.notify(problem, type="negative", multi_line=True); return
@@ -266,7 +274,7 @@ def register(jobs) -> None:
                             min_score=max(0, min(10, int(min_score.value or 0))),
                             max_results=max(10, min(100, int(max_results.value or 10))),
                             lookback=max(1, int(lookback.value or 24)),
-                            min_views=max(0, int(min_views.value or 0)), read_media=1 if read_media.value else 0,
+                            min_views=lo, max_views=hi, read_media=1 if read_media.value else 0,
                             reply_mode=mode.value, ai_brief=(brief.value or "").strip(), polish=1 if polish.value else 0,
                             reply_account_id=(int(acc.value) or None) if acc.value else None,
                             auto_approve=auto_approve_values(auto_sw, auto_thr)[0], auto_thr=auto_approve_values(auto_sw, auto_thr)[1],

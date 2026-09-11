@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from .base import FetchResult, MediaData, PostResult, TweetData, UserData, XClient
+from .base import FetchResult, MediaData, PostResult, TweetData, UserData, ViewFilter, XClient
 
 # 一批固定样本：混入正例（本人在抱怨 / 求推荐，有上下文）与噪声（新闻/教程/招聘/营销）。内容是通用话题，不绑定任何产品。
 # 每条给定相对「新鲜度」偏移（分钟），tweet_id 单调递增，模拟真实时间线。
@@ -114,35 +114,29 @@ class MockXClient(XClient):
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None,
                       max_results: int = 15, min_views: int = 0,
-                      scan_limit: int = 0) -> FetchResult:
+                      scan_limit: int = 0, max_views: int = 0) -> FetchResult:
         page_size = min(max_results, 6)
-        if not min_views:
+        vf = ViewFilter(min_views, max_views)
+        if not vf.active:
             return self._result(self._fresh_batch(page_size, None, None), since_id)
         # 模拟翻页：每页 page_size 条，扫到凑够 / 到上限为止
         kept: list[TweetData] = []
-        scanned = dropped = 0
+        scanned = 0
         newest = None
-        max_views = None
-        while True:
+        for _ in range(100):   # 保险：真实通道会翻到没有下一页，mock 的样本池是无限轮转的
             page = self._fresh_batch(page_size, None, None)
             for t in page:
                 scanned += 1
                 newest = t.tweet_id if newest is None or int(t.tweet_id) > int(newest) else newest
-                if t.view_count is not None and (max_views is None or t.view_count > max_views):
-                    max_views = t.view_count
-                if (t.view_count or 0) < min_views:
-                    dropped += 1
-                else:
+                if vf.keep(t):
                     kept.append(t)
             if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
                 break
-        kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned, scanned=scanned,
-                           dropped_low_views=dropped, max_views_seen=max_views)
+        return vf.result(kept, newest, scanned)
 
     def get_home_timeline(self, kind: str = "for_you", max_results: int = 50, min_views: int = 0,
-                          scan_limit: int = 0, max_age_h: int | None = None) -> FetchResult:
-        return self.search_recent("", None, None, max_results, min_views, scan_limit)
+                          scan_limit: int = 0, max_age_h: int | None = None, max_views: int = 0) -> FetchResult:
+        return self.search_recent("", None, None, max_results, min_views, scan_limit, max_views)
 
     # --- 写 ---
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:

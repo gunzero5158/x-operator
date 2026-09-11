@@ -90,6 +90,8 @@ _ADDED_COLUMNS = [
     ("search_rules", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
     ("watched_users", "media_files", "TEXT NOT NULL DEFAULT '[]'"),
     ("watched_users", "media_mode", "TEXT NOT NULL DEFAULT 'fixed'"),
+    # v21：搜索规则观看量门槛可设上限，和下限组成区间（0 = 不限）
+    ("search_rules", "max_views", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

@@ -77,7 +77,7 @@ with get_conn() as conn:
     rc = conn.execute("SELECT value FROM app_settings WHERE key='read_official_enabled'").fetchone()["value"]
     assert rc == "1" and conn.execute("SELECT 1 FROM app_settings WHERE key='read_channel'").fetchone() is None, rc   # 旧「抓取走官方」→ 官方号参与账号池
     assert "read_paused_until" in {r["name"] for r in conn.execute("PRAGMA table_info(accounts)")}
-assert ver == 20 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
+assert ver == 21 and accs == ["my_real"] and mats == ["我的素材"] and rules == ["我的规则"] and wu == 0 and tt_n == 0 and rq_n == 0 and dry is None, (ver, accs, mats, rules, wu, tt_n, rq_n, dry)
 assert my_min == 5 and obsolete == 0 and thr == "0.4", (my_min, obsolete, thr)
 print("[1] v2→v10 升级 OK：Mock 演示数据全部清除、用户数据保留；旧默认达标分 7→5、匹配门槛 0.7→0.4；废弃设置键已清")
 
@@ -497,7 +497,7 @@ with get_conn() as conn:
 notes = []
 cands = jobs.search.run_rule(rule, get_primary_account(), notes=notes)
 assert len(cands) >= 15 and all((c.tweet.view_count or 0) >= 1000 for c in cands), [(c.tweet.view_count) for c in cands]
-assert notes and "观看量低于 1000" in notes[-1] and "已跳过" in notes[-1], notes
+assert notes and "低于下限 1000" in notes[-1] and "已跳过" in notes[-1] and "按热度排序" in notes[-1], notes
 with get_conn() as conn:
     max_id_before = conn.execute("SELECT COALESCE(MAX(id),0) m FROM target_tweets").fetchone()["m"]
 st = jobs.search.run_once(rule_ids=[rule["id"]])
@@ -506,15 +506,53 @@ with get_conn() as conn:
     stored_views = conn.execute("SELECT COUNT(*) c FROM target_tweets WHERE id>? AND view_count>=1000", (max_id_before,)).fetchone()["c"]
     cur = conn.execute("SELECT newest_id_cursor FROM search_rules WHERE id=?", (rule["id"],)).fetchone()["newest_id_cursor"]
 assert low == 0 and stored_views >= 15 and cur, (low, stored_views, cur)
-assert any("观看量低于" in n for n in st.notes), st.as_msg()
+assert any("低于下限 1000" in n for n in st.notes), st.as_msg()
 # 门槛高到一条都没有：提示里给出最高观看量，让人知道该调到多少
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET min_views=10000000 WHERE id=?", (rule["id"],)); conn.commit()
 st = jobs.search.run_once(rule_ids=[rule["id"]]); m = st.as_msg()
-assert st.tweets_fetched == 0 and "最高观看量是 25000" in m and "以下才会有结果" in m, m
+assert st.tweets_fetched == 0 and "5~25000 之间" in m and "下限要调到 25000 以下才会有结果" in m, m
 with get_conn() as conn:
     conn.execute("UPDATE search_rules SET min_views=0 WHERE id=?", (rule["id"],)); conn.commit()
-print("[6f4] 观看量门槛在抓取端翻页 OK（0 条时提示最高观看量）")
+print("[6f4] 观看量门槛在抓取端翻页 OK（0 条时提示观看量范围）")
+
+# [6f4b] 观看量上限 / 区间：只填上限 → 按时间排序、翻页凑够、高于上限的丢掉不入库；下限 + 上限 → 两头都丢；
+#        全部高于上限时提示「上限要调到 N 以上」；拿不到观看量的推文按 0 算（有下限丢、只有上限留）
+from x_operator.adapters.base import ViewFilter  # noqa: E402
+from x_operator.core.search import views_range_text  # noqa: E402
+def _tw(v):
+    return TweetData(tweet_id="1", author_id="a", author_handle="a", text="t", lang="ja", created_at=datetime.now(timezone.utc),
+                     is_retweet=False, in_reply_to_tweet_id=None, view_count=v)
+_budget_saved = config.get("daily_read_budget"); config.set_value("daily_read_budget", 0)   # 这段扫描量大，先不限读额度
+vf = ViewFilter(0, 1000); assert vf.keep(_tw(None)) and vf.keep(_tw(1000)) and not vf.keep(_tw(1001)) and vf.dropped_high == 1
+vf = ViewFilter(100, 0); assert not vf.keep(_tw(None)) and vf.keep(_tw(100)) and vf.dropped_low == 1
+vf = ViewFilter(100, 1000); [vf.keep(_tw(v)) for v in (50, 500, 5000)]
+assert (vf.dropped_low, vf.dropped_high, vf.low_seen, vf.top_seen) == (1, 1, 50, 5000), vf
+assert (views_range_text(1000, 50000), views_range_text(1000, 0), views_range_text(0, 50000), views_range_text(0, 0)) == ("1000~5万", "≥ 1000", "≤ 5万", "不限")
+with get_conn() as conn:   # 只填上限
+    conn.execute("UPDATE search_rules SET min_views=0, max_views=1000, max_results_per_run=10, newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+notes = []
+cands = jobs.search.run_rule(rule, get_primary_account(), notes=notes)
+assert len(cands) >= 10 and all((c.tweet.view_count or 0) <= 1000 for c in cands), [c.tweet.view_count for c in cands]
+assert notes and "高于上限 1000" in notes[-1] and "按时间排序" in notes[-1] and "≤ 1000" in notes[-1], notes
+with get_conn() as conn:   # 区间 100~10000：样本里 300 / 700 / 8000 这几档留下
+    conn.execute("UPDATE search_rules SET min_views=100, max_views=10000, newest_id_cursor=NULL WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+notes = []
+cands = jobs.search.run_rule(rule, get_primary_account(), notes=notes)
+views = {c.tweet.view_count for c in cands}
+assert cands and views <= {300, 700, 8000}, views
+assert "低于下限 100" in notes[-1] and "高于上限 10000" in notes[-1] and "100~1万" in notes[-1], notes
+with get_conn() as conn:   # 上限低到一条都不剩 → 提示上限要调到最低观看量以上
+    conn.execute("UPDATE search_rules SET min_views=0, max_views=1 WHERE id=?", (rule["id"],)); conn.commit()
+st = jobs.search.run_once(rule_ids=[rule["id"]]); m = st.as_msg()
+assert st.tweets_fetched == 0 and "上限要调到 5 以上才会有结果" in m, m
+with get_conn() as conn:
+    conn.execute("UPDATE search_rules SET min_views=0, max_views=0, max_results_per_run=15 WHERE id=?", (rule["id"],)); conn.commit()
+    rule = conn.execute("SELECT * FROM search_rules WHERE id=?", (rule["id"],)).fetchone()
+config.set_value("daily_read_budget", _budget_saved or 330)
+print("[6f4b] 观看量上限 / 区间（只填上限按时间排 / 两头都丢 / 0 条时提示调哪边 / 拿不到观看量按 0）OK")
 # LLM 模型分工登记表：所有场景都登记；未登记场景直接报错
 from x_operator.llm.client import SCENE_TIERS, model_for, LLMError as _LLMError  # noqa: E402
 assert {"ping", "relevance", "match", "write", "rule_gen", "material_gen"} <= set(SCENE_TIERS)
@@ -1452,6 +1490,27 @@ with get_conn() as conn:
     conn.execute("UPDATE search_rules SET reply_mode='material', media_mode='fixed', media_files='[]' WHERE id=?", (rule["id"],)); conn.commit()
 jobs.llm.write_reply = _orig_write
 print("[6f23] AI 创作挂附件：固定全带 / 素材池随机不重复 / 引用不算孤儿 / 监控推主同样 OK")
+
+# [6f24] 回归：抓取账号池挑不出号（小号都到 15 分钟读取上限、官方号不参与）时，手动「自动匹配 / 选素材」照样能生成草稿——
+#        选回复账号只看账号是否启用，不看读取额度；去 X 查用户这类真读取则如实说出账号池的原因
+from x_operator.core.readpool import ReadPool as _RP  # noqa: E402
+from x_operator.core.accounts import fallback_reply_account  # noqa: E402
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='active', read_paused_until=NULL")
+    conn.execute("DELETE FROM interactions"); conn.commit()
+config.set_value("read_official_enabled", 0); config.set_value("read_cap_unofficial", 1)
+with get_conn() as conn:   # 每个小号窗口内都已请求 1 次 → 全部到上限
+    for a in conn.execute("SELECT id FROM accounts WHERE access_type='unofficial'").fetchall():
+        conn.execute("INSERT INTO action_log(account_id, api_kind, endpoint, reads_consumed, success, created_at) VALUES (?, 'x_unofficial', 'search_recent', 1, 1, ?)", (a["id"], utcnow_iso()))
+    conn.commit()
+pk, why = _RP().pick(); assert pk is None and "上限 1" in why, why
+fb = fallback_reply_account(); assert fb is not None and fb["is_primary"] == 1, dict(fb) if fb else fb
+out = jobs.match.rematch(_pick_unqueued()); assert out.status == "queued", out
+from x_operator.ui.watched import _resolve_and_add as _watched_add  # noqa: E402
+msg = _watched_add("someone_new", "")
+assert "无法解析用户" in msg and "上限 1" in msg, msg
+config.set_value("read_official_enabled", 1); config.set_value("read_cap_unofficial", 40)
+print("[6f24] 回归：读取账号池耗尽时手动生成草稿不受影响、查用户如实报原因 OK")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

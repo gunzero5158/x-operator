@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from .base import (AuthExpired, CredentialMissing, DuplicateContent, FetchResult,
                    MediaData, MediaError, NetworkError, PermissionDenied, PostResult, RateLimited,
-                   TargetNotFound, TweetData, UserData, XClient, XClientError)
+                   TargetNotFound, TweetData, UserData, ViewFilter, XClient, XClientError)
 
 log = logging.getLogger("x_operator.adapters")
 
@@ -316,7 +316,7 @@ class OfficialXClient(XClient):
 
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None, max_results: int = 15,
-                      min_views: int = 0, scan_limit: int = 0) -> FetchResult:
+                      min_views: int = 0, scan_limit: int = 0, max_views: int = 0) -> FetchResult:
         params: dict[str, Any] = dict(
             max_results=max(10, min(100, max_results)),
             tweet_fields=self._TWEET_FIELDS, expansions=self._EXPANSIONS, user_fields=["username"], media_fields=self._MEDIA_FIELDS,
@@ -328,10 +328,10 @@ class OfficialXClient(XClient):
             params["start_time"] = clamp_recent_window(start_time)
         if min_views:
             params["sort_order"] = "relevancy"   # 按相关度/热度排，高观看量的先出来；按时间倒序全是刚发的低观看
+        vf = ViewFilter(min_views, max_views)
         kept: list[TweetData] = []
-        scanned = dropped = 0
+        scanned = 0
         newest: str | None = None
-        max_views: int | None = None
         while True:
             resp = self._search_page(query, params, since_id, start_time)
             page = self._to_tweets(resp)
@@ -339,11 +339,7 @@ class OfficialXClient(XClient):
             for t in page:
                 if newest is None or int(t.tweet_id) > int(newest):
                     newest = t.tweet_id
-                if t.view_count is not None and (max_views is None or t.view_count > max_views):
-                    max_views = t.view_count
-                if min_views and (t.view_count or 0) < min_views:
-                    dropped += 1
-                else:
+                if vf.keep(t):
                     kept.append(t)
             next_token = None
             try:
@@ -351,15 +347,13 @@ class OfficialXClient(XClient):
             except Exception:
                 pass
             # 没有观看量门槛只扫一页；有门槛就翻页直到凑够 / 扫到上限 / 没有下一页
-            if not min_views or len(kept) >= max_results or not next_token or (scan_limit and scanned >= scan_limit):
+            if not vf.active or len(kept) >= max_results or not next_token or (scan_limit and scanned >= scan_limit):
                 break
             params["next_token"] = next_token
-        kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
+        return vf.result(kept, newest, scanned)
 
     def get_home_timeline(self, kind: str = "for_you", max_results: int = 50, min_views: int = 0,
-                          scan_limit: int = 0, max_age_h: int | None = None) -> FetchResult:
+                          scan_limit: int = 0, max_age_h: int | None = None, max_views: int = 0) -> FetchResult:
         if kind == "for_you":
             raise XClientError("官方 API 没有「推荐流（For You）」接口，只能读「关注流」。请把这条规则的时间线账号换成小号（Cookie 通道），"
                                "或把来源改成「关注流」")
@@ -369,10 +363,10 @@ class OfficialXClient(XClient):
         )
         if max_age_h:
             params["start_time"] = datetime.now(timezone.utc) - timedelta(hours=max_age_h)
+        vf = ViewFilter(min_views, max_views)
         kept: list[TweetData] = []
-        scanned = dropped = 0
+        scanned = 0
         newest: str | None = None
-        max_views: int | None = None
         while True:
             try:
                 resp = self._client.get_home_timeline(**params)
@@ -383,11 +377,7 @@ class OfficialXClient(XClient):
             for t in page:
                 if newest is None or int(t.tweet_id) > int(newest):
                     newest = t.tweet_id
-                if t.view_count is not None and (max_views is None or t.view_count > max_views):
-                    max_views = t.view_count
-                if min_views and (t.view_count or 0) < min_views:
-                    dropped += 1
-                else:
+                if vf.keep(t):
                     kept.append(t)
             next_token = None
             try:
@@ -397,9 +387,7 @@ class OfficialXClient(XClient):
             if len(kept) >= max_results or not next_token or not page or (scan_limit and scanned >= scan_limit):
                 break
             params["pagination_token"] = next_token
-        kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
+        return vf.result(kept, newest, scanned)
 
     # ---- 写 ----
     def post(self, text: str, media_ids: list[str] | None = None) -> PostResult:
@@ -844,16 +832,15 @@ class UnofficialXClient(XClient):
         return self._since_filter(tweets, since_id)
 
     async def _search_pages(self, query: str, count: int, since_id: str | None, start_time: datetime | None,
-                            max_results: int, min_views: int, scan_limit: int):
-        """没有观看量门槛：搜「最新」，按时间倒序翻页，翻到比游标/时间窗还旧就停。
-        有观看量门槛：搜「热门」（Top，X 按热度排，高观看量的先出来），不按时间序所以遇到旧的只跳过不停，
+                            max_results: int, vf: ViewFilter, scan_limit: int):
+        """没有下限：搜「最新」，按时间倒序翻页——没门槛只扫一页；只有上限时继续翻，但翻到比游标/时间窗还旧就停。
+        有下限：搜「热门」（Top，X 按热度排，高观看量的先出来），不按时间序所以遇到旧的只跳过不停，
         直到凑够 / 到扫描上限 / 没有下一页。"""
         since_int = int(since_id) if since_id and since_id.isdigit() else None
-        product = "Top" if min_views else "Latest"
+        product = "Top" if vf.min_views else "Latest"
         kept: list[TweetData] = []
-        scanned = dropped = 0
+        scanned = 0
         newest: str | None = None
-        max_views: int | None = None
         res = await self._client.search_tweet(query, product, count=count)
         while True:
             page = [self._to_tweet(t) for t in (res or [])]
@@ -864,39 +851,32 @@ class UnofficialXClient(XClient):
                 scanned += 1
                 if newest is None or int(t.tweet_id) > int(newest):
                     newest = t.tweet_id
-                if t.view_count is not None and (max_views is None or t.view_count > max_views):
-                    max_views = t.view_count
                 if (since_int is not None and int(t.tweet_id) <= since_int) or (start_time and t.created_at < start_time):
                     hit_old = True
                     continue
-                if min_views and (t.view_count or 0) < min_views:
-                    dropped += 1
-                else:
+                if vf.keep(t):
                     kept.append(t)
-            if not min_views:
-                if hit_old:
-                    break
-                break   # 无门槛只扫一页
+            if not vf.min_views and (hit_old or not vf.max_views):
+                break   # 按时间序：没门槛只扫一页；只有上限时翻到旧的就停
             if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
                 break
             try:
                 res = await res.next()
             except Exception:
                 break
-        return kept, scanned, dropped, newest, max_views
+        return kept, scanned, newest
 
     def search_recent(self, query: str, since_id: str | None = None,
                       start_time: datetime | None = None, max_results: int = 15,
-                      min_views: int = 0, scan_limit: int = 0) -> FetchResult:
+                      min_views: int = 0, scan_limit: int = 0, max_views: int = 0) -> FetchResult:
         count = max(10, min(50, max_results))
-        kept, scanned, dropped, newest, max_views = self._call(
-            lambda: self._search_pages(query, count, since_id, start_time, max_results, min_views, scan_limit),
+        vf = ViewFilter(min_views, max_views)
+        kept, scanned, newest = self._call(
+            lambda: self._search_pages(query, count, since_id, start_time, max_results, vf, scan_limit),
             "搜索推文")
-        kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
+        return vf.result(kept, newest, scanned)
 
-    async def _timeline_pages(self, kind: str, count: int, max_results: int, min_views: int, scan_limit: int,
+    async def _timeline_pages(self, kind: str, count: int, max_results: int, vf: ViewFilter, scan_limit: int,
                               max_age_h: int | None):
         """首页时间线不按时间排（推荐流尤其如此），所以不用游标：翻页直到凑够 / 到扫描上限 / 没有下一页。
         转推、回复、超出时间窗的直接跳过（回复别人的回复很奇怪，也没上下文）。"""
@@ -904,9 +884,8 @@ class UnofficialXClient(XClient):
         fetch = c.get_timeline if kind == "for_you" else c.get_latest_timeline
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_h) if max_age_h else None
         kept: list[TweetData] = []
-        scanned = dropped = 0
+        scanned = 0
         newest: str | None = None
-        max_views: int | None = None
         res = await fetch(count=count)
         for _ in range(30):
             page = [self._to_tweet(t) for t in (res or [])]
@@ -920,29 +899,24 @@ class UnofficialXClient(XClient):
                     continue
                 if cutoff and t.created_at < cutoff:
                     continue
-                if t.view_count is not None and (max_views is None or t.view_count > max_views):
-                    max_views = t.view_count
-                if min_views and (t.view_count or 0) < min_views:
-                    dropped += 1
-                    continue
-                kept.append(t)
+                if vf.keep(t):
+                    kept.append(t)
             if len(kept) >= max_results or (scan_limit and scanned >= scan_limit):
                 break
             try:
                 res = await res.next()
             except Exception:
                 break
-        return kept, scanned, dropped, newest, max_views
+        return kept, scanned, newest
 
     def get_home_timeline(self, kind: str = "for_you", max_results: int = 50, min_views: int = 0,
-                          scan_limit: int = 0, max_age_h: int | None = None) -> FetchResult:
+                          scan_limit: int = 0, max_age_h: int | None = None, max_views: int = 0) -> FetchResult:
         count = max(10, min(40, max_results))
         what = "读取推荐流" if kind == "for_you" else "读取关注流"
-        kept, scanned, dropped, newest, max_views = self._call(
-            lambda: self._timeline_pages(kind, count, max_results, min_views, scan_limit, max_age_h), what)
-        kept.sort(key=lambda t: int(t.tweet_id))
-        return FetchResult(tweets=kept, newest_id=newest, reads_consumed=scanned,
-                           scanned=scanned, dropped_low_views=dropped, max_views_seen=max_views)
+        vf = ViewFilter(min_views, max_views)
+        kept, scanned, newest = self._call(
+            lambda: self._timeline_pages(kind, count, max_results, vf, scan_limit, max_age_h), what)
+        return vf.result(kept, newest, scanned)
 
     # ---- 写 ----
     @staticmethod
