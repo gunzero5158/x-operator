@@ -29,7 +29,7 @@ def _stats() -> dict:
         recent_fail = conn.execute(
             "SELECT created_at, endpoint, error FROM action_log WHERE success=0 ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
-        accounts = conn.execute("SELECT handle, status, access_type, is_primary, credentials FROM accounts ORDER BY is_primary DESC, id").fetchall()
+        accounts = conn.execute("SELECT handle, status, access_type, is_primary, credentials FROM accounts WHERE deleted_at IS NULL ORDER BY is_primary DESC, id").fetchall()
         watched = conn.execute("SELECT COUNT(*) AS c FROM watched_users WHERE enabled=1").fetchone()["c"]
         rules = conn.execute("SELECT COUNT(*) AS c FROM search_rules WHERE enabled=1").fetchone()["c"]
         materials = conn.execute("SELECT COUNT(*) AS c FROM materials WHERE status='active' AND deleted_at IS NULL").fetchone()["c"]

@@ -43,6 +43,7 @@ UNSENT_LABEL = "未发送的全部（待审核 + 待发送 + 失败）"
 TRANSFERABLE = ("pending", "approved", "failed", "skipped", "expired")
 ALL_ACCOUNTS = 0
 ACC_STATUS_LABEL = {"active": "", "paused": "已暂停", "auth_error": "凭据失效"}
+DELETED_LABEL = "已删除"
 
 
 def _where(status: str, account_id: int = ALL_ACCOUNTS) -> tuple[str, list]:
@@ -60,7 +61,7 @@ def _load(status: str, account_id: int = ALL_ACCOUNTS):
     where, args = _where(status, account_id)
     with get_conn() as conn:
         items = conn.execute(
-            "SELECT rq.*, a.handle AS acc_handle, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
+            "SELECT rq.*, a.handle AS acc_handle, a.deleted_at AS acc_deleted, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
             "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang, tt.view_count AS tgt_views, "
             "tt.llm_relevance_score AS tgt_score, tt.tweet_created_at AS tgt_created_at, tt.source AS tgt_source, "
             "tt.source_rule_id AS tgt_rule_id, sr.min_llm_score AS rule_min, sr.name AS rule_name, sr.source_kind AS rule_kind, "
@@ -86,15 +87,18 @@ def _counts(account_id: int = ALL_ACCOUNTS) -> dict[str, int]:
 
 
 def _account_filter_options(status: str) -> dict:
-    """账号筛选下拉：{0: 全部账号, id: @handle · 凭据失效（当前状态下 N 条）}。停用 / 失效的账号也列出来，正是要清理它们。"""
+    """账号筛选下拉：{0: 全部账号, id: @handle · 凭据失效（当前状态下 N 条）}。停用 / 失效的账号也列出来，正是要清理它们；
+    已删除的账号只在当前状态下还有它的记录时列出。"""
     with get_conn() as conn:
-        accs = conn.execute("SELECT id, handle, status FROM accounts ORDER BY (status='active'), is_primary DESC, id").fetchall()
+        accs = conn.execute("SELECT id, handle, status, deleted_at FROM accounts ORDER BY (deleted_at IS NOT NULL), (status='active'), is_primary DESC, id").fetchall()
         where, args = _where(status)
         cnt = {r["account_id"]: r["c"] for r in conn.execute(
             f"SELECT rq.account_id, COUNT(*) AS c FROM review_queue rq WHERE {where} GROUP BY rq.account_id", args)}
     opts = {ALL_ACCOUNTS: "全部账号"}
     for a in accs:
-        st = ACC_STATUS_LABEL.get(a["status"], a["status"])
+        if a["deleted_at"] and not cnt.get(a["id"]):
+            continue
+        st = DELETED_LABEL if a["deleted_at"] else ACC_STATUS_LABEL.get(a["status"], a["status"])
         opts[a["id"]] = f"@{a['handle']}" + (f" · {st}" if st else "") + f"（{cnt.get(a['id'], 0)}）"
     return opts
 
@@ -441,12 +445,14 @@ def register(jobs) -> None:
             def sync_toolbar():
                 st, aid = status_sel.value, acc_id()
                 recheck_btn.set_visibility(st == "skipped" and not aid)
-                transfer_btn.set_visibility(bool(aid) and st not in ("sent", "sending"))
+                transfer_btn.set_visibility(bool(aid) and st not in ("sent", "sending") and not _account_deleted(aid))
                 acc_hint.text = ""
                 if aid:
                     with get_conn() as conn:
-                        a = conn.execute("SELECT handle, status FROM accounts WHERE id=?", (aid,)).fetchone()
-                    if a is not None and a["status"] != "active":
+                        a = conn.execute("SELECT handle, status, deleted_at FROM accounts WHERE id=?", (aid,)).fetchone()
+                    if a is not None and a["deleted_at"]:
+                        acc_hint.text = f"@{a['handle']} 已删除，这里只剩它的历史记录（保留着用于去重和作者冷却）。"
+                    elif a is not None and a["status"] != "active":
                         n = _counts(aid).get(UNSENT, 0)
                         acc_hint.text = (f"@{a['handle']} 当前「{ACC_STATUS_LABEL.get(a['status'], a['status'])}」，名下 {n} 条未发送的条目发不出去："
                                          "可以「批量转给其他账号」，或「批量删除」。状态选「未发送的全部」可以一次处理完。")
@@ -505,6 +511,12 @@ def _status_options(account_id: int = ALL_ACCOUNTS) -> dict:
     c = _counts(account_id)
     return {k: f"{v}（{c.get(k, 0)}）" for k, v in QUEUE_STATUS_LABEL.items() if k != "sending"} | \
         ({"sending": f"发送中（{c['sending']}）"} if c.get("sending") else {}) | {UNSENT: f"{UNSENT_LABEL}（{c[UNSENT]}）"}
+
+
+def _account_deleted(account_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT deleted_at FROM accounts WHERE id=?", (int(account_id),)).fetchone()
+    return bool(row and row["deleted_at"])
 
 
 def _account_handle(account_id: int) -> str:
@@ -580,7 +592,8 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                         ui.notify("该条目已不是待审核状态", type="warning")
                 acc_sel.on("update:model-value", on_acc_change)
             else:
-                tag(f"@{it['acc_handle']}", "account", "发送账号")
+                tag(f"@{it['acc_handle']}" + ("（已删除）" if it["acc_deleted"] else ""), "account",
+                    "发送账号" + ("：这个账号已经删除，记录保留用于去重和作者冷却" if it["acc_deleted"] else ""))
             tag("回复" if it["action_type"] == "reply" else "发帖", it["action_type"] if it["action_type"] in ("reply", "post") else "reply",
                 "回复 = 回在别人推文下；发帖 = 自己账号发主贴")
             origin = it["origin"] or ("scheduled" if it["scheduled_post_id"] else "ai_match")

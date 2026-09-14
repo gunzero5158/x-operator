@@ -170,6 +170,15 @@ uv run python -m x_operator.main
   - 规则 / 推主卡片上的标签会写成「回复账号：自动轮流」「@xxx」「轮流：@a、@b」「自动轮流，排除 @c」。
   - 任务队列里每条待审核条目都能临时改「发送账号」。
 - **发帖账号**：定时发帖计划新建时选。
+- **删除账号**（设置 → 账号卡片上的「删除」）：
+  - 还有**没发出去的队列条目**（待审核 / 待发送 / 发送中 / 失败），或有**进行中 / 暂停中的定时发帖计划**用它 → 不让删，
+    弹窗写清楚是哪几样、各有几条，并给「去任务队列处理」「去定时发帖」按钮（队列里可按账号筛选后批量转给其他账号或删除）。
+  - 处理完之后，**发过东西**的账号（有已发送 / 已跳过 / 已过期记录、发送账本、已结束的计划）做**软删除**：
+    凭据清空、状态改暂停，账号列表、仪表盘、回复账号选择、抓取账号池、定时发帖的账号下拉里都不再出现；
+    记录原样保留——同一条推文不会被别的号再回、作者冷却照常算，任务队列里显示「@xxx（已删除）」。
+    账号页底部会写「另有 N 个已删除的账号」。**以后重新添加同名账号，会接回这条记录**（发送历史和账本连上）。
+  - 什么记录都没有的账号直接彻底删除。
+  - 两种删除都会把搜索规则 / 监控推主里指向它的设置去掉：回复账号名单里移除（名单空了改回自动轮流）、推荐流账号改回自动。
 - 去重账本按推文去重：同一条推文只会被一个账号回。
 
 ### 配图 / 视频（附件）
@@ -280,7 +289,7 @@ Cookie 小号通道发超过 280 单位的推文会自动按「长推文」发�
 ```bash
 uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
-# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断（含简繁中文）、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘、规则 AI 创作附件、规则回复账号名单、任务队列按账号筛选与批量转移
+# 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断（含简繁中文）、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘、规则 AI 创作附件、规则回复账号名单、任务队列按账号筛选与批量转移、删除账号（拦截 / 软删除 / 同名接回）
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
 # 真渲染截图（需要 Playwright 的 Chromium）：先起样例服务，再截图并打印标签实际颜色
 timeout 60 uv run python scripts/shot_server.py &   # 端口 8099
@@ -294,7 +303,7 @@ x_operator/
   db/         schema.py(DDL v21) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
   adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
-  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(语言自动判断/简繁中文区分) textlimit.py(X 计数单位/超限 AI 缩写)
+  core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流/删除账号) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(语言自动判断/简繁中文区分) textlimit.py(X 计数单位/超限 AI 缩写)
   ui/         layout.py(页面框架/标签配色/显示时区) pickers.py(共用弹窗/回复方式字段) media_widget.py(附件上传/缩略图) + 8 个页面(dashboard/queue/targets/materials/watched/rules/schedule/settings)
   config.py   main.py
 scripts/      smoke_test.py serve_check.sh ui_dialog_check.py shot_server.py shot_pages.py

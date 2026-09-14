@@ -11,6 +11,7 @@ from ..adapters import factory
 from ..adapters.real import (OFFICIAL_REQUIRED, describe_proxy, detect_system_proxy,
                              parse_credentials, validate_unofficial_credentials)
 from ..core import media
+from ..core.accounts import account_references, delete_account, delete_blockers, deleted_account_id
 from ..core.readpool import official_enabled
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
@@ -419,10 +420,14 @@ def _accounts_panel():
         if data["max_interval_sec"] < data["min_interval_sec"]:
             ui.notify("最大间隔需 ≥ 最小间隔", type="negative"); return False
         creds_json = json.dumps({k: v for k, v in creds.items() if (v or "").strip()}, ensure_ascii=False)
+        revived = None if existing_id else deleted_account_id(handle)
         try:
             with get_conn() as conn:
                 if data["is_primary"]:  # 主号唯一：先清空其他主号
                     conn.execute("UPDATE accounts SET is_primary=0")
+                if revived:   # 之前删除过的同名账号：复用那条记录，接上发送历史和去重账本
+                    existing_id = revived
+                    conn.execute("UPDATE accounts SET deleted_at=NULL, status='active' WHERE id=?", (revived,))
                 if existing_id:
                     conn.execute(
                         "UPDATE accounts SET handle=?, display_name=?, access_type=?, is_primary=?, is_premium=?, "
@@ -447,7 +452,7 @@ def _accounts_panel():
         except sqlite3.IntegrityError as e:
             ui.notify(f"保存失败：handle 可能重复或违反约束（{e}）", type="negative"); return False
         factory.invalidate()
-        ui.notify("已保存", type="positive")
+        ui.notify("这个账号之前删除过，已恢复并接上原来的发送记录" if revived else "已保存", type="positive")
         return True
 
     def open_dialog(existing: sqlite3.Row | None = None):
@@ -615,16 +620,20 @@ def _accounts_panel():
         ui.notify("已设为主号", type="positive"); render()
 
     async def del_account(a):
-        if not await confirm(f"删除账号 @{a['handle']}？", "凭据会一并删除。有发送记录/队列/定时发帖计划关联的账号无法删除。"):
+        refs = account_references(a["id"])
+        blockers = delete_blockers(refs)
+        if blockers:
+            await _delete_blocked_dialog(a, refs, blockers)
             return
-        try:
-            with get_conn() as conn:
-                conn.execute("DELETE FROM accounts WHERE id=?", (a["id"],))
-                conn.commit()
-            factory.invalidate(a["id"])
-            ui.notify("已删除", type="positive")
-        except sqlite3.IntegrityError:
-            ui.notify("该账号已有关联记录（发送/队列/定时），无法删除；请改为「暂停」", type="negative")
+        keep = refs["queue_history"] or refs["interactions"] or refs["old_plans"]
+        detail = ("它发过东西：发送记录和去重账本会保留（防止别的账号重复回复同一条推文、作者冷却照常算），"
+                  "账号本身从各处消失、凭据清空，历史里显示为「已删除」。以后重新添加同名账号会接上这些记录。"
+                  if keep else "它没有任何发送记录，会彻底删除，凭据一并删掉。")
+        if not await confirm(f"删除账号 @{a['handle']}？", detail + "搜索规则 / 监控推主里指向它的回复账号设置会一并去掉。"):
+            return
+        result, msg = delete_account(a["id"])
+        factory.invalidate(a["id"])
+        ui.notify(msg, type="negative" if result == "blocked" else "positive", multi_line=True, close_button=True, timeout=12000)
         render()
 
     async def test_conn(a):
@@ -654,7 +663,8 @@ def _accounts_panel():
     def render():
         body.clear()
         with get_conn() as conn:
-            rows = conn.execute("SELECT * FROM accounts ORDER BY is_primary DESC, id").fetchall()
+            rows = conn.execute("SELECT * FROM accounts WHERE deleted_at IS NULL ORDER BY is_primary DESC, id").fetchall()
+            n_deleted = conn.execute("SELECT COUNT(*) c FROM accounts WHERE deleted_at IS NOT NULL").fetchone()["c"]
             unsent = {r["account_id"]: r["c"] for r in conn.execute(
                 "SELECT account_id, COUNT(*) c FROM review_queue WHERE status IN ('pending','approved','failed') GROUP BY account_id")}
         with body:
@@ -663,6 +673,9 @@ def _accounts_panel():
                 ui.button("添加账号", icon="add", on_click=lambda: open_dialog()).props("color=primary")
             if not rows:
                 ui.label("暂无账号，点右上「添加账号」新建一个。").classes("text-gray-400")
+            if n_deleted:
+                ui.label(f"另有 {n_deleted} 个已删除的账号：只保留着发送记录和去重账本（防止重复回复、作者冷却照常算），不会再被用来抓取或发送；"
+                         "重新添加同名账号会接上原来的记录。").classes("text-xs text-gray-400")
             for a in rows:
                 cred_ok, cred_why = factory.credential_status(a)
                 with ui.card().classes("w-full"):
@@ -855,3 +868,21 @@ def _media_storage_panel():
         ui.button("前往清理（打开目录）", icon="folder_open", on_click=go).props("outline color=primary") \
             .tooltip("在本机文件管理器里打开 data/media/，自己挑文件删")
         ui.button("刷新统计", icon="refresh", on_click=refresh).props("flat dense")
+
+
+async def _delete_blocked_dialog(a, refs: dict, blockers: list[str]) -> None:
+    """删不了时说清楚卡在哪、给直达按钮。"""
+    with ui.dialog() as dlg, ui.card().classes("w-[560px] max-w-[95vw]"):
+        ui.label(f"@{a['handle']} 暂时不能删除").classes("text-lg font-bold")
+        for b in blockers:
+            ui.label("· " + b).classes("text-sm")
+        ui.label("处理完再点删除。已发送的记录不用管：删除时会保留它们（用于去重和作者冷却），账号本身照样从各处消失。"
+                 ).classes("text-xs text-gray-400")
+        with ui.row().classes("w-full justify-end gap-2"):
+            if refs["unsent"]:
+                ui.button("去任务队列处理", icon="list_alt",
+                          on_click=lambda: ui.navigate.to(f"/queue?status=unsent&account={a['id']}")).props("outline")
+            if refs["live_plans"]:
+                ui.button("去定时发帖", icon="schedule", on_click=lambda: ui.navigate.to("/schedule")).props("outline")
+            ui.button("关闭", on_click=dlg.close).props("flat")
+    dlg.open()

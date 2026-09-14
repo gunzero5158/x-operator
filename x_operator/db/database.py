@@ -97,6 +97,8 @@ _ADDED_COLUMNS = [
     ("search_rules", "reply_account_ids", "TEXT NOT NULL DEFAULT '[]'"),
     ("watched_users", "reply_account_mode", "TEXT NOT NULL DEFAULT 'auto'"),
     ("watched_users", "reply_account_ids", "TEXT NOT NULL DEFAULT '[]'"),
+    # v23：账号软删除——发过东西的账号删除时只打标记（保留发送记录和去重账本），各处不再列出
+    ("accounts", "deleted_at", "TEXT"),
 ]
 
 

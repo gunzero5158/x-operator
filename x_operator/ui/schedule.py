@@ -92,7 +92,7 @@ def register(jobs) -> None:
                 body.clear()
                 with get_conn() as conn:
                     rows = conn.execute(
-                        "SELECT sp.*, a.handle AS acc_handle, m.text AS mat_text, m.deleted_at AS mat_deleted, m.media_files AS mat_media "
+                        "SELECT sp.*, a.handle AS acc_handle, a.deleted_at AS acc_deleted, m.text AS mat_text, m.deleted_at AS mat_deleted, m.media_files AS mat_media "
                         "FROM scheduled_posts sp JOIN accounts a ON a.id=sp.account_id "
                         "LEFT JOIN materials m ON m.id=sp.material_id ORDER BY sp.id").fetchall()
                 with body:
@@ -103,7 +103,8 @@ def register(jobs) -> None:
                         mode = sp["content_mode"] or "fixed"
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 flex-wrap"):
-                                tag(f"@{sp['acc_handle']}", "account", "用哪个账号发")
+                                tag(f"@{sp['acc_handle']}" + ("（已删除）" if sp["acc_deleted"] else ""), "account",
+                                    "用哪个账号发" + ("：账号已删除，要继续用这个计划请编辑换一个账号" if sp["acc_deleted"] else ""))
                                 tag(_describe_when(sp), "metric", "什么时候发")
                                 tag(_STATUS_LABEL.get(sp["status"], sp["status"]),
                                     {"active": "ok", "paused": "off", "done": "off", "missed": "attn"}.get(sp["status"], "off"), "计划状态")
@@ -145,7 +146,8 @@ def register(jobs) -> None:
 
     def _edit(sp, refresh):
         with get_conn() as conn:
-            accounts = conn.execute("SELECT id, handle FROM accounts ORDER BY id").fetchall()
+            accounts = conn.execute("SELECT id, handle FROM accounts WHERE deleted_at IS NULL ORDER BY id").fetchall()
+            cur_acc = conn.execute("SELECT id, handle, deleted_at FROM accounts WHERE id=?", (sp["account_id"],)).fetchone() if sp else None
             mats = conn.execute("SELECT id, text FROM materials WHERE kind='post' AND status='active' AND deleted_at IS NULL ORDER BY id").fetchall()
             cur_mat = conn.execute("SELECT id, text, status, deleted_at FROM materials WHERE id=?", (sp["material_id"],)).fetchone() \
                 if (sp and sp["material_id"]) else None
@@ -154,7 +156,10 @@ def register(jobs) -> None:
 
         with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-[95vw] max-h-[92vh] overflow-auto"):
             ui.label("编辑定时发帖计划" if sp else "新建定时发帖计划").classes("text-lg font-bold")
-            acc = ui.select({a["id"]: a["handle"] for a in accounts},
+            acc_opts = {a["id"]: a["handle"] for a in accounts}
+            if cur_acc is not None and cur_acc["deleted_at"]:
+                acc_opts = {cur_acc["id"]: f"⚠ {cur_acc['handle']}（已删除，请换一个）", **acc_opts}
+            acc = ui.select(acc_opts,
                             value=sp["account_id"] if sp else accounts[0]["id"], label="发帖账号").classes("w-full").props("outlined")
             ui.separator()
             ui.label("内容来源").classes("font-semibold text-sm")
@@ -249,7 +254,9 @@ def register(jobs) -> None:
                     if not rows:
                         ui.notify("按这个语言/标签在素材库里找不到启用的发帖素材，先去素材库加几条", type="negative", multi_line=True); return
                 with get_conn() as conn:
-                    acc_row = conn.execute("SELECT timezone FROM accounts WHERE id=?", (acc.value,)).fetchone()
+                    acc_row = conn.execute("SELECT timezone, deleted_at FROM accounts WHERE id=?", (acc.value,)).fetchone()
+                if acc_row is None or acc_row["deleted_at"]:
+                    ui.notify("所选发帖账号已经删除，请换一个账号", type="negative"); return
                 try:
                     nxt = compute_next_run(stype.value, expr.value.strip(), datetime.now(timezone.utc), acc_row["timezone"])
                 except ValueError as e:
@@ -309,7 +316,10 @@ def _set_status(sid: int, status: str):
 def _reactivate(sp) -> None:
     """恢复计划并重算下次时间；一次性且时间已过则提示。"""
     with get_conn() as conn:
-        tz = conn.execute("SELECT timezone FROM accounts WHERE id=?", (sp["account_id"],)).fetchone()["timezone"]
+        acc = conn.execute("SELECT timezone, deleted_at FROM accounts WHERE id=?", (sp["account_id"],)).fetchone()
+    if acc["deleted_at"]:
+        ui.notify("这个计划的发帖账号已经删除，请先「编辑」换一个账号", type="warning"); return
+    tz = acc["timezone"]
     try:
         nxt = compute_next_run(sp["schedule_type"], sp["schedule_expr"], datetime.now(timezone.utc), tz)
     except ValueError as e:

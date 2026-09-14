@@ -706,3 +706,64 @@ async def test_queue_account_filter_transfer_and_delete(user: User):
         c.execute("DELETE FROM review_queue WHERE final_text LIKE 'af_%'")
         c.execute("UPDATE accounts SET status='active' WHERE id=?", (aid["small1"],)); c.commit()
     assert left == {"af_p", "af_a", "af_f"}, left
+
+
+def _in_dialog(el) -> bool:
+    node = el
+    while node is not None:
+        if isinstance(node, ui.dialog):
+            return True
+        node = node.parent_slot.parent if node.parent_slot else None
+    return False
+
+
+async def test_account_delete_blocked_retired_and_revived(user: User):
+    """删除账号：有未发送条目时弹窗说明卡在哪、给「去任务队列处理」；只剩已发送记录时软删除——卡片消失、历史标「已删除」；
+    重新添加同名账号接回原记录。"""
+    _pages()
+    with get_conn() as c:
+        c.execute("INSERT INTO accounts(handle, display_name, access_type, credentials) VALUES ('uidel','','official','{}')")
+        uid = c.execute("SELECT id FROM accounts WHERE handle='uidel'").fetchone()["id"]
+        c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, created_at) "
+                  "VALUES (?,'reply',1,1,'ud_pending','pending',?)", (uid, utcnow_iso()))
+        c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, created_at, sent_at) "
+                  "VALUES (?,'reply',1,1,'ud_sent','sent',?,?)", (uid, utcnow_iso(), utcnow_iso()))
+        c.commit()
+
+    def click_delete_of(handle):
+        btns = [b for b in user.find(kind=ui.button).elements if b.text == "删除" and f"@{handle}" in _card_text(b)]
+        assert len(btns) == 1, len(btns)
+        UserInteraction(user, set(btns), None).click()
+
+    await user.open("/settings")
+    click_delete_of("uidel")
+    await user.should_see("@uidel 暂时不能删除")
+    await user.should_see("任务队列里还有 1 条没发出去的条目")
+    await user.should_see("去任务队列处理")
+    with get_conn() as c:
+        c.execute("DELETE FROM review_queue WHERE final_text='ud_pending'"); c.commit()
+    await user.open("/settings")
+    click_delete_of("uidel")
+    await user.should_see("它发过东西")
+    _click_button(user, "确认删除")
+    await user.should_see("已删除 @uidel：凭据已清空")
+    await user.should_see("另有 1 个已删除的账号")
+    with get_conn() as c:
+        row = c.execute("SELECT deleted_at FROM accounts WHERE id=?", (uid,)).fetchone()
+    assert row["deleted_at"]
+    await user.open(f"/queue?status=sent&account={uid}")
+    await user.should_see("@uidel（已删除）")
+    await user.should_see("@uidel 已删除，这里只剩它的历史记录")
+    # 重新添加同名账号：接回原来那条记录
+    await user.open("/settings")
+    user.find("添加账号").click()
+    await user.should_see("handle（不含 @）")
+    [e for e in user.find("handle（不含 @）").elements if isinstance(e, ui.input)][0].set_value("uidel")
+    save = [b for b in user.find(kind=ui.button).elements if b.text == "保存" and _in_dialog(b)]
+    UserInteraction(user, {save[0]}, None).click()
+    await user.should_see("这个账号之前删除过，已恢复并接上原来的发送记录")
+    with get_conn() as c:
+        rows = c.execute("SELECT id, deleted_at, status FROM accounts WHERE handle='uidel'").fetchall()
+        assert len(rows) == 1 and rows[0]["id"] == uid and rows[0]["deleted_at"] is None and rows[0]["status"] == "active", [dict(r) for r in rows]
+        c.execute("DELETE FROM review_queue WHERE account_id=?", (uid,))
+        c.execute("DELETE FROM accounts WHERE id=?", (uid,)); c.commit()

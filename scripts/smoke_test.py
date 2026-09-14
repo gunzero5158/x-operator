@@ -1696,5 +1696,62 @@ with get_conn() as conn:
     conn.execute("UPDATE accounts SET status='active' WHERE handle='small1'"); conn.commit()
 print("[6f27] 任务队列按账号筛选 / 批量转给其他账号 / 批量删除只删该账号 OK")
 
+# [6f28] 删除账号：没记录真删 / 有未发送条目或进行中的计划拒绝并说清楚 / 发过东西软删除（保留记录、各处消失、规则引用去掉）/ 同名接回
+from x_operator.core.accounts import account_references, delete_account, deleted_account_id  # noqa: E402
+with get_conn() as conn:
+    for h in ("del_empty", "del_busy", "del_hist"):
+        conn.execute("INSERT INTO accounts(handle, access_type, credentials) VALUES (?,'unofficial',?)", (h, json.dumps({"auth_token": "a" * 40, "ct0": "b" * 32})))
+    did = {r["handle"]: r["id"] for r in conn.execute("SELECT id, handle FROM accounts WHERE handle LIKE 'del_%'")}
+    any_tt = conn.execute("SELECT id FROM target_tweets LIMIT 1").fetchone()["id"]
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at) VALUES (?,'reply',?,'del_q1','pending',?)",
+                 (did["del_busy"], any_tt, utcnow_iso()))
+    conn.execute("INSERT INTO scheduled_posts(account_id, content_mode, schedule_type, schedule_expr, status) VALUES (?,'pool','daily','09:00','active')", (did["del_busy"],))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at, sent_at) VALUES (?,'reply',?,'del_q2','sent',?,?)",
+                 (did["del_hist"], any_tt, utcnow_iso(), utcnow_iso()))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at) VALUES (?,'reply',?,'del_q3','skipped',?)",
+                 (did["del_hist"], any_tt, utcnow_iso()))
+    conn.execute("INSERT INTO interactions(account_id, action, tweet_id, author_id, sent_at) VALUES (?,'reply','del_t1','del_author',?)", (did["del_hist"], utcnow_iso()))
+    conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,reply_account_mode,reply_account_ids,source_kind,feed_account_id) "
+                 "VALUES ('删号规则1','k','s','ja','include',?,'home',?)", (json.dumps([did["del_hist"], aid["small2"]]), did["del_hist"]))
+    conn.execute("INSERT INTO search_rules(name,keyword_query,semantic_criteria,lang,reply_account_mode,reply_account_ids) VALUES ('删号规则2','k','s','ja','exclude',?)",
+                 (json.dumps([did["del_hist"]]),))
+    conn.execute("INSERT INTO watched_users(handle,x_user_id,reply_account_mode,reply_account_ids) VALUES ('del_w','del_w_id','include',?)", (json.dumps([did["del_hist"]]),))
+    conn.commit()
+res, msg = delete_account(did["del_empty"])
+assert res == "deleted" and "彻底删除" in msg, (res, msg)
+with get_conn() as conn:
+    assert conn.execute("SELECT 1 FROM accounts WHERE id=?", (did["del_empty"],)).fetchone() is None
+res, msg = delete_account(did["del_busy"])
+assert res == "blocked" and "1 条没发出去的条目" in msg and "1 个进行中或暂停中的定时发帖计划" in msg, msg
+refs = account_references(did["del_hist"])
+assert (refs["unsent"], refs["sent"], refs["queue_history"], refs["interactions"]) == (0, 1, 2, 1), refs
+res, msg = delete_account(did["del_hist"])
+assert res == "retired" and "1 条已发送记录" in msg and "1 条已跳过 / 已过期记录" in msg and "1 条发送账本" in msg and "3 条搜索规则 / 监控推主" in msg, msg
+with get_conn() as conn:
+    row = conn.execute("SELECT * FROM accounts WHERE id=?", (did["del_hist"],)).fetchone()
+    assert row["deleted_at"] and row["status"] == "paused" and row["credentials"] == "{}", dict(row)
+    r1 = conn.execute("SELECT reply_account_mode, reply_account_ids, feed_account_id FROM search_rules WHERE name='删号规则1'").fetchone()
+    r2 = conn.execute("SELECT reply_account_mode, reply_account_ids FROM search_rules WHERE name='删号规则2'").fetchone()
+    w = conn.execute("SELECT reply_account_mode, reply_account_ids FROM watched_users WHERE handle='del_w'").fetchone()
+    assert (r1["reply_account_mode"], r1["reply_account_ids"], r1["feed_account_id"]) == ("include", f"[{aid['small2']}]", None), dict(r1)
+    assert (r2["reply_account_mode"], r2["reply_account_ids"]) == ("auto", "[]") and (w["reply_account_mode"], w["reply_account_ids"]) == ("auto", "[]")
+    assert conn.execute("SELECT COUNT(*) c FROM interactions WHERE tweet_id='del_t1'").fetchone()["c"] == 1   # 去重账本还在
+assert did["del_hist"] not in account_options() and did["del_hist"] not in account_options(with_auto=False)
+sent_rows = [r for r in _load("sent", did["del_hist"]) if r["final_text"] == "del_q2"]
+assert sent_rows and sent_rows[0]["acc_deleted"], [dict(r) for r in sent_rows]         # 历史记录照样查得到，标着已删除
+for _ in range(5):
+    acc, _n = choose_reply_account({"reply_account_mode": "include", "reply_account_ids": json.dumps([did["del_hist"]])}, tester_row)
+    assert acc["id"] != did["del_hist"]
+assert delete_account(did["del_hist"])[0] == "blocked"                                  # 删过的不能再删
+assert deleted_account_id("del_hist") == did["del_hist"] and deleted_account_id("small2") is None
+with get_conn() as conn:
+    conn.execute("DELETE FROM review_queue WHERE final_text='del_q1'")
+    conn.execute("DELETE FROM scheduled_posts WHERE account_id=?", (did["del_busy"],)); conn.commit()
+assert delete_account(did["del_busy"])[0] == "deleted"                                  # 处理掉之后就能删
+with get_conn() as conn:
+    conn.execute("DELETE FROM search_rules WHERE name IN ('删号规则1','删号规则2')")
+    conn.execute("DELETE FROM watched_users WHERE handle='del_w'"); conn.commit()
+print("[6f28] 删除账号：无记录真删 / 未发送条目与进行中计划拒绝 / 发过东西软删除保留账本、各处消失、规则引用去掉 / 同名可接回 OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")
