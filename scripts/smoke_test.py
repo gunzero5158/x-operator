@@ -1658,5 +1658,43 @@ assert reply_account_summary({"reply_account_mode": "include", "reply_account_id
 assert reply_account_summary({"reply_account_mode": "exclude", "reply_account_ids": json.dumps([aid["small1"], 99999])}) == "自动轮流，排除 @small1、（已删除）"
 print("[6f26] 回复账号名单（指定几个轮流 / 排除某些 / 排除光了不生成 / 停用退回自动 / 卡片说法 / 旧数据兼容）OK")
 
+# [6f27] 任务队列按账号筛选：失效账号的条目筛出来、批量转给其他账号（平均分 / 超长的待发送退回待审核 / 已发送不动）、批量删除只删这个号的
+from x_operator.ui.queue import UNSENT, _counts, _delete_all, _load, _matching_ids, transfer_items  # noqa: E402
+with get_conn() as conn:
+    conn.execute("UPDATE accounts SET status='auth_error' WHERE handle='small1'")
+    conn.execute("UPDATE accounts SET status='active', is_premium=0 WHERE handle IN ('small2','tester')")
+    any_tt = conn.execute("SELECT id FROM target_tweets LIMIT 1").fetchone()["id"]
+    long_zh = "很长的回复" * 40   # 400 单位，免费账号发不了
+    for st, txt in (("approved", long_zh), ("pending", "qa_p1"), ("pending", "qa_p2"), ("failed", "qa_f"), ("skipped", "qa_k"),
+                    ("sent", "qa_s"), ("sending", "qa_ing")):
+        conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at, decided_at) "
+                     "VALUES (?,'reply',?,?,?,?,?)", (aid["small1"], any_tt, "qa_" + txt if st == "approved" else txt, st, utcnow_iso(), utcnow_iso()))
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at) "
+                 "VALUES (?,'reply',?,'qa_other','pending',?)", (aid["small2"], any_tt, utcnow_iso()))
+    conn.commit()
+mine = [r for r in _load(UNSENT, aid["small1"]) if (r["final_text"] or "").startswith("qa_")]
+assert sorted(r["status"] for r in mine) == ["approved", "failed", "pending", "pending"] and all(r["account_id"] == aid["small1"] for r in mine), [dict(r) for r in mine]
+assert _counts(aid["small1"])[UNSENT] >= 4 and _counts(aid["small1"]).get("sent", 0) >= 1
+ids_unsent = [i for i in _matching_ids(UNSENT, aid["small1"]) if i in {r["id"] for r in mine}]
+res = transfer_items(ids_unsent, [aid["small2"], aid["tester"]])
+assert res["moved"] == 4 and res["per_account"] == {"small2": 2, "tester": 2} and res["back_to_pending"] == 1 and not res["error"], res
+with get_conn() as conn:
+    row = conn.execute("SELECT account_id, status FROM review_queue WHERE final_text=?", ("qa_" + long_zh,)).fetchone()
+    assert row["account_id"] == aid["small2"] and row["status"] == "pending", dict(row)   # 超出免费账号上限 → 退回待审核
+    sent_ids = [r["id"] for r in conn.execute("SELECT id FROM review_queue WHERE final_text IN ('qa_s','qa_ing','qa_k')")]
+res = transfer_items(sent_ids, [aid["tester"]])
+assert res["moved"] == 1 and res["not_movable"] == 2, res                                  # 已跳过能转，发送中 / 已发送不动
+assert transfer_items(sent_ids, [aid["small1"]])["error"]                                   # 目标账号失效
+with get_conn() as conn:
+    conn.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, final_text, status, created_at) "
+                 "VALUES (?,'reply',?,'qa_del','pending',?)", (aid["small1"], any_tt, utcnow_iso())); conn.commit()
+before_other = len(_matching_ids("pending", aid["small2"]))
+assert _delete_all("pending", aid["small1"]) >= 1
+assert not _matching_ids("pending", aid["small1"]) and len(_matching_ids("pending", aid["small2"])) == before_other
+with get_conn() as conn:
+    conn.execute("DELETE FROM review_queue WHERE final_text LIKE 'qa_%'")
+    conn.execute("UPDATE accounts SET status='active' WHERE handle='small1'"); conn.commit()
+print("[6f27] 任务队列按账号筛选 / 批量转给其他账号 / 批量删除只删该账号 OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

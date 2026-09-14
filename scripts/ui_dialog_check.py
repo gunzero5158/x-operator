@@ -646,6 +646,7 @@ async def test_rule_dialog_reply_account_list_and_zh_langs(user: User):
     await user.should_see("回复账号：轮流：@acc1、@small1")
     await user.should_see("简体中文 / 繁体中文")
 
+    await user.open("/rules")   # 重新打开页面：关掉的弹窗元素还在，「保存」按钮会有两个
     _click_button(user, "新建规则")
     mode, ids = fields()
     UserInteraction(user, {mode}, None).trigger("update:modelValue", {"value": list(mode.options).index("exclude")})
@@ -660,3 +661,48 @@ async def test_rule_dialog_reply_account_list_and_zh_langs(user: User):
         c.execute("DELETE FROM search_rules WHERE name IN ('名单规则','排除规则')"); c.commit()
     assert got["名单规则"] == ("zh-Hans,zh-Hant", "include", f"[{aid['acc1']}, {aid['small1']}]", None), got
     assert got["排除规则"][1:] == ("exclude", f"[{aid['small1']}]", None), got
+
+
+async def test_queue_account_filter_transfer_and_delete(user: User):
+    """任务队列按账号筛选：从账号卡片的「它的任务」进来只看这个号的未发送条目，失效账号有提示；
+    批量转给其他账号后落库；批量删除只删筛选出来的。"""
+    _pages()
+    with get_conn() as c:
+        aid = {r["handle"]: r["id"] for r in c.execute("SELECT id, handle FROM accounts")}
+        c.execute("UPDATE accounts SET status='auth_error' WHERE id=?", (aid["small1"],))
+        for txt, st in (("af_p", "pending"), ("af_a", "approved"), ("af_f", "failed")):
+            c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, created_at) "
+                      "VALUES (?,'reply',1,1,?,?,?)", (aid["small1"], txt, st, utcnow_iso()))
+        c.commit()
+    await user.open("/settings")
+    await user.should_see("它的任务（3 条未发送）")
+    await user.open(f"/queue?status=unsent&account={aid['small1']}")
+    await user.should_see("@small1 当前「凭据失效」，名下 3 条未发送的条目发不出去")
+    await user.should_see("af_f")
+    await user.should_see("af_a")
+    _click_button(user, "批量转给其他账号")
+    await user.should_see("转给哪些账号（选多个 = 平均分）")
+    sel = [e for e in user.find(kind=ui.select).elements if e._props.get("label") == "转给哪些账号（选多个 = 平均分）"][0]
+    assert aid["small1"] not in sel.options and aid["acc1"] in sel.options, sel.options
+    sel.set_value([aid["acc1"]])
+    _click_button(user, "转移")
+    await user.should_see("已转移 3 条：@acc1 3 条")
+    await user.should_see("这个账号在此状态下没有条目")
+    with get_conn() as c:
+        got = {r["final_text"]: (r["account_id"], r["status"]) for r in c.execute("SELECT * FROM review_queue WHERE final_text LIKE 'af_%'")}
+    assert got == {"af_p": (aid["acc1"], "pending"), "af_a": (aid["acc1"], "approved"), "af_f": (aid["acc1"], "failed")}, got
+    # 批量删除只删 small1 名下的
+    with get_conn() as c:
+        c.execute("INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, final_text, status, created_at) "
+                  "VALUES (?,'reply',1,1,'af_del','pending',?)", (aid["small1"], utcnow_iso())); c.commit()
+    await user.open(f"/queue?status=pending&account={aid['small1']}")
+    await user.should_see("af_del")
+    _click_button(user, "批量删除")
+    await user.should_see("删除@small1 的「待审核」全部 1 条条目？")
+    _click_button(user, "全部删除")
+    await user.should_see("已删除 1 条")
+    with get_conn() as c:
+        left = {r["final_text"] for r in c.execute("SELECT final_text FROM review_queue WHERE final_text LIKE 'af_%'")}
+        c.execute("DELETE FROM review_queue WHERE final_text LIKE 'af_%'")
+        c.execute("UPDATE accounts SET status='active' WHERE id=?", (aid["small1"],)); c.commit()
+    assert left == {"af_p", "af_a", "af_f"}, left

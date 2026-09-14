@@ -1,5 +1,7 @@
 """任务队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、换素材、批准/跳过/拉黑/删除。
 
+顶部可按状态 + 发送账号筛选；选了某个账号后能把筛出来的条目批量转给其他账号或批量删除（账号凭据失效时清理用）。
+
 自动刷新只在「条目集合变了」时才重绘，避免把用户正在编辑的文案冲掉。
 已发送条目显示 X 上的链接与「回查核实」结果（发送接口返回成功 ≠ 一定真的发出去了）。
 """
@@ -33,8 +35,29 @@ _ORDER_BY = {
 _ORDER_DEFAULT = "COALESCE(rq.decided_at, rq.created_at) DESC, rq.id DESC"
 
 
-def _load(status: str):
+# 状态筛选里的「未发送的全部」：还有可能发出去的几种状态放在一起看，账号失效时一次筛全
+UNSENT = "unsent"
+UNSENT_STATUSES = ("pending", "approved", "failed")
+UNSENT_LABEL = "未发送的全部（待审核 + 待发送 + 失败）"
+# 能批量转给别的账号的状态（发送中 / 已发送的不能动）
+TRANSFERABLE = ("pending", "approved", "failed", "skipped", "expired")
+ALL_ACCOUNTS = 0
+ACC_STATUS_LABEL = {"active": "", "paused": "已暂停", "auth_error": "凭据失效"}
+
+
+def _where(status: str, account_id: int = ALL_ACCOUNTS) -> tuple[str, list]:
+    if status == UNSENT:
+        sql, args = f"rq.status IN ({','.join('?' * len(UNSENT_STATUSES))})", list(UNSENT_STATUSES)
+    else:
+        sql, args = "rq.status=?", [status]
+    if account_id:
+        sql += " AND rq.account_id=?"; args.append(int(account_id))
+    return sql, args
+
+
+def _load(status: str, account_id: int = ALL_ACCOUNTS):
     order = _ORDER_BY.get(status, _ORDER_DEFAULT)
+    where, args = _where(status, account_id)
     with get_conn() as conn:
         items = conn.execute(
             "SELECT rq.*, a.handle AS acc_handle, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
@@ -46,14 +69,76 @@ def _load(status: str):
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
             "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
             "LEFT JOIN watched_users wu ON wu.id=tt.source_rule_id AND tt.source='monitor' "
-            f"WHERE rq.status=? ORDER BY {order} LIMIT {_LIMIT}", (status,)).fetchall()
+            f"WHERE {where} ORDER BY {order} LIMIT {_LIMIT}", args).fetchall()
     return items
 
 
-def _counts() -> dict[str, int]:
+def _counts(account_id: int = ALL_ACCOUNTS) -> dict[str, int]:
+    """各状态条数（选了账号就只数它的），另带 unsent = 未发送的全部。"""
     with get_conn() as conn:
-        rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue GROUP BY status").fetchall()
-    return {r["status"]: r["c"] for r in rows}
+        if account_id:
+            rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue WHERE account_id=? GROUP BY status", (int(account_id),)).fetchall()
+        else:
+            rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue GROUP BY status").fetchall()
+    out = {r["status"]: r["c"] for r in rows}
+    out[UNSENT] = sum(out.get(k, 0) for k in UNSENT_STATUSES)
+    return out
+
+
+def _account_filter_options(status: str) -> dict:
+    """账号筛选下拉：{0: 全部账号, id: @handle · 凭据失效（当前状态下 N 条）}。停用 / 失效的账号也列出来，正是要清理它们。"""
+    with get_conn() as conn:
+        accs = conn.execute("SELECT id, handle, status FROM accounts ORDER BY (status='active'), is_primary DESC, id").fetchall()
+        where, args = _where(status)
+        cnt = {r["account_id"]: r["c"] for r in conn.execute(
+            f"SELECT rq.account_id, COUNT(*) AS c FROM review_queue rq WHERE {where} GROUP BY rq.account_id", args)}
+    opts = {ALL_ACCOUNTS: "全部账号"}
+    for a in accs:
+        st = ACC_STATUS_LABEL.get(a["status"], a["status"])
+        opts[a["id"]] = f"@{a['handle']}" + (f" · {st}" if st else "") + f"（{cnt.get(a['id'], 0)}）"
+    return opts
+
+
+def _matching_ids(status: str, account_id: int = ALL_ACCOUNTS) -> list[int]:
+    """当前筛选下的全部条目 id（不受页面只显示 200 条的限制）。"""
+    where, args = _where(status, account_id)
+    with get_conn() as conn:
+        return [r["id"] for r in conn.execute(f"SELECT rq.id FROM review_queue rq WHERE {where} ORDER BY rq.id", args).fetchall()]
+
+
+def transfer_items(item_ids: list[int], target_ids: list[int]) -> dict:
+    """把条目批量转给其他账号：选多个目标账号就按顺序平均分。只转 TRANSFERABLE 状态的（发送中 / 已发送跳过）；
+    目标账号必须是启用中的。待发送的条目如果超出新账号的长度上限（免费账号 280 单位），退回待审核让人删减，不然发送时必失败。
+    返回 {moved, per_account: {handle: n}, back_to_pending, not_movable, error}。"""
+    res = {"moved": 0, "per_account": {}, "back_to_pending": 0, "not_movable": 0, "error": ""}
+    with get_conn() as conn:
+        accs = {a["id"]: a for a in conn.execute("SELECT * FROM accounts WHERE status='active'").fetchall()}
+        targets = [accs[i] for i in dict.fromkeys(int(t) for t in target_ids) if i in accs]
+        if not targets:
+            res["error"] = "没有选启用中的目标账号"
+            return res
+        items = conn.execute(f"SELECT id, status, final_text FROM review_queue WHERE id IN ({','.join('?' * len(item_ids))}) ORDER BY id",
+                             list(item_ids)).fetchall() if item_ids else []
+        k = 0
+        for it in items:
+            if it["status"] not in TRANSFERABLE:
+                res["not_movable"] += 1
+                continue
+            acc = targets[k % len(targets)]
+            k += 1
+            if it["status"] == "approved" and textlimit.over_by(it["final_text"] or "", acc):
+                cur = conn.execute("UPDATE review_queue SET account_id=?, status='pending', decided_at=NULL WHERE id=? AND status='approved'",
+                                   (acc["id"], it["id"]))
+                res["back_to_pending"] += cur.rowcount
+            else:
+                cur = conn.execute("UPDATE review_queue SET account_id=? WHERE id=? AND status=?", (acc["id"], it["id"], it["status"]))
+            if cur.rowcount:
+                res["moved"] += 1
+                res["per_account"][acc["handle"]] = res["per_account"].get(acc["handle"], 0) + 1
+            else:
+                res["not_movable"] += 1   # 刚好被分发器拿去发了
+        conn.commit()
+    return res
 
 
 def _approve(item_id: int, text: str, refresh):
@@ -164,9 +249,8 @@ def _delete(item_id: int) -> None:
         conn.commit()
 
 
-def _delete_all(status: str) -> int:
-    with get_conn() as conn:
-        ids = [r["id"] for r in conn.execute("SELECT id FROM review_queue WHERE status=?", (status,)).fetchall()]
+def _delete_all(status: str, account_id: int = ALL_ACCOUNTS) -> int:
+    ids = _matching_ids(status, account_id)
     for i in ids:
         _delete(i)
     return len(ids)
@@ -174,17 +258,28 @@ def _delete_all(status: str) -> int:
 
 def register(jobs) -> None:
     @ui.page("/queue")
-    def queue_page():
+    def queue_page(status: str = "pending", account: int = ALL_ACCOUNTS):
         with shell("/queue"):
+            if status not in QUEUE_STATUS_LABEL and status != UNSENT:
+                status = "pending"
+            if account not in _account_filter_options(status):
+                account = ALL_ACCOUNTS
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("任务队列").classes("text-2xl font-bold")
                 with ui.row().classes("items-center gap-2"):
-                    status_sel = ui.select(_status_options(), value="pending").props("dense outlined")
+                    status_sel = ui.select(_status_options(account), value=status).props("dense outlined")
+                    acc_filter = ui.select(_account_filter_options(status), value=account, label="发送账号") \
+                        .props("dense outlined").classes("min-w-40") \
+                        .tooltip("只看某个账号的条目；账号凭据失效时选它，再批量转给其他账号或批量删除")
                     recheck_btn = ui.button("重新判断全部已跳过", icon="refresh").props("outline dense") \
                         .tooltip("逐条再查黑名单 / 是否已回复过 / 作者冷却；都不成立的放回待审核")
-                    clear_btn = ui.button("清空此状态", icon="delete_sweep").props("outline color=negative dense")
+                    transfer_btn = ui.button("批量转给其他账号", icon="swap_horiz").props("outline dense color=primary") \
+                        .tooltip("把当前筛出来的全部条目改由别的启用账号发送（选多个就平均分）")
+                    clear_btn = ui.button("批量删除", icon="delete_sweep").props("outline color=negative dense") \
+                        .tooltip("删除当前筛选（状态 + 账号）下的全部条目，不只是页面上显示的")
                     ui.button("触发发送", icon="send",
                               on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
+            acc_hint = ui.label("").classes("text-sm text-orange-600")
 
             ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
                      ).classes("text-xs text-gray-400")
@@ -208,8 +303,11 @@ def register(jobs) -> None:
             def signature(items) -> tuple:
                 return tuple((it["id"], it["status"], it["verify_status"]) for it in items)
 
+            def acc_id() -> int:
+                return int(acc_filter.value or 0)
+
             def render(force: bool = True):
-                items = _load(status_sel.value)
+                items = _load(status_sel.value, acc_id())
                 sig = signature(items)
                 if not force:
                     if sig == state["sig"]:
@@ -220,11 +318,13 @@ def register(jobs) -> None:
                 paused_hint.text = ""
                 state["sig"] = sig
                 state["dirty"].clear()
-                status_sel.set_options(_status_options(), value=status_sel.value)
+                status_sel.set_options(_status_options(acc_id()), value=status_sel.value)
+                acc_filter.set_options(_account_filter_options(status_sel.value), value=acc_id())
+                sync_toolbar()
                 body.clear()
                 with body:
                     if not items:
-                        ui.label("此状态下暂无条目 🎉").classes("text-gray-400")
+                        ui.label("此状态下暂无条目 🎉" if not acc_id() else "这个账号在此状态下没有条目").classes("text-gray-400")
                         return
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最新的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
@@ -332,36 +432,111 @@ def register(jobs) -> None:
                 render()
             recheck_btn.on_click(recheck_all)
 
-            async def clear_all():
+            def scope_text() -> str:
                 st = status_sel.value
-                n = _counts().get(st, 0)
+                label = UNSENT_LABEL if st == UNSENT else QUEUE_STATUS_LABEL.get(st, st)
+                who = _account_handle(acc_id())
+                return (f"@{who} 的" if who else "") + f"「{label}」"
+
+            def sync_toolbar():
+                st, aid = status_sel.value, acc_id()
+                recheck_btn.set_visibility(st == "skipped" and not aid)
+                transfer_btn.set_visibility(bool(aid) and st not in ("sent", "sending"))
+                acc_hint.text = ""
+                if aid:
+                    with get_conn() as conn:
+                        a = conn.execute("SELECT handle, status FROM accounts WHERE id=?", (aid,)).fetchone()
+                    if a is not None and a["status"] != "active":
+                        n = _counts(aid).get(UNSENT, 0)
+                        acc_hint.text = (f"@{a['handle']} 当前「{ACC_STATUS_LABEL.get(a['status'], a['status'])}」，名下 {n} 条未发送的条目发不出去："
+                                         "可以「批量转给其他账号」，或「批量删除」。状态选「未发送的全部」可以一次处理完。")
+
+            async def clear_all():
+                st, aid = status_sel.value, acc_id()
+                n = len(_matching_ids(st, aid))
                 if not n:
                     ui.notify("没有可删除的条目", type="info"); return
                 state["busy"] += 1
                 try:
-                    ok = await confirm(f"删除全部 {n} 条「{QUEUE_STATUS_LABEL.get(st, st)}」条目？",
+                    ok = await confirm(f"删除{scope_text()}全部 {n} 条条目？",
+                                       "没发出去的条目删除后，对应的抓取记录会退回「达标但未生成回复」，之后可以重新处理；"
                                        "已发送记录删除后不影响去重账本（不会重复回复同一推文）。", ok_label="全部删除")
                 finally:
                     state["busy"] -= 1
                 if ok:
-                    _delete_all(st)
-                    ui.notify(f"已删除 {n} 条", type="positive")
+                    done = _delete_all(st, aid)
+                    ui.notify(f"已删除 {done} 条", type="positive")
                     render()
             clear_btn.on_click(clear_all)
 
-            def on_status_change():
-                recheck_btn.set_visibility(status_sel.value == "skipped")
+            async def transfer_all():
+                st, aid = status_sel.value, acc_id()
+                ids = _matching_ids(st, aid)
+                if not ids:
+                    ui.notify("没有可转移的条目", type="info"); return
+                state["busy"] += 1
+                try:
+                    targets = await _transfer_dialog(scope_text(), len(ids), aid)
+                finally:
+                    state["busy"] -= 1
+                if not targets:
+                    return
+                res = transfer_items(ids, targets)
+                if res["error"]:
+                    ui.notify(res["error"], type="negative"); return
+                parts = [f"已转移 {res['moved']} 条：" + "、".join(f"@{h} {n} 条" for h, n in res["per_account"].items())]
+                if res["back_to_pending"]:
+                    parts.append(f"其中 {res['back_to_pending']} 条待发送的超出新账号的长度上限，已退回待审核，请删减或点「AI 缩写」")
+                if res["not_movable"]:
+                    parts.append(f"{res['not_movable']} 条正在发送或已发送，没动")
+                notify_long("；".join(parts), ok=res["moved"] > 0, kind=None if res["moved"] else "warning")
                 render()
-            status_sel.on("update:model-value", lambda e: on_status_change())
-            recheck_btn.set_visibility(False)
+            transfer_btn.on_click(transfer_all)
+
+            def on_filter_change():
+                render()
+            status_sel.on("update:model-value", lambda e: on_filter_change())
+            acc_filter.on("update:model-value", lambda e: on_filter_change())
             render()
             ui.timer(5.0, lambda: render(force=False))
 
 
-def _status_options() -> dict:
-    c = _counts()
+def _status_options(account_id: int = ALL_ACCOUNTS) -> dict:
+    c = _counts(account_id)
     return {k: f"{v}（{c.get(k, 0)}）" for k, v in QUEUE_STATUS_LABEL.items() if k != "sending"} | \
-        ({"sending": f"发送中（{c['sending']}）"} if c.get("sending") else {})
+        ({"sending": f"发送中（{c['sending']}）"} if c.get("sending") else {}) | {UNSENT: f"{UNSENT_LABEL}（{c[UNSENT]}）"}
+
+
+def _account_handle(account_id: int) -> str:
+    if not account_id:
+        return ""
+    with get_conn() as conn:
+        row = conn.execute("SELECT handle FROM accounts WHERE id=?", (int(account_id),)).fetchone()
+    return row["handle"] if row else ""
+
+
+async def _transfer_dialog(scope: str, n: int, source_id: int) -> list[int] | None:
+    """选转给哪些账号。返回目标账号 id 列表，取消返回 None。"""
+    opts = {k: v for k, v in _active_account_options().items() if k != source_id}
+    with ui.dialog() as dlg, ui.card().classes("w-[560px] max-w-[95vw]"):
+        ui.label("批量转给其他账号").classes("text-lg font-bold")
+        ui.label(f"把{scope}共 {n} 条条目改由下面选的账号发送。").classes("text-sm")
+        if not opts:
+            ui.label("除了这个账号没有其他启用中的账号：先到「设置 → 账号」启用或添加一个。").classes("text-sm text-orange-600")
+        sel = ui.select(opts, value=[], multiple=True, label="转给哪些账号（选多个 = 平均分）").classes("w-full").props("outlined use-chips")
+        ui.label("条目状态不变：待审核的仍待审核，待发送的按新账号的活跃时段 / 发送间隔 / 日上限发出；"
+                 "失败的转过去后可以再点「捞回待审核」。待发送的条目超出新账号长度上限（免费账号 280 单位）会退回待审核。"
+                 "发送中 / 已发送的不会动。").classes("text-xs text-gray-400")
+
+        def ok():
+            if not sel.value:
+                ui.notify("先选至少一个账号", type="warning"); return
+            dlg.submit([int(x) for x in sel.value])
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
+            ui.button("转移", icon="swap_horiz", on_click=ok).props("color=primary")
+    dlg.open()
+    return await dlg
 
 
 async def _attach_dialog(initial: list[str]):

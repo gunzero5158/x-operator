@@ -655,6 +655,8 @@ def _accounts_panel():
         body.clear()
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM accounts ORDER BY is_primary DESC, id").fetchall()
+            unsent = {r["account_id"]: r["c"] for r in conn.execute(
+                "SELECT account_id, COUNT(*) c FROM review_queue WHERE status IN ('pending','approved','failed') GROUP BY account_id")}
         with body:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label(f"共 {len(rows)} 个账号").classes("text-sm text-gray-400")
@@ -689,6 +691,11 @@ def _accounts_panel():
                             ui.button("暂停", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "paused"), render())).props("flat dense")
                         else:
                             ui.button("启用", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "active"), render())).props("flat dense")
+                        if unsent.get(a["id"]):
+                            ui.button(f"它的任务（{unsent[a['id']]} 条未发送）", icon="list_alt",
+                                      on_click=lambda aid=a["id"]: ui.navigate.to(f"/queue?status=unsent&account={aid}")) \
+                                .props("flat dense" + ("" if a["status"] == "active" else " color=orange")) \
+                                .tooltip("打开任务队列、只看这个账号的待审核 / 待发送 / 失败条目，可批量转给其他账号或删除")
                         ui.button("删除", icon="delete", on_click=lambda aa=a: del_account(aa)).props("flat dense color=negative")
     render()
 
