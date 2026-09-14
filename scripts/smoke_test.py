@@ -1753,5 +1753,96 @@ with get_conn() as conn:
     conn.execute("DELETE FROM watched_users WHERE handle='del_w'"); conn.commit()
 print("[6f28] 删除账号：无记录真删 / 未发送条目与进行中计划拒绝 / 发过东西软删除保留账本、各处消失、规则引用去掉 / 同名可接回 OK")
 
+# [6f29] 监控推主按观看量区间筛：高于上限直接过滤 / 低于下限在复查期内每次监控重看、涨上来就处理 / 过了复查期定论 / 游标不倒退
+from x_operator.adapters.mock import MockXClient  # noqa: E402
+from x_operator.core.monitor import views_verdict  # noqa: E402
+now_ = datetime.now(timezone.utc)
+
+
+def _vt(tid, views, age_h, text):
+    return TweetData(tweet_id=tid, author_id="vw_author", author_handle="vw_user", text=text, lang="ja",
+                     created_at=now_ - timedelta(hours=age_h), is_retweet=False, in_reply_to_tweet_id=None, view_count=views)
+
+
+vw_feed = {"tweets": [_vt("9100000000001", 200, 1, "動画編集ソフトの月額が高くて困ってる、安い代替ありますか"),
+                      _vt("9100000000002", 80000, 0.5, "サブスク代が高すぎて個人開発がつらい、何か安い方法ない？"),
+                      _vt("9100000000003", 3000, 2, "クラウド費用が想像以上、個人だと厳しい、代替ないですか"),
+                      _vt("9100000000004", 100, 10, "ツールの契約が多すぎてコストが読めない、まとめたい")]}
+vw_calls = []
+
+
+def _fake_gut(self, user_id, since_id=None, max_results=5, include_replies=False, start_time=None):
+    vw_calls.append((since_id, start_time))
+    tw = list(vw_feed["tweets"])
+    return FetchResult(tweets=tw, newest_id=max((t.tweet_id for t in tw), key=int), reads_consumed=len(tw))
+
+
+orig_gut = MockXClient.get_user_tweets
+MockXClient.get_user_tweets = _fake_gut
+# 前面的用例在缓存的客户端实例上挂过同名属性，会盖住类上的方法：实例上也换掉
+with get_conn() as conn:
+    _vw_clients = [factory.get_client(r) for r in conn.execute("SELECT * FROM accounts WHERE status='active' AND deleted_at IS NULL")]
+_vw_saved = [(c, c.__dict__.get("get_user_tweets")) for c in _vw_clients]
+for c in _vw_clients:
+    c.get_user_tweets = _fake_gut.__get__(c)
+_caps = (config.get_int("read_cap_unofficial", 40), config.get_int("read_cap_official", 5))
+config.set_value("read_cap_unofficial", 100000); config.set_value("read_cap_official", 100000)
+with get_conn() as conn:
+    conn.execute("UPDATE watched_users SET enabled=0 WHERE enabled=1 AND handle!='vw_user'")
+    disabled_ids = [r["id"] for r in conn.execute("SELECT id FROM watched_users WHERE enabled=0 AND handle!='vw_user'")]
+    conn.execute("INSERT INTO watched_users(handle,x_user_id,min_views,max_views,views_wait_hours,lookback_hours) VALUES ('vw_user','vw_uid',1000,50000,6,24)")
+    vw_id = conn.execute("SELECT id FROM watched_users WHERE handle='vw_user'").fetchone()["id"]
+    conn.commit()
+try:
+    assert views_verdict(_vt("1", None, 1, "x"), 1000, 0, 6, now_)[1] is not None   # 拿不到观看量按 0 算，进复查
+    st1 = jobs.monitor.run_once()
+    assert st1.tweets_fetched == 4 and st1.views_waiting == 1, st1.as_msg()
+    with get_conn() as conn:
+        rows = {r["tweet_id"]: r for r in conn.execute("SELECT * FROM target_tweets WHERE source_rule_id=? AND source='monitor'", (vw_id,))}
+    a1, b1, c1, d1 = (rows[f"910000000000{k}"] for k in (1, 2, 3, 4))
+    assert a1["process_status"] == "filtered" and a1["views_recheck_until"] and "每次监控都会复查" in a1["llm_relevance_reason"], dict(a1)
+    assert b1["process_status"] == "filtered" and not b1["views_recheck_until"] and "高于上限" in b1["llm_relevance_reason"], dict(b1)
+    assert c1["process_status"] in ("queued", "no_match"), dict(c1)
+    assert d1["process_status"] == "filtered" and not d1["views_recheck_until"] and "已过发推后 6 小时的复查期" in d1["llm_relevance_reason"], dict(d1)
+    assert vw_calls[-1][0] is None                                                   # 首次：按首次回溯拉
+    # 第二轮：A 涨到 1500，来了一条新的 F（10 次观看）；有游标但开着复查 → 按时间窗拉，A 这次被处理
+    vw_feed["tweets"][0] = _vt("9100000000001", 1500, 1.2, vw_feed["tweets"][0].text)
+    vw_feed["tweets"].append(_vt("9100000000005", 10, 0.1, "月額サービス多すぎ、安くまとめる方法知りたい"))
+    st2 = jobs.monitor.run_once()
+    assert vw_calls[-1][0] is None and vw_calls[-1][1] is not None, vw_calls[-1]     # 不用游标、按时间窗
+    assert st2.tweets_fetched == 1 and st2.views_passed == 1 and st2.views_waiting == 1, st2.as_msg()
+    assert "1 条复查后观看量达标，已处理" in st2.as_msg(), st2.as_msg()
+    with get_conn() as conn:
+        a2 = conn.execute("SELECT * FROM target_tweets WHERE tweet_id='9100000000001'").fetchone()
+        f2 = conn.execute("SELECT * FROM target_tweets WHERE tweet_id='9100000000005'").fetchone()
+        cur = conn.execute("SELECT last_seen_tweet_id FROM watched_users WHERE id=?", (vw_id,)).fetchone()["last_seen_tweet_id"]
+    assert a2["process_status"] in ("queued", "no_match") and a2["views_recheck_until"] is None and a2["view_count"] == 1500, dict(a2)
+    assert f2["process_status"] == "filtered" and f2["views_recheck_until"], dict(f2)
+    assert cur == "9100000000005", cur
+    # 第三轮：只返回旧推文（最新 id 比游标旧）→ 游标不倒退；关掉下限 → 复查中的定论、改回按游标拉
+    vw_feed["tweets"] = vw_feed["tweets"][:2]
+    with get_conn() as conn:
+        conn.execute("UPDATE watched_users SET min_views=0 WHERE id=?", (vw_id,)); conn.commit()
+    jobs.monitor.run_once()
+    assert vw_calls[-1][0] == "9100000000005", vw_calls[-1]
+    with get_conn() as conn:
+        f3 = conn.execute("SELECT * FROM target_tweets WHERE tweet_id='9100000000005'").fetchone()
+        assert conn.execute("SELECT last_seen_tweet_id FROM watched_users WHERE id=?", (vw_id,)).fetchone()["last_seen_tweet_id"] == "9100000000005"
+    assert f3["process_status"] == "filtered" and f3["views_recheck_until"] is None and "不再按观看量下限复查" in f3["llm_relevance_reason"], dict(f3)
+finally:
+    MockXClient.get_user_tweets = orig_gut
+    for c, saved in _vw_saved:
+        if saved is None:
+            c.__dict__.pop("get_user_tweets", None)
+        else:
+            c.get_user_tweets = saved
+    config.set_value("read_cap_unofficial", _caps[0]); config.set_value("read_cap_official", _caps[1])
+    with get_conn() as conn:
+        conn.execute("DELETE FROM watched_users WHERE handle='vw_user'")
+        if disabled_ids:
+            conn.execute(f"UPDATE watched_users SET enabled=1 WHERE id IN ({','.join('?' * len(disabled_ids))})", disabled_ids)
+        conn.commit()
+print("[6f29] 监控观看量区间（上限直接过滤 / 下限复查期内重看、涨上来自动处理 / 过期定论 / 游标不倒退 / 关掉下限收尾）OK")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL SMOKE OK")

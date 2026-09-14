@@ -1,6 +1,6 @@
 """监控推主（design-v1.1 §8.4）：添加/编辑/删除/启停被监控的推主，重置游标，运行一次监控。
 
-每个推主可单独设：首次回溯时间窗、含不含回复、回复方式（匹配素材 / AI 创作 / 只抓取）、AI 创作要求。
+每个推主可单独设：首次回溯时间窗、含不含回复、观看量区间（下限带复查期）、回复方式（匹配素材 / AI 创作 / 只抓取）、AI 创作要求。
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from ..adapters.base import XClientError
 from ..core import media
 from ..core.accounts import account_options, reply_account_summary
 from ..core.matcher import REPLY_MODE_LABEL
+from ..core.monitor import VIEWS_WAIT_MAX, views_setting
+from ..core.search import views_range_text
 from ..core.readpool import ReadPool
 from ..db.database import get_conn, utcnow_iso
 from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
@@ -20,6 +22,11 @@ HINTS = {
     "lookback": "第一次监控（或重置游标后）往回看多少小时内的推文；之后每次只看上次之后的新推文。推荐 24；发帖少的博主可 72~168。"
                 "每次最多拉 100 条，更早的下一轮凭游标继续。",
     "include": "开=连他回复别人的推文也监控；关=只看他自己发的主推。推荐关（回复通常没上下文，不适合再回复）。",
+    "views": "只处理观看量在这个区间里的推文，0 = 不限，可以只填一边。高于上限的直接过滤（观看量只会涨）。"
+             "监控通常在推文刚发出时就抓到，那时观看量还低：低于下限的会先标「过滤」，在发推后「复查时长」小时内每次监控都重新看观看量，"
+             "涨过下限就自动处理；复查期过了还不够才算定论。复查时长填 0 = 不复查，抓到时不够就不要。"
+             f"复查期内每次会按时间窗重拉这个推主的推文（最多 {VIEWS_WAIT_MAX} 小时）：小号通道不多花请求，官方 API 按返回条数计费会多读一些。"
+             "拿不到观看量的推文按 0 算。推荐：想挑已经有热度的帖子再回，下限 1000 左右、复查 6 小时；想避开回复会被淹没的爆款帖，填上限。",
 }
 
 
@@ -101,6 +108,10 @@ def register(jobs) -> None:
                                         if u["include_replies"]:
                                             tag("含回复", "metric", "这个推主回复别人的推文也抓")
                                         tag(f"首次回溯 {u['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
+                                        v_lo, v_hi, v_wait = views_setting(u)
+                                        if v_lo or v_hi:
+                                            tag(f"观看 {views_range_text(v_lo, v_hi)}" + (f" · 复查 {v_wait}h" if v_lo and v_wait else ""), "metric",
+                                                "观看量区间：高于上限直接过滤；低于下限的在发推后这么多小时内每次监控都复查")
                                         tag("回复方式：" + REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"]),
                                             "ai" if u["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
                                         tag("回复账号：" + reply_account_summary(u, acc_opts), "account", "用哪个账号回")
@@ -138,11 +149,21 @@ def register(jobs) -> None:
             hint(HINTS["lookback"])
             incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
             hint(HINTS["include"])
+            v_lo0, v_hi0, v_wait0 = views_setting(u)
+            with ui.row().classes("w-full gap-3 no-wrap"):
+                min_views = ui.number("观看量下限（0 = 不限）", value=v_lo0, min=0, step=100).classes("flex-1").props("outlined")
+                max_views = ui.number("观看量上限（0 = 不限）", value=v_hi0, min=0, step=1000).classes("flex-1").props("outlined")
+                wait_h = ui.number("下限复查时长（小时）", value=v_wait0, min=0, max=VIEWS_WAIT_MAX, step=1).classes("flex-1").props("outlined")
+            hint(HINTS["views"], after_row=True)
             mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf = reply_mode_fields(
                 u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后", u,
                 bool(u["auto_approve"]), float(u["auto_approve_min_confidence"] or 0.7), u["media_files"] or "[]", u["media_mode"] or "fixed")
 
             def save():
+                lo, hi = max(0, int(min_views.value or 0)), max(0, int(max_views.value or 0))
+                wait = max(0, min(VIEWS_WAIT_MAX, int(wait_h.value or 0)))
+                if lo and hi and lo > hi:
+                    ui.notify(f"观看量下限 {lo} 比上限 {hi} 还大，这样一条都留不下；请调一下，或把其中一个填 0", type="negative", multi_line=True); return
                 problem = reply_mode_invalid(mode, brief, media_mode, mf, acc)
                 if problem:
                     ui.notify(problem, type="negative", multi_line=True); return
@@ -153,10 +174,11 @@ def register(jobs) -> None:
                     if mode.value != "ai_write":
                         mm, mfiles = "fixed", "[]"
                     conn.execute("UPDATE watched_users SET note=?, include_replies=?, lookback_hours=?, reply_mode=?, ai_brief=?, allow_polish=?, "
-                                 "reply_account_id=NULL, reply_account_mode=?, reply_account_ids=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=? WHERE id=?",
+                                 "reply_account_id=NULL, reply_account_mode=?, reply_account_ids=?, auto_approve=?, auto_approve_min_confidence=?, media_mode=?, media_files=?, "
+                                 "min_views=?, max_views=?, views_wait_hours=? WHERE id=?",
                                  ((note.value or "").strip(), 1 if incl.value else 0, max(1, int(lookback.value or 24)), mode.value,
                                   (brief.value or "").strip(), 1 if polish.value else 0,
-                                  acc_mode, acc_ids, aa, thr, mm, mfiles, u["id"]))
+                                  acc_mode, acc_ids, aa, thr, mm, mfiles, lo, hi, wait, u["id"]))
                     conn.commit()
                 dialog.close(); refresh(); ui.notify("已保存", type="positive")
 

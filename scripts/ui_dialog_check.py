@@ -19,7 +19,7 @@ from nicegui.testing.user_interaction import UserInteraction  # noqa: E402
 from x_operator.core import media  # noqa: E402
 from x_operator.core.scheduler import Jobs  # noqa: E402
 from x_operator.db.database import get_conn, init_db, utcnow_iso  # noqa: E402
-from x_operator.ui import dashboard, materials, queue, rules, schedule, settings_page, targets  # noqa: E402
+from x_operator.ui import dashboard, materials, queue, rules, schedule, settings_page, targets, watched  # noqa: E402
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
@@ -58,7 +58,7 @@ def _click_button(user: User, label: str) -> None:
 
 def _pages() -> None:
     """user fixture 每个测试前会清空页面注册，所以在测试里注册。"""
-    for mod in (dashboard, materials, queue, rules, schedule, settings_page, targets):
+    for mod in (dashboard, materials, queue, rules, schedule, settings_page, targets, watched):
         mod.register(JOBS)
 
 
@@ -767,3 +767,42 @@ async def test_account_delete_blocked_retired_and_revived(user: User):
         assert len(rows) == 1 and rows[0]["id"] == uid and rows[0]["deleted_at"] is None and rows[0]["status"] == "active", [dict(r) for r in rows]
         c.execute("DELETE FROM review_queue WHERE account_id=?", (uid,))
         c.execute("DELETE FROM accounts WHERE id=?", (uid,)); c.commit()
+
+
+async def test_watched_dialog_views_range(user: User):
+    """监控推主编辑弹窗：观看量下限 / 上限 / 复查时长；下限大于上限拒绝保存；保存落库，卡片显示「观看 1000~5万 · 复查 6h」；
+    抓取记录里复查中的推文有「观看量复查中」标签。"""
+    _pages()
+    with get_conn() as c:
+        c.execute("INSERT INTO watched_users(handle, x_user_id) VALUES ('uiviews','uiviews_id')")
+        wid = c.execute("SELECT id FROM watched_users WHERE handle='uiviews'").fetchone()["id"]
+        c.commit()
+    await user.open("/watched")
+    btns = [b for b in user.find(kind=ui.button).elements if b.text == "编辑" and "@uiviews" in _card_text(b)]
+    assert len(btns) == 1
+    UserInteraction(user, set(btns), None).click()
+    await user.should_see("下限复查时长（小时）")
+    lo = [e for e in user.find("观看量下限").elements if isinstance(e, ui.number)][0]
+    hi = [e for e in user.find("观看量上限").elements if isinstance(e, ui.number)][0]
+    wait = [e for e in user.find("下限复查时长").elements if isinstance(e, ui.number)][0]
+    assert (lo.value, hi.value, wait.value) == (0, 0, 6), (lo.value, hi.value, wait.value)
+    lo.set_value(60000); hi.set_value(50000)
+    save = [b for b in user.find(kind=ui.button).elements if b.text == "保存" and _in_dialog(b)]
+    UserInteraction(user, {save[0]}, None).click()
+    await user.should_see("比上限 50000 还大")
+    lo.set_value(1000); wait.set_value(8)
+    UserInteraction(user, {save[0]}, None).click()
+    await user.should_see("已保存")
+    await user.should_see("观看 1000~5万 · 复查 8h")
+    with get_conn() as c:
+        row = c.execute("SELECT min_views, max_views, views_wait_hours FROM watched_users WHERE id=?", (wid,)).fetchone()
+        assert (row["min_views"], row["max_views"], row["views_wait_hours"]) == (1000, 50000, 8), dict(row)
+        c.execute("INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, view_count, tweet_created_at, source, source_rule_id, "
+                  "process_status, llm_relevance_reason, views_recheck_until) VALUES ('uiv1','a','uiviews','recheck me','ja',120,?,'monitor',?,"
+                  "'filtered','观看量 120 未达下限 1000：复查中','2099-01-01T00:00:00Z')", (utcnow_iso(), wid))
+        c.commit()
+    await user.open("/targets?source=monitor&status=filtered")
+    await user.should_see("观看量复查中（至")
+    with get_conn() as c:
+        c.execute("DELETE FROM target_tweets WHERE tweet_id='uiv1'")
+        c.execute("DELETE FROM watched_users WHERE id=?", (wid,)); c.commit()

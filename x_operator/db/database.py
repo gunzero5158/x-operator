@@ -99,6 +99,11 @@ _ADDED_COLUMNS = [
     ("watched_users", "reply_account_ids", "TEXT NOT NULL DEFAULT '[]'"),
     # v23：账号软删除——发过东西的账号删除时只打标记（保留发送记录和去重账本），各处不再列出
     ("accounts", "deleted_at", "TEXT"),
+    # v24：监控推主也能按观看量区间筛；未达下限的推文在复查期内每次监控重新看观看量（views_recheck_until = 复查到什么时候）
+    ("watched_users", "min_views", "INTEGER NOT NULL DEFAULT 0"),
+    ("watched_users", "max_views", "INTEGER NOT NULL DEFAULT 0"),
+    ("watched_users", "views_wait_hours", "INTEGER NOT NULL DEFAULT 6"),
+    ("target_tweets", "views_recheck_until", "TEXT"),
 ]
 
 

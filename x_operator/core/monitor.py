@@ -6,6 +6,13 @@
 
 时间窗：没有游标（首次/重置后）时把「首次回溯」交给适配器的 start_time（官方 API 按返回条数计费，
 窗口交给服务端才不会白花钱）；有游标后只拉游标之后的。每次最多拉 MAX_FETCH 条。
+
+观看量区间（每个推主单独设，0 = 不限）：监控往往在推文刚发出时就抓到，那时观看量还很低，只在抓到那一刻判断会把
+后来涨起来的全漏掉。所以：
+- 高于上限：直接过滤（观看量只会涨，不用再看）；
+- 低于下限：先记为「过滤」并打上复查截止时间（发推时间 + views_wait_hours），复查期内每次监控改按时间窗拉
+  （不只拉游标之后的），重新看这些推文的观看量，涨过下限就当场走预检 + 生成回复；过了复查期仍不够才算定论。
+  复查期填 0 = 不复查，抓到时不够就不要。拿不到观看量的推文按 0 算。
 """
 from __future__ import annotations
 
@@ -23,6 +30,9 @@ from .compliance import is_blacklisted
 from .matcher import MatchEngine
 from .readpool import ReadPool, resume_delay
 
+VIEWS_WAIT_DEFAULT = 6    # 观看量下限的默认复查时长（小时）
+VIEWS_WAIT_MAX = 48
+
 # 单个推主一次最多拉多少条（官方 API 单页上限 100，非官方 40）。高产推主一天几十条也够；
 # 更早的会在下一轮凭游标继续，不会丢
 MAX_FETCH = 100
@@ -37,6 +47,8 @@ class MonitorStats:
     filtered: int = 0
     errors: int = 0
     paused: bool = False                             # 因 429 / 账号都到限额而中途停下（会自动续跑）
+    views_waiting: int = 0                           # 观看量未达下限、复查期内还会再看的
+    views_passed: int = 0                            # 复查时观看量涨过下限、这次处理了的
     notes: list[str] = field(default_factory=list)   # 中文说明（为什么没结果 / 哪个推主出错）
 
     @property
@@ -45,7 +57,9 @@ class MonitorStats:
 
     def as_msg(self) -> str:
         head = (f"{'监控暂停' if self.paused else '监控完成'}：轮询 {self.users_polled} 位推主，拉取 {self.tweets_fetched} 条，"
-                f"入队 {self.queued}，未匹配 {self.no_match}，过滤 {self.filtered}，错误 {self.errors}")
+                f"入队 {self.queued}，未匹配 {self.no_match}，过滤 {self.filtered}，错误 {self.errors}"
+                + (f"，观看量复查中 {self.views_waiting}" if self.views_waiting else "")
+                + (f"，复查后达标 {self.views_passed}" if self.views_passed else ""))
         if self.notes:
             head += "。\n" + "\n".join(self.notes[:12])
         return head
@@ -108,23 +122,56 @@ def precheck(t: TweetData, account_handle: str, max_age_h: int | None = None) ->
 
 def store_target(t: TweetData, source: str, source_rule_id: int | None,
                  process_status: str = "new", score: int | None = None,
-                 reason: str | None = None) -> int | None:
+                 reason: str | None = None, views_recheck_until: datetime | None = None) -> int | None:
     """写入 target_tweets（tweet_id 唯一，冲突则跳过返回 None）。"""
     with get_conn() as conn:
         try:
             cur = conn.execute(
                 "INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, view_count, media, "
                 "tweet_created_at, source, source_rule_id, llm_relevance_score, llm_relevance_reason, "
-                "process_status, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "process_status, views_recheck_until, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (t.tweet_id, t.author_id, t.author_handle, t.text, t.lang, t.view_count,
                  json.dumps([m.as_dict() for m in t.media], ensure_ascii=False),
                  to_iso(t.created_at), source, source_rule_id,
-                 score, reason, process_status, utcnow_iso()),
+                 score, reason, process_status, to_iso(views_recheck_until) if views_recheck_until else None, utcnow_iso()),
             )
             conn.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
             return None
+
+
+def views_setting(user) -> tuple[int, int, int]:
+    """推主的观看量设置 (下限, 上限, 复查小时数)，都钳到合法范围。"""
+    lo = max(0, _row_int(user, "min_views", 0))
+    hi = max(0, _row_int(user, "max_views", 0))
+    wait = max(0, min(VIEWS_WAIT_MAX, _row_int(user, "views_wait_hours", VIEWS_WAIT_DEFAULT)))
+    return lo, hi, wait
+
+
+def views_verdict(t: TweetData, lo: int, hi: int, wait_h: int, now: datetime) -> tuple[str | None, datetime | None]:
+    """按观看量区间判一条推文：(过滤原因, 复查到什么时候)。原因为 None = 通过；复查时间不为 None = 还在复查期内。"""
+    from ..ui.layout import fmt_views   # 延迟导入：只是数字格式
+    v = t.view_count or 0
+    if hi and v > hi:
+        return f"观看量 {fmt_views(v)} 高于上限 {fmt_views(hi)}（观看量只会涨，不再复查）", None
+    if lo and v < lo:
+        until = t.created_at + timedelta(hours=wait_h)
+        if wait_h and until > now:
+            return (f"观看量 {fmt_views(v)} 未达下限 {fmt_views(lo)}：发推后 {wait_h} 小时内（到 {_hm(until)}）每次监控都会复查，"
+                    "涨上来就自动处理"), until
+        return f"观看量 {fmt_views(v)} 未达下限 {fmt_views(lo)}" + (f"（已过发推后 {wait_h} 小时的复查期）" if wait_h else ""), None
+    return None, None
+
+
+def _newer_id(a: str | None, b: str | None) -> str | None:
+    """两个推文 id 取更新的（游标只能往前走：按时间窗重拉时返回的最新 id 可能还不如旧游标新）。"""
+    if not a or not b:
+        return a or b
+    try:
+        return a if int(a) >= int(b) else b
+    except ValueError:
+        return a
 
 
 class MonitorJob:
@@ -217,6 +264,19 @@ class MonitorJob:
             lookback_h = _row_int(user, "lookback_hours", 24)
             cursor = user["last_seen_tweet_id"]
             start_time = None if (cursor or not lookback_h) else datetime.now(timezone.utc) - timedelta(hours=lookback_h)
+            v_lo, v_hi, v_wait = views_setting(user)
+            recheck = bool(v_lo and v_wait)
+            fetch_since, fetch_start = cursor, start_time
+            if recheck and cursor:
+                # 开了观看量下限复查：按时间窗拉（复查期 + 上次抓到的最新推文之后），已处理过的靠数据库去重，复查中的重新看观看量
+                fetch_since = None
+                fetch_start = datetime.now(timezone.utc) - timedelta(hours=v_wait)
+                with get_conn() as conn:
+                    last = conn.execute("SELECT MAX(tweet_created_at) m FROM target_tweets WHERE source='monitor' AND source_rule_id=?",
+                                        (user["id"],)).fetchone()["m"]
+                last_dt = parse_iso(last) if last else None
+                if last_dt and last_dt < fetch_start:
+                    fetch_start = last_dt
             # 拉取：撞 429 就暂停该号、换下一个号重试同一位推主；一个号都挑不出来才停下本次运行
             result = None
             while True:
@@ -225,12 +285,13 @@ class MonitorJob:
                     stopped_at, stop_reason = user, why
                     break
                 gap = pool.wait_gap()
-                _p(i, 0.05, f"@{user['handle']}：用 @{account['handle']} 从 X 拉取（{'游标之后的新推文' if cursor else f'最近 {lookback_h} 小时'}）…"
+                what = ("游标之后的新推文 + 复查观看量" if fetch_since is None and cursor else "游标之后的新推文") if cursor else f"最近 {lookback_h} 小时"
+                _p(i, 0.05, f"@{user['handle']}：用 @{account['handle']} 从 X 拉取（{what}）…"
                    + (f"（间隔 {gap:.0f} 秒）" if gap else ""))
                 pool.note_request(account)
                 try:
-                    result = client.get_user_tweets(user["x_user_id"], since_id=cursor, max_results=MAX_FETCH,
-                                                    include_replies=bool(user["include_replies"]), start_time=start_time)
+                    result = client.get_user_tweets(user["x_user_id"], since_id=fetch_since, max_results=MAX_FETCH,
+                                                    include_replies=bool(user["include_replies"]), start_time=fetch_start)
                     _log_read(account["id"], client.api_kind, "get_user_tweets", result.reads_consumed)
                     break
                 except RateLimited as e:
@@ -261,33 +322,14 @@ class MonitorJob:
                     tweets = [t for t in tweets if t.created_at >= start_time]
                     if dropped and not tweets:
                         stats.notes.append(f"@{user['handle']} 最近 {lookback_h} 小时内没有新推文（更早的 {len(dropped)} 条按时间窗跳过，可在推主设置里调大「首次回溯」）")
-                stats.tweets_fetched += len(tweets)
-                hit = 0
-                for k, t in enumerate(tweets):
-                    _p(i, 0.4 + 0.6 * k / max(1, len(tweets)), f"@{user['handle']}：处理第 {k + 1}/{len(tweets)} 条…")
-                    reason = precheck(t, account["handle"], max_age_h=None if cursor else lookback_h)
-                    if reason:
-                        store_target(t, "monitor", user["id"], process_status="filtered",
-                                     reason="预检拦下：" + FILTER_REASONS.get(reason, reason))
-                        stats.filtered += 1
-                        continue
-                    tid = store_target(t, "monitor", user["id"], process_status="new")
-                    if tid is None:
-                        continue
-                    with get_conn() as conn:
-                        target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (tid,)).fetchone()
-                    outcome = self.match.run(target, account, cfg=user)
-                    if outcome.status == "queued":
-                        stats.queued += 1
-                        hit += 1
-                    else:
-                        stats.no_match += 1
+                hit = self._process_tweets(user, account, tweets, cursor, lookback_h, (v_lo, v_hi, v_wait, recheck), stats)
                 # 推进游标 + 命中计数
-                if result.newest_id:
+                newest = _newer_id(result.newest_id, cursor)
+                if newest:
                     with get_conn() as conn:
                         conn.execute(
                             "UPDATE watched_users SET last_seen_tweet_id=?, hit_count=hit_count+? WHERE id=?",
-                            (result.newest_id, hit, user["id"]))
+                            (newest, hit, user["id"]))
                         conn.commit()
             except Exception as e:  # 单推主隔离（处理阶段）
                 stats.errors += 1
@@ -311,6 +353,93 @@ class MonitorJob:
             progress(1.0, "完成" if stopped_at is None else "已暂停")
         return stats
 
+
+    def _process_tweets(self, user: sqlite3.Row, account: sqlite3.Row, tweets: list[TweetData], cursor: str | None,
+                        lookback_h: int, views: tuple[int, int, int, bool], stats: MonitorStats) -> int:
+        """一位推主这次拉到的推文：新的走 预检 → 观看量区间 → 入库生成回复；复查中的重新看观看量。返回入队条数。"""
+        v_lo, v_hi, v_wait, recheck = views
+        now = datetime.now(timezone.utc)
+        ids = [t.tweet_id for t in tweets]
+        with get_conn() as conn:
+            known = {r["tweet_id"]: r for r in conn.execute(
+                f"SELECT id, tweet_id, process_status, views_recheck_until FROM target_tweets WHERE tweet_id IN ({','.join('?' * len(ids))})",
+                ids).fetchall()} if ids else {}
+        fresh = [t for t in tweets if t.tweet_id not in known]
+        stats.tweets_fetched += len(fresh)
+        hit = waiting = passed = 0
+
+        def generate(tid: int) -> None:
+            nonlocal hit
+            with get_conn() as conn:
+                target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (tid,)).fetchone()
+            outcome = self.match.run(target, account, cfg=user)
+            if outcome.status == "queued":
+                stats.queued += 1
+                hit += 1
+            else:
+                stats.no_match += 1
+
+        # 复查：之前因观看量不够被挡、还在复查期内的
+        for t in tweets:
+            row = known.get(t.tweet_id)
+            if row is None or row["process_status"] != "filtered" or not row["views_recheck_until"]:
+                continue
+            why, until = views_verdict(t, v_lo, v_hi, v_wait, now) if recheck else ("", None)
+            if why is None:
+                code = precheck(t, account["handle"], max_age_h=None)
+                with get_conn() as conn:
+                    if code:
+                        conn.execute("UPDATE target_tweets SET view_count=?, views_recheck_until=NULL, llm_relevance_reason=? WHERE id=?",
+                                     (t.view_count, "预检拦下：" + FILTER_REASONS.get(code, code), row["id"]))
+                    else:
+                        conn.execute("UPDATE target_tweets SET view_count=?, views_recheck_until=NULL, process_status='new', "
+                                     "llm_relevance_reason=NULL WHERE id=?", (t.view_count, row["id"]))
+                    conn.commit()
+                if not code:
+                    passed += 1
+                    generate(row["id"])
+                continue
+            with get_conn() as conn:
+                conn.execute("UPDATE target_tweets SET view_count=?, views_recheck_until=?, llm_relevance_reason=? WHERE id=?",
+                             (t.view_count, to_iso(until) if until else None,
+                              why or "这个推主已经不按观看量下限复查了", row["id"]))
+                conn.commit()
+            waiting += 1 if until else 0
+        # 复查期过了、这次也没拉到的：结论定下来，不再显示「复查中」
+        with get_conn() as conn:
+            stale = conn.execute("SELECT id, view_count FROM target_tweets WHERE source='monitor' AND source_rule_id=? "
+                                 "AND views_recheck_until IS NOT NULL AND (views_recheck_until<=? OR ?=0)",
+                                 (user["id"], to_iso(now), 1 if recheck else 0)).fetchall()
+            from ..ui.layout import fmt_views
+            for r in stale:
+                conn.execute("UPDATE target_tweets SET views_recheck_until=NULL, llm_relevance_reason=? WHERE id=?",
+                             ((f"观看量 {fmt_views(r['view_count'] or 0)} 未达下限 {fmt_views(v_lo)}（已过发推后 {v_wait} 小时的复查期）" if recheck
+                               else "观看量未达下限（这个推主已不再按观看量下限复查）"), r["id"]))
+            conn.commit()
+
+        for k, t in enumerate(fresh):
+            reason = precheck(t, account["handle"], max_age_h=None if cursor else lookback_h)
+            if reason:
+                store_target(t, "monitor", user["id"], process_status="filtered",
+                             reason="预检拦下：" + FILTER_REASONS.get(reason, reason))
+                stats.filtered += 1
+                continue
+            why, until = views_verdict(t, v_lo, v_hi, v_wait if recheck else 0, now)
+            if why:
+                store_target(t, "monitor", user["id"], process_status="filtered", reason=why, views_recheck_until=until)
+                stats.filtered += 1
+                waiting += 1 if until else 0
+                continue
+            tid = store_target(t, "monitor", user["id"], process_status="new")
+            if tid is not None:
+                generate(tid)
+        stats.views_waiting += waiting
+        stats.views_passed += passed
+        if waiting or passed:
+            stats.notes.append(f"@{user['handle']}：" + "，".join(
+                ([f"{passed} 条复查后观看量达标，已处理"] if passed else [])
+                + ([f"{waiting} 条观看量还没到下限，复查期内每次监控会再看"] if waiting else [])))
+        return hit
 
 def _kind_of(account: sqlite3.Row) -> str:
     return "x_official" if account["access_type"] == "official" else "x_unofficial"

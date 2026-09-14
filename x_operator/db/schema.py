@@ -5,7 +5,7 @@ v2 新增：accounts.credentials（账号凭据 JSON）、materials.deleted_at�
 这里用原生 sqlite3 而非 SQLAlchemy。表结构与字段名严格对齐 spec，方便将来长成完整版。
 """
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # 定时发帖表单独拎出来：v9 把 material_id 改成可空、v12 计划类型加 interval（每隔 N 小时），改约束 SQLite 只能重建表
 SCHEDULED_POSTS_TABLE = r"""
@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS watched_users (
     auto_approve_min_confidence REAL NOT NULL DEFAULT 0.7,
     media_files        TEXT    NOT NULL DEFAULT '[]',
     media_mode         TEXT    NOT NULL DEFAULT 'fixed',
+    min_views          INTEGER NOT NULL DEFAULT 0,
+    max_views          INTEGER NOT NULL DEFAULT 0,
+    views_wait_hours   INTEGER NOT NULL DEFAULT 6,
     note               TEXT    NOT NULL DEFAULT '',
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -149,6 +152,7 @@ CREATE TABLE IF NOT EXISTS target_tweets (
     text_zh              TEXT,
     view_count           INTEGER,
     media                TEXT    NOT NULL DEFAULT '[]',
+    views_recheck_until  TEXT,
     tweet_created_at     TEXT    NOT NULL,
     source               TEXT    NOT NULL CHECK (source IN ('monitor','search')),
     source_rule_id       INTEGER,

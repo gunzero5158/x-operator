@@ -258,7 +258,10 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
             if t["lang"]:
                 tag(lang_name(t["lang"]), "metric", "推文语言")
             if t["view_count"] is not None:
-                tag(f"👁 {fmt_views(t['view_count'])}", "metric", "抓取时的观看量")
+                tag(f"👁 {fmt_views(t['view_count'])}", "metric", "抓取时的观看量" + ("（复查时会更新）" if t["views_recheck_until"] else ""))
+            if t["views_recheck_until"] and t["process_status"] == "filtered":
+                tag(f"观看量复查中（至 {fmt_time(t['views_recheck_until'])}）", "warn",
+                    "观看量还没到这个推主设的下限：复查期内每次监控都会重新看，涨上来就自动处理")
             for label, tip in media_tags(t["media"]):
                 tag(label, "metric", tip)
             ui.label(f"抓取于 {fmt_time(t['fetched_at'])} · 发推于 {fmt_time(t['tweet_created_at'])}").classes("text-xs text-gray-400")
