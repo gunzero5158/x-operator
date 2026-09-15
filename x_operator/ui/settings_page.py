@@ -14,9 +14,9 @@ from ..core import media
 from ..core.accounts import account_references, delete_account, delete_blockers, deleted_account_id
 from ..core.readpool import official_enabled
 from ..db.database import get_conn, utcnow_iso
-from ..llm.client import (SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
-                          LLMClient)
-from .layout import confirm, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
+from ..llm.client import (DEFAULT_TIMEOUT_SEC, SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
+                          TIMEOUT_MAX_SEC, TIMEOUT_MIN_SEC, LLMClient, timeout_seconds)
+from .layout import confirm, llm_wait, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
                "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin"]
@@ -252,6 +252,12 @@ def _llm_panel():
     key = ui.input("api_key", value=config.get("llm_api_key") or "", password=True, password_toggle_button=True).classes("w-full").props("outlined")
     light = ui.input("轻量模型（便宜、快；量大判断简单的任务）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
     strong = ui.input("强模型（要写东西、要做取舍的任务）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
+    timeout_in = ui.number("返回超时（秒）", value=timeout_seconds(), min=TIMEOUT_MIN_SEC, max=TIMEOUT_MAX_SEC, step=5,
+                           format="%.0f").classes("w-64").props("outlined")
+    ui.label(f"等模型生成结果最多等多久。不同模型速度差别很大：快的几秒，慢的（推理模型、拥堵的中转站）可能要一两分钟；"
+             f"超时就按失败处理并提示，不会反复重试。默认 {DEFAULT_TIMEOUT_SEC} 秒，允许 {TIMEOUT_MIN_SEC}~{TIMEOUT_MAX_SEC}；"
+             f"「AI 生成素材」一次要写好几条，按这个值的 2 倍等；「测试连接」固定 20 秒。"
+             ).classes("text-xs text-gray-400 -mt-2 mb-1")
 
     def fill_recommended():
         """把两个模型名填进去；base_url 空着才顺便填上，不覆盖已填的中转站地址。api_key 永远要自己填。"""
@@ -268,25 +274,35 @@ def _llm_panel():
     ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("任务", "模型档", "当前模型")],
              rows=tier_rows).classes("w-full").props("dense flat bordered wrap-cells")
 
-    def save():
+    def save() -> bool:
+        try:
+            secs = int(float(timeout_in.value))
+        except (TypeError, ValueError):
+            ui.notify(f"「返回超时」要填整数秒，现在填的是「{timeout_in.value}」", type="negative"); return False
+        if not (TIMEOUT_MIN_SEC <= secs <= TIMEOUT_MAX_SEC):
+            ui.notify(f"「返回超时」要在 {TIMEOUT_MIN_SEC}~{TIMEOUT_MAX_SEC} 秒之间，现在填的是 {secs}", type="negative"); return False
         config.set_value("llm_base_url", base.value.strip())
         config.set_value("llm_api_key", key.value.strip())
         config.set_value("llm_model_light", light.value.strip())
         config.set_value("llm_model_strong", strong.value.strip())
+        config.set_value("llm_timeout_sec", secs)
         ui.notify("已保存", type="positive")
+        return True
 
     async def test():
-        save()
+        if not save():
+            return
         client = LLMClient()
         if not client.configured:
             ui.notify("未配置网关：当前走启发式兜底（关键词规则打分/匹配，离线可测）。"
                       "填入 base_url + api_key 后再测，即可切真实 LLM。", type="warning", multi_line=True)
             return
         try:
-            await run.io_bound(client.ping)
+            async with llm_wait("测试连接", scene="ping"):
+                await run.io_bound(client.ping)
             ui.notify("连接成功 ✅ 打分/匹配将走真实 LLM", type="positive")
         except Exception as e:
-            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True)
+            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=12000)
 
     with ui.row():
         ui.button("保存 LLM 设置", on_click=save).props("color=primary")

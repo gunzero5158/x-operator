@@ -12,7 +12,7 @@ from nicegui import run, ui
 from ..core import langdetect, media
 from ..core.langdetect import LANG_LABEL
 from ..db.database import get_conn, utcnow_iso
-from .layout import TAG, confirm, fmt_time, shell
+from .layout import TAG, confirm, fmt_time, llm_wait, shell
 from .media_widget import MediaField, media_badge, media_strip
 
 # 标签配色：一眼分清「干什么用的」（类型）、「现在能不能用」（状态）、「谁写的」
@@ -304,13 +304,13 @@ def register(jobs) -> None:
                 if not (topic.value or "").strip():
                     ui.notify("请先填主题", type="negative"); return
                 gen_btn.disable(); preview.clear()
-                with preview:
-                    ui.spinner(); ui.label("AI 生成中（10~40 秒）…").classes("text-xs text-gray-400")
                 try:
-                    items = await run.io_bound(jobs.llm.generate_materials, kind.value, lang.value, topic.value.strip(),
-                                               (style.value or "").strip(), (scenario.value or "").strip(),
-                                               [m.strip() for m in (must.value or "").replace("，", ",").split(",") if m.strip()],
-                                               int(count.value or 5))
+                    async with llm_wait("AI 生成素材", scene="material_gen",
+                                        note="一次要写好几条，比单条慢；这里按「返回超时」的 2 倍等。"):
+                        items = await run.io_bound(jobs.llm.generate_materials, kind.value, lang.value, topic.value.strip(),
+                                                   (style.value or "").strip(), (scenario.value or "").strip(),
+                                                   [m.strip() for m in (must.value or "").replace("，", ",").split(",") if m.strip()],
+                                                   int(count.value or 5))
                 except Exception as e:
                     preview.clear()
                     with preview:

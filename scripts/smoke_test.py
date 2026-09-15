@@ -852,8 +852,89 @@ try:
     jobs.llm.chat_json("material_gen", [{"role": "user", "content": "x"}], ["items"]); raise SystemExit("应报错")
 except lc.LLMFormatError as e:
     assert "截断" in str(e) and "生成条数" in str(e), str(e)
+# 401 后面跟一句人话，开头说清是哪个场景失败了
+FakeCli.calls = []; FakeCli.script = [FakeResp("bad key", status=401)]
+try:
+    jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+except lc.LLMError as e:
+    assert "401" in str(e) and "api_key" in str(e) and str(e).startswith("AI 撰写回复失败"), str(e)
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 print("[6j] LLM 纠正重试 / 4xx 记日志 / 拒绝与截断识别 OK")
+
+# [6j2] 返回超时：默认 60 秒、可在设置里调（生成素材 2 倍、ping 固定 20）；模型超时不重试、直接给人话；连不上网关也分开说
+class TimeoutCli(FakeCli):
+    timeouts: list = []
+    raise_with: Exception | None = None
+
+    def __init__(self, timeout=None): TimeoutCli.timeouts.append(timeout)
+
+    def post(self, url, headers=None, json=None):
+        TimeoutCli.calls.append(json)
+        if TimeoutCli.raise_with is not None:
+            raise TimeoutCli.raise_with
+        return TimeoutCli.script.pop(0)
+
+
+lc.httpx.Client = TimeoutCli
+config.set_value("llm_base_url", "http://fake"); config.set_value("llm_api_key", "k")
+assert lc.timeout_seconds() == 60 and lc.timeout_for("write") == 60 and lc.timeout_for("material_gen") == 120 and lc.timeout_for("ping") == 20
+config.set_value("llm_timeout_sec", 90)
+assert lc.timeout_seconds() == 90 and lc.timeout_for("material_gen") == 180 and lc.timeout_for("ping") == 20
+config.set_value("llm_timeout_sec", 5); assert lc.timeout_seconds() == 10        # 夹到下限
+config.set_value("llm_timeout_sec", "abc"); assert lc.timeout_seconds() == 60    # 填错用默认
+config.set_value("llm_timeout_sec", 90)
+TimeoutCli.calls = []; TimeoutCli.timeouts = []; TimeoutCli.raise_with = None; TimeoutCli.script = [FakeResp('{"ok": true}')]
+jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"])
+assert TimeoutCli.timeouts == [90], TimeoutCli.timeouts
+TimeoutCli.timeouts = []; TimeoutCli.script = [FakeResp('{"items": []}')]
+jobs.llm.chat_json("material_gen", [{"role": "user", "content": "hi"}], ["items"])
+assert TimeoutCli.timeouts == [180], TimeoutCli.timeouts
+# 模型迟迟不回（ReadTimeout）：只发一次、抛 LLMTimeoutError、说清是哪个场景哪个模型多少秒、指路设置
+TimeoutCli.calls = []; TimeoutCli.raise_with = lc.httpx.ReadTimeout("slow")
+try:
+    jobs.llm.write_post("写点什么", "ja"); raise SystemExit("应报错")
+except lc.LLMTimeoutError as e:
+    msg = str(e)
+    assert "AI 按主题创作推文超时" in msg and "gpt-4o" in msg and "90 秒" in msg and "设置 → LLM" in msg and "返回超时" in msg, msg
+    assert isinstance(e, lc.LLMError)
+assert len(TimeoutCli.calls) == 1, TimeoutCli.calls   # 没有重试
+with get_conn() as conn:
+    row = conn.execute("SELECT error FROM action_log WHERE endpoint='llm.post_write' AND success=0 ORDER BY id DESC LIMIT 1").fetchone()
+    assert row and "超时" in row["error"], dict(row) if row else None
+# 定时发帖 / AI 撰写把这段话原样带给用户
+with get_conn() as conn:
+    acc_row = conn.execute("SELECT id FROM accounts WHERE status='active' LIMIT 1").fetchone()
+    sp_id = conn.execute("INSERT INTO scheduled_posts(account_id, content_mode, ai_brief, schedule_type, schedule_expr, status, auto_approve, ai_rewrite) "
+                         "VALUES (?, 'ai_topic', '聊聊天气', 'once', '2030-01-01 10:00', 'active', 0, 0)", (acc_row["id"],)).lastrowid
+    conn.commit()
+ok, why = jobs.fire_plan_now(sp_id)
+assert not ok and "AI 按主题创作失败" in why and "超时" in why and "返回超时" in why, why
+with get_conn() as conn:
+    conn.execute("DELETE FROM scheduled_posts WHERE id=?", (sp_id,)); conn.commit()
+# 连不上（ConnectError）/ 连接超时（ConnectTimeout）：是网络问题，不算模型超时
+TimeoutCli.calls = []; TimeoutCli.raise_with = lc.httpx.ConnectError("refused")
+try:
+    jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+except lc.LLMTimeoutError:
+    raise SystemExit("连不上不该算模型超时")
+except lc.LLMError as e:
+    assert "连不上 LLM 网关" in str(e) and "base_url" in str(e), str(e)
+TimeoutCli.raise_with = lc.httpx.ConnectTimeout("slow net")
+try:
+    jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+except lc.LLMTimeoutError:
+    raise SystemExit("连接超时不该算模型超时")
+except lc.LLMError as e:
+    assert "连接 LLM 网关" in str(e) and "没连上" in str(e), str(e)
+# 传输中断（ReadError）：还是会再试一次
+TimeoutCli.calls = []; TimeoutCli.raise_with = lc.httpx.ReadError("eof")
+try:
+    jobs.llm.chat_json("write", [{"role": "user", "content": "hi"}], ["ok"]); raise SystemExit("应报错")
+except lc.LLMError as e:
+    assert "连接中断" in str(e) and len(TimeoutCli.calls) == 4, (str(e), len(TimeoutCli.calls))
+lc.httpx.Client = orig_httpx_client
+config.set_value("llm_base_url", ""); config.set_value("llm_api_key", ""); config.set_value("llm_timeout_sec", 60)
+print("[6j2] LLM 返回超时可调 / 超时不重试且报错明确 / 网络错误分开说 OK")
 
 # [6k] twikit 事件循环：超时会把协程取消掉
 state = {"cancelled": False}

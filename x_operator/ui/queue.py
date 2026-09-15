@@ -13,7 +13,7 @@ from ..core import media, textlimit
 from ..core.compliance import SKIP_REASON_LABEL
 from ..core.langdetect import lang_name
 from ..db.database import get_conn, utcnow_iso
-from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job,
+from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, llm_wait, notify_long, run_job,
                      shell, source_label, tag, tag_legend, tweet_link)
 from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
@@ -379,8 +379,8 @@ def register(jobs) -> None:
             async def shorten_cb(it, text: str, account_id: int):
                 if not jobs.llm.configured:
                     ui.notify("AI 缩写需要先到「设置 → LLM」配置网关", type="warning"); return
-                ui.notify("AI 缩写中…", type="info")
-                new, note = await run.io_bound(_shorten, jobs, it["id"], text, account_id)
+                async with llm_wait("AI 缩写", scene="shorten"):
+                    new, note = await run.io_bound(_shorten, jobs, it["id"], text, account_id)
                 notify_long(note, ok=bool(new), kind=None if new else "warning")
                 if new:
                     state["dirty"].discard(it["id"]); render()

@@ -14,7 +14,7 @@ from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule, views_range_text,
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
+from .layout import confirm, fmt_time, llm_wait, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, media_values, reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -306,9 +306,9 @@ def register(jobs) -> None:
         text = await dlg
         if not text or not text.strip():
             return
-        ui.notify("AI 生成中…", type="info")
         try:
-            obj = await run.io_bound(jobs.llm.generate_search_rule, text.strip())
+            async with llm_wait("AI 生成搜索规则", scene="rule_gen"):
+                obj = await run.io_bound(jobs.llm.generate_search_rule, text.strip())
         except Exception as e:
             ui.notify(f"生成失败：{e}", type="negative", multi_line=True, close_button=True); return
         preset = {

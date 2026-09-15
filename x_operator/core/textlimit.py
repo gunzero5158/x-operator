@@ -94,7 +94,7 @@ def fit(text: str, account, llm, must_include: list[str] | None = None, lang: st
     try:
         res = llm.shorten(text, lang or "und", limit, list(must_include or []))
     except Exception as e:  # LLMError 及其子类
-        return text, f"⚠ 正文 {n} 单位，超过免费账号上限 {limit}，AI 缩写失败（{str(e)[:100]}），请手动删减"
+        return text, f"⚠ 正文 {n} 单位，超过免费账号上限 {limit}，AI 缩写失败（{str(e)[:200]}），请手动删减"
     new = (res.get("text") or "").strip()
     if new and weighted_len(new) <= limit:
         return new, f"原文 {n} 单位超过上限 {limit}，已让 AI 缩写到 {weighted_len(new)} 单位"

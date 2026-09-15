@@ -1,12 +1,14 @@
 """公共页面外壳（design-v1.1 §8.0）：深色顶栏 + 醒目导航 + 内容插槽，以及各页共用的小工具。"""
 from __future__ import annotations
 
-from contextlib import contextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Callable
 
 from nicegui import run, ui
 
 from ..db.database import get_conn
+from ..llm.client import timeout_for
 
 # (路径, 名称, material 图标)
 NAV = [
@@ -121,6 +123,41 @@ async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None]
     if refresh:
         refresh()
     return res
+
+
+@asynccontextmanager
+async def llm_wait(label: str, scene: str = "write", note: str = ""):
+    """等大模型生成时弹一个等待框：转圈 + 已等几秒 + 按「返回超时」算的进度条，让人知道没卡死、大概还要多久。
+
+    用法：async with llm_wait("AI 撰写回复", scene="write"): outcome = await run.io_bound(...)
+    scene 用来取该场景的超时秒数（设置 → LLM 的「返回超时」）；退出时自动关掉。"""
+    limit = timeout_for(scene)
+    started = time.monotonic()
+    with ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[420px] max-w-[90vw]"):
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.spinner(size="lg")
+            ui.label(f"{label}中，AI 正在生成…").classes("text-lg font-bold")
+        bar = ui.linear_progress(0.0, show_value=False, size="12px").classes("w-full")
+        info = ui.label("").classes("text-sm text-gray-600")
+        ui.label(note or f"生成速度取决于模型和网关，快的几秒、慢的一两分钟。超过 {limit} 秒按超时处理并提示；"
+                 "觉得太短可到「设置 → LLM」调「返回超时」。").classes("text-xs text-gray-400")
+    dlg.open()
+
+    def tick() -> None:
+        elapsed = time.monotonic() - started
+        bar.value = min(1.0, elapsed / limit) if limit > 0 else 0.0
+        if elapsed <= limit:
+            info.text = f"已等 {int(elapsed)} 秒，最多等 {limit} 秒"
+        else:
+            info.text = f"已等 {int(elapsed)} 秒，超过了 {limit} 秒——多半是 AI 第一稿不合格正在重写（会再来一轮），再等一下"
+    tick()
+    timer = ui.timer(0.5, tick)
+    try:
+        yield
+    finally:
+        timer.cancel()
+        dlg.close()
+        dlg.delete()
 
 
 async def run_job_with_progress(fn: Callable[..., Any], label: str, refresh: Callable[[], None] | None = None,

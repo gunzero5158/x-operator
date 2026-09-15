@@ -18,7 +18,7 @@ from typing import NamedTuple
 from ..adapters import factory
 from ..adapters.base import RateLimited, TweetData, XClientError
 from ..db.database import get_conn, to_iso, utcnow_iso
-from ..llm.client import LLMClient, LLMError
+from ..llm.client import LLMClient, LLMError, timeout_for
 from . import budget
 from .langdetect import LANG_LABEL  # noqa: F401  规则页等处仍从 search 取
 from .langdetect import lang_allowed, lang_name, rule_langs_normalized, x_search_code
@@ -318,7 +318,9 @@ class SearchJob:
 
         scored: list[ScoredCandidate] = []
         if to_score:
-            _p(0.4, f"规则「{rule['name']}」：{len(to_score)} 条送去打分（{'LLM' if self.llm.configured else '关键词粗估'}），预检挡下 {len(pre)} 条…")
+            _p(0.4, f"规则「{rule['name']}」：{len(to_score)} 条送去打分（"
+                    + (f"LLM，最多等 {timeout_for('relevance')} 秒" if self.llm.configured else "关键词粗估")
+                    + f"），预检挡下 {len(pre)} 条…")
             read_media = bool(_rule_get(rule, "read_media", 0))
             payload = [{"tweet_id": t.tweet_id, "author_handle": t.author_handle, "text": t.text,
                         **({"media": [m.as_dict() for m in t.media]} if t.media else {})} for t in to_score]
@@ -327,7 +329,7 @@ class SearchJob:
             except LLMError as e:
                 scores = self.llm.score_relevance_heuristic(payload)
                 for s in scores:
-                    s["reason"] = f"LLM 调用失败（{str(e)[:60]}），改用关键词粗略打分：" + s.get("reason", "")
+                    s["reason"] = f"LLM 打分失败（{str(e)[:160]}），改用关键词粗略打分：" + s.get("reason", "")
                 if read_media and any("media" in p for p in payload) and notes is not None:
                     notes.append(f"⚠ 规则「{rule['name']}」开了「读取附图打分」但 LLM 调用失败：{str(e)[:120]}。"
                                  "如果是网关返回 400，多半是「设置 → LLM」里的轻量模型不支持图片输入，换成多模态模型或把这个开关关掉")

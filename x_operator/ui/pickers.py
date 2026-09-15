@@ -10,7 +10,7 @@ from ..core.langdetect import lang_name, material_lang_tiers
 from ..db.database import get_conn, utcnow_iso
 from ..core.accounts import REPLY_ACCOUNT_MODE_LABEL, account_options, reply_account_setting
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
-from .layout import confirm, notify_long
+from .layout import confirm, llm_wait, notify_long
 from .media_widget import MediaField, media_badge
 
 
@@ -334,9 +334,9 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
     if res is None:
         return None
     text, files = res
-    ui.notify("AI 撰写中…", type="info")
     try:
-        outcome = await run.io_bound(jobs.match.ai_write, target_id, text, None, "ai_write", "", files)
+        async with llm_wait("AI 撰写回复", scene="write"):
+            outcome = await run.io_bound(jobs.match.ai_write, target_id, text, None, "ai_write", "", files)
     except Exception as e:
         notify_long(f"AI 撰写出错：{e}", ok=False, kind="negative"); return None
     notify_long(("已生成并进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,

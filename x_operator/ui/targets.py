@@ -14,7 +14,7 @@ from ..adapters.base import MEDIA_KIND_LABEL
 from ..core.langdetect import lang_name
 from ..core.matcher import load_source_cfg
 from ..db.database import get_conn, utcnow_iso
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, run_job, tag, tag_legend,
+from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, llm_wait, notify_long, run_job, tag, tag_legend,
                      run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
@@ -146,7 +146,11 @@ def register(jobs) -> None:
                     render()
 
             async def rematch(tid: int):
-                outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
+                if jobs.llm.configured:
+                    async with llm_wait("自动匹配素材", scene="match"):
+                        outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
+                else:
+                    outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
                 if outcome is not None:
                     ui.notify(("已生成回复并进入任务队列：" if outcome.status == "queued" else "仍未匹配：") + outcome.reason,
                               type="positive" if outcome.status == "queued" else "warning", multi_line=True, close_button=True)

@@ -13,6 +13,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "llm_api_key": "",
     "llm_model_light": "gpt-4o-mini",
     "llm_model_strong": "gpt-4o",
+    # 等模型返回的上限秒数（不同模型生成速度差别大，慢模型调大）；生成素材按 2 倍、测试连接固定 20 秒
+    "llm_timeout_sec": "60",
     # 合规参数（design-v1.1 §10.1 defaults）
     "cooldown_days": "7",
     "grace_period_hours": "2",

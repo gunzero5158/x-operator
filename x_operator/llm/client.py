@@ -28,6 +28,30 @@ class LLMFormatError(LLMError):
     pass
 
 
+class LLMTimeoutError(LLMError):
+    """模型在「返回超时」内没有给出结果。不重试：不同模型生成速度差别很大，该调的是设置里的超时，不是多等几轮。"""
+    pass
+
+
+# 「返回超时」：等模型生成的上限秒数。设置 → LLM 可调（llm_timeout_sec），默认 60；生成素材这种一次要写好几条的场景按 2 倍算
+DEFAULT_TIMEOUT_SEC = 60
+TIMEOUT_MIN_SEC, TIMEOUT_MAX_SEC = 10, 600
+
+
+def timeout_seconds() -> int:
+    """当前生效的返回超时（秒）：读设置，没填或填错就用默认，并夹在允许范围内。"""
+    v = config.get_int("llm_timeout_sec", DEFAULT_TIMEOUT_SEC) or DEFAULT_TIMEOUT_SEC
+    return max(TIMEOUT_MIN_SEC, min(TIMEOUT_MAX_SEC, v))
+
+
+def timeout_for(scene: str) -> int:
+    """某个场景实际会等多久：ping 固定 20 秒，生成素材按 2 倍，其余按设置。UI 的等待框用它算进度。"""
+    if scene == "ping":
+        return 20
+    base = timeout_seconds()
+    return base * 2 if scene == "material_gen" else base
+
+
 # ====================================================================================
 # 场景 → 用哪档模型。这是**唯一**的登记表：chat_json 只认这里登记过的场景，没登记的直接报错，
 # 所以以后加任何新的 LLM 功能都必须先在这里补一行（设置 → LLM 页和 README 的对照表都从这里渲染）。
@@ -43,6 +67,12 @@ SCENE_TIERS: dict[str, tuple[str, str]] = {
     "post_rewrite": ("strong", "定时发帖：在素材基础上改写出新变体（避开 X 的重复判定）"),
     "post_write":   ("strong", "定时发帖：AI 按主题要求现写一条推文"),
     "shorten":      ("strong", "推文超过免费账号长度上限时缩写（要保住意思和必带的链接/@）"),
+}
+# 报错时用的短名（「AI 撰写回复超时」比整段登记说明读得顺）
+SCENE_SHORT: dict[str, str] = {
+    "ping": "测试连接", "relevance": "相关性打分", "match": "匹配素材", "write": "AI 撰写回复",
+    "rule_gen": "AI 生成搜索规则", "material_gen": "AI 生成素材", "post_rewrite": "AI 改写变体",
+    "post_write": "AI 按主题创作推文", "shorten": "AI 缩写",
 }
 TIER_LABEL = {"light": "轻量模型", "strong": "强模型"}
 TIER_SETTING_KEY = {"light": "llm_model_light", "strong": "llm_model_strong"}
@@ -94,13 +124,17 @@ class LLMClient:
 
     # ---------------- 真实网关调用 ----------------
     def chat_json(self, scene: str, messages: list[dict], required_keys: list[str],
-                  temperature: float = 0.2, timeout_sec: int = 60, max_tokens: int = 4096) -> dict:
-        """scene 必须是 SCENE_TIERS 里登记过的场景名，用哪个模型由登记表决定。"""
+                  temperature: float = 0.2, timeout_sec: int | None = None, max_tokens: int = 4096) -> dict:
+        """scene 必须是 SCENE_TIERS 里登记过的场景名，用哪个模型由登记表决定。
+        timeout_sec 不传就用设置里的「返回超时」（timeout_for(scene)）。"""
         model = model_for(scene)
+        what = SCENE_SHORT.get(scene, scene)
         base_url = (config.get("llm_base_url") or "").rstrip("/")
         api_key = config.get("llm_api_key") or ""
         if not base_url or not api_key:
             raise LLMError("LLM 网关未配置")
+        if timeout_sec is None:
+            timeout_sec = timeout_for(scene)
 
         url = base_url + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -113,14 +147,34 @@ class LLMClient:
         downgraded = False     # 已去掉 response_format 重发过
         for _ in range(4):     # 最多：首发 + 降级重发 + 纠正重发 + 一次网络重试
             try:
-                with httpx.Client(timeout=timeout_sec) as cli:
-                    resp = cli.post(url, headers=headers, json=payload)
+                try:
+                    with httpx.Client(timeout=timeout_sec) as cli:
+                        resp = cli.post(url, headers=headers, json=payload)
+                except httpx.ConnectTimeout:
+                    # 连都没连上就超时：是网络 / 地址问题，不是模型慢
+                    last_err = (f"连接 LLM 网关 {base_url} 超时（{timeout_sec} 秒内没连上）。"
+                                "请检查 base_url 是否写对、代理 / 网络是否通。")
+                    self._log(scene, False, {}, started, error=last_err)
+                    raise LLMError(last_err)
+                except httpx.TimeoutException:
+                    # 连上了但模型迟迟不回：这就是「返回超时」。不重试——该调的是超时或换模型
+                    waited = int(time.monotonic() - started)
+                    last_err = (f"{what}超时：模型 {model} 在 {timeout_sec} 秒内没有返回结果（已等 {waited} 秒），"
+                                f"这次{what}没有生成。不同模型的生成速度差别很大，慢的模型或拥堵的网关会等更久。"
+                                "可以：① 到「设置 → LLM」把「返回超时」调大；② 换一个更快的模型；③ 稍后再试。")
+                    self._log(scene, False, {}, started, error=last_err)
+                    raise LLMTimeoutError(last_err)
+                except httpx.ConnectError as e:
+                    last_err = (f"连不上 LLM 网关 {base_url}（{e}）。请检查 base_url 是否写对（要带 /v1 之类的路径前缀）、"
+                                "代理 / 网络是否通、网关是否在线。")
+                    self._log(scene, False, {}, started, error=last_err)
+                    raise LLMError(last_err)
                 if resp.status_code == 400 and "response_format" in payload and not downgraded:
                     payload.pop("response_format", None)  # 网关不支持则降级重发
                     downgraded = True
                     continue
                 if resp.status_code >= 400:
-                    last_err = f"LLM 网关返回 {resp.status_code}：{resp.text[:200]}"
+                    last_err = f"LLM 网关返回 {resp.status_code}：{resp.text[:200]}" + _status_hint(resp.status_code, model)
                     break
                 data = resp.json()
                 choice = data["choices"][0]
@@ -156,10 +210,14 @@ class LLMClient:
                     raise LLMFormatError(last_err)
                 self._log(scene, True, usage, started)
                 return obj
-            except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
-                last_err = f"{type(e).__name__}: {e}"
+            except httpx.HTTPError as e:
+                # 连上后传输中断（ReadError / RemoteProtocolError 等）：再试一次
+                last_err = f"和 LLM 网关的连接中断（{type(e).__name__}: {e}），可能是网关不稳定或代理断了"
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+                last_err = (f"LLM 网关的回复不是 OpenAI 兼容格式（{type(e).__name__}: {e}）。"
+                            "请确认 base_url 指向的是 chat/completions 兼容接口，而不是网页或别的 API。")
         self._log(scene, False, {}, started, error=last_err)
-        raise LLMError(f"LLM 调用失败：{last_err}")
+        raise LLMError(f"{what}失败：{last_err}")
 
     def _log(self, scene: str, success: bool, usage: dict, started: float, error: str = "") -> None:
         try:
@@ -343,7 +401,7 @@ class LLMClient:
             {"role": "system", "content": prompts.MATERIAL_GEN_SYSTEM},
             {"role": "user", "content": prompts.material_gen_user(kind, lang, topic, style, scenario, must_include, count)},
         ]
-        obj = self.chat_json("material_gen", messages, required_keys=["items"], temperature=0.9, timeout_sec=120)
+        obj = self.chat_json("material_gen", messages, required_keys=["items"], temperature=0.9)  # 超时按设置的 2 倍（timeout_for）
         items = []
         for it in obj.get("items") or []:
             text = str(it.get("text") or "").strip()
@@ -367,6 +425,19 @@ _REFUSAL_HINTS = [
     "抱歉", "很抱歉", "无法", "不能协助", "不能帮", "无法帮助", "违反", "不便", "不适合", "涉及", "敏感",
     "申し訳", "できません", "お手伝いできません",
 ]
+
+
+def _status_hint(status: int, model: str) -> str:
+    """网关 4xx/5xx 后面跟一句人话，告诉用户大概该查什么。"""
+    if status in (401, 403):
+        return "。多半是 api_key 不对或没权限，到「设置 → LLM」核对"
+    if status == 404:
+        return f"。多半是模型名「{model}」这个网关没有，或 base_url 少了 /v1 之类的路径前缀"
+    if status == 429:
+        return "。网关限流或额度用完了，稍等再试或去网关后台看余额"
+    if status >= 500:
+        return "。是网关那边出错了，稍后再试；一直这样就换个网关或模型"
+    return ""
 
 
 def _looks_like_refusal(text: str) -> bool:

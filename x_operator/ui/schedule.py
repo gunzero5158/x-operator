@@ -14,7 +14,7 @@ from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
 from ..core.langdetect import LANG_LABEL, lang_name
 from ..db.database import get_conn, to_iso, utcnow_iso
-from .layout import confirm, fmt_time, shell, tag
+from .layout import confirm, fmt_time, llm_wait, shell, tag
 from .media_widget import MediaField, media_badge
 from .pickers import hint, template_controls
 
@@ -82,8 +82,14 @@ def register(jobs) -> None:
                     _delete(sp["id"]); ui.notify("已删除", type="positive"); render()
 
             async def fire_now(sp):
-                ui.notify("正在生成…（AI 模式要几秒）", type="info")
-                ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
+                mode = sp["content_mode"] or "fixed"
+                uses_ai = jobs.llm.configured and (mode == "ai_topic" or (sp["ai_rewrite"] and mode in ("fixed", "pool")))
+                if uses_ai:
+                    async with llm_wait("生成主贴", scene="post_write" if mode == "ai_topic" else "post_rewrite"):
+                        ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
+                else:
+                    ui.notify("正在生成…", type="info")
+                    ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
                 ui.notify(("已生成一条到任务队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
                           multi_line=True, close_button=True, timeout=12000)
                 render()

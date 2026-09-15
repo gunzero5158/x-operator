@@ -806,3 +806,68 @@ async def test_watched_dialog_views_range(user: User):
     with get_conn() as c:
         c.execute("DELETE FROM target_tweets WHERE tweet_id='uiv1'")
         c.execute("DELETE FROM watched_users WHERE id=?", (wid,)); c.commit()
+
+
+async def test_settings_llm_timeout_and_wait_dialog(user: User):
+    """设置 → LLM：有「返回超时（秒）」（默认 60），改成 90 随「保存 LLM 设置」落库，越界拒绝；
+    等 AI 的地方（以「AI 生成规则」为例）会弹带计时进度条的等待框，跑完自动关掉；超时的报错文字原样弹给用户。"""
+    import asyncio
+    import time as _time
+    from x_operator.llm.client import LLMTimeoutError, timeout_seconds
+    _pages()
+    with get_conn() as c:
+        c.execute("UPDATE app_settings SET value='60' WHERE key='llm_timeout_sec'"); c.commit()
+    await user.open("/settings")
+    user.find("LLM").click()
+    await user.should_see("返回超时（秒）")
+    await user.should_see("等模型生成结果最多等多久")
+    num = [e for e in user.find("返回超时（秒）").elements if isinstance(e, ui.number)][0]
+    assert num.value == 60, num.value
+    num.set_value(3)
+    _click_button(user, "保存 LLM 设置")
+    await user.should_see("要在 10~600 秒之间")
+    assert timeout_seconds() == 60
+    num.set_value(90)
+    _click_button(user, "保存 LLM 设置")
+    await user.should_see("已保存")
+    with get_conn() as c:
+        assert c.execute("SELECT value FROM app_settings WHERE key='llm_timeout_sec'").fetchone()["value"] == "90"
+    assert timeout_seconds() == 90
+    # 等待框：把 AI 生成规则换成一个要跑 1.5 秒的假函数，点「生成」后应看到等待框和「最多等 90 秒」，跑完看到结果
+    with get_conn() as c:
+        c.execute("UPDATE app_settings SET value='http://fake' WHERE key='llm_base_url'")
+        c.execute("UPDATE app_settings SET value='k' WHERE key='llm_api_key'"); c.commit()
+    orig = JOBS.llm.generate_search_rule
+
+    def slow_rule(desc):
+        _time.sleep(1.5)
+        return {"name": "慢规则", "keywords": ["kw"], "semantic_criteria": "找人", "langs": ["ja"]}
+    JOBS.llm.generate_search_rule = slow_rule
+    try:
+        await user.open("/rules")
+        _click_button(user, "AI 生成规则")
+        await user.should_see("用大白话描述你想找什么人")
+        [e for e in user.find("用大白话描述").elements if isinstance(e, ui.textarea)][0].set_value("找抱怨太贵的人")
+        _click_button(user, "生成")
+        await user.should_see("AI 生成搜索规则中，AI 正在生成…")
+        await user.should_see("最多等 90 秒")
+        await user.should_see("已生成，请检查后保存", retries=30)
+        await asyncio.sleep(0.2)
+        await user.should_not_see("AI 正在生成…")
+
+        def timeout_rule(desc):
+            raise LLMTimeoutError("AI 生成搜索规则超时：模型 x 在 90 秒内没有返回结果（已等 90 秒），这次AI 生成搜索规则没有生成。"
+                                  "可以：① 到「设置 → LLM」把「返回超时」调大")
+        JOBS.llm.generate_search_rule = timeout_rule
+        await user.open("/rules")
+        _click_button(user, "AI 生成规则")
+        await user.should_see("用大白话描述你想找什么人")
+        [e for e in user.find("用大白话描述").elements if isinstance(e, ui.textarea)][0].set_value("找人")
+        _click_button(user, "生成")
+        await user.should_see("生成失败：AI 生成搜索规则超时")
+        await user.should_see("把「返回超时」调大")
+    finally:
+        JOBS.llm.generate_search_rule = orig
+        with get_conn() as c:
+            c.execute("UPDATE app_settings SET value='' WHERE key IN ('llm_base_url','llm_api_key')")
+            c.execute("UPDATE app_settings SET value='60' WHERE key='llm_timeout_sec'"); c.commit()
