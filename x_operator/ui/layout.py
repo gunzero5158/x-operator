@@ -170,7 +170,8 @@ async def run_job_with_progress(fn: Callable[..., Any], label: str, refresh: Cal
         state["frac"] = max(0.0, min(1.0, float(frac)))
         state["text"] = text
 
-    with ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[480px] max-w-[90vw]"):
+    # 挂在页面根节点，避免 refresh 清空触发按钮所在的卡片时连结果框一起删除。
+    with ui.context.client.content, ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[480px] max-w-[90vw]"):
         with ui.row().classes("items-center gap-2"):
             icon = ui.spinner(size="lg")
             title = ui.label(f"{label}进行中…").classes("text-lg font-bold")

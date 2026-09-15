@@ -178,7 +178,10 @@ def register(jobs) -> None:
                                          + " 的时间线，不用关键词").classes("text-xs text-gray-600")
                             else:
                                 ui.label("关键词：" + r["keyword_query"]).classes("text-xs font-mono text-gray-600")
-                                ui.label("实际查询：" + effective_query(r)).classes("text-xs font-mono text-gray-400")
+                                ui.label("实际查询（Cookie）：" + effective_query(r, access_type="unofficial")).classes("text-xs font-mono text-gray-400")
+                                ui.label("Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。").classes("text-xs text-gray-400")
+                                if config.get_bool("read_official_enabled", False):
+                                    ui.label("实际查询（官方 API）：" + effective_query(r, access_type="official")).classes("text-xs font-mono text-gray-400")
                             ui.label("语义：" + r["semantic_criteria"]).classes("text-sm")
                             if r["reply_mode"] == "ai_write":
                                 ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
@@ -284,7 +287,9 @@ def register(jobs) -> None:
                     _save(r["id"] if r else None, data)
                 except Exception as e:
                     ui.notify(f"保存失败：{e}（规则名可能重复）", type="negative"); return
-                dialog.close(); refresh(); ui.notify("已保存", type="positive")
+                dialog.close()
+                ui.notify("已保存", type="positive")
+                refresh()
 
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=dialog.close).props("flat")

@@ -95,16 +95,16 @@ def is_feed_rule(rule) -> bool:
     return rule_source_kind(rule) != "search"
 
 
-def effective_query(rule: sqlite3.Row | dict) -> str:
-    """实际发给 X 的查询：逗号列表转 OR；用户没写 lang: 时按规则选的语言补上 (lang:ja OR lang:en)；
-    默认排除转推。推荐流/关注流规则没有查询，靠语义条件 + 观看量筛。"""
+def effective_query(rule: sqlite3.Row | dict, *, access_type: str = "official") -> str:
+    """按抓取通道拼查询。官方 API 自动补语言条件；Cookie 通道靠抓取后的本地语言过滤，
+    避免网页搜索对附加语言 OR 分组返回空结果。用户手写的条件保留。默认排除转推。"""
     if is_feed_rule(rule):
         return f"（{SOURCE_KIND_LABEL[rule_source_kind(rule)]}：不用关键词，读时间线后按语义条件和观看量筛）"
     q = normalize_keywords(rule["keyword_query"])
     langs = rule_langs(rule)
     if " OR " in q and not q.startswith("("):
         q = f"({q})"
-    if langs and "lang:" not in q:
+    if access_type == "official" and langs and "lang:" not in q:
         codes = list(dict.fromkeys(x_search_code(x) for x in langs))   # 简繁都选时只写一个 lang:zh
         q += " (" + " OR ".join(f"lang:{x}" for x in codes) + ")"
     if "is:retweet" not in q:
@@ -194,6 +194,7 @@ class SearchJob:
         if feed:
             account = self.feed_account(rule, account)
         client = factory.get_client(account)
+        query = effective_query(rule, access_type=account["access_type"])
         lookback_h = _row_int(rule, "lookback_hours", 24)
         if not feed and account["access_type"] == "official" and lookback_h > OFFICIAL_SEARCH_MAX_HOURS:
             if notes is not None:
@@ -242,7 +243,7 @@ class SearchJob:
             _p(0.05, f"规则「{rule['name']}」：正在从 X 抓取（{window}"
                      + (f"，{'按热度排序' if min_views else '按时间排序'}找观看量 {views_range_text(min_views, max_views)} 的，"
                         f"不够就翻页，最多扫 {scan_limit} 条" if views_on else "") + "）…")
-            result = client.search_recent(effective_query(rule), since_id=since_id,
+            result = client.search_recent(query, since_id=since_id,
                                           start_time=start_time, max_results=max_results,
                                           min_views=min_views, scan_limit=scan_limit, max_views=max_views)
             _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
@@ -283,7 +284,7 @@ class SearchJob:
             else:
                 channel = "小号通道" if account["access_type"] != "official" else "官方 API"
                 notes.append(
-                    f"⚠ 规则「{rule['name']}」：X 没有返回任何推文（{channel}，首次回溯 {lookback_h} 小时）。实际查询：{effective_query(rule)}\n"
+                    f"⚠ 规则「{rule['name']}」：X 没有返回任何推文（{channel}，首次回溯 {lookback_h} 小时）。实际查询：{query}\n"
                     "   可能原因：① 关键词太窄或写法 X 不认——把上面这条查询原样粘到 x.com 的搜索框里看有没有结果；"
                     "② 这个时间窗内确实没人发，可调大「首次回溯」；"
                     + ("③ 这个小号的搜索被 X 限制了（新号、受限号常见）——在浏览器里用它搜同样的词试试，不行就换个小号或到「设置 → 抓取」打开「官方 API 也参与抓取」。"
