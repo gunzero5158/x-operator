@@ -177,7 +177,7 @@ async def test_display_timezone_setting(user: User):
     config.set_value("display_timezone", "Asia/Tokyo"); refresh_display_tz()
     assert fmt_time("2026-09-08T12:00:00Z") == "09-08 21:00"
     await user.open("/settings")
-    await user.should_see("🕒 Asia/Tokyo")
+    await user.should_see("Asia/Tokyo")
     user.find("自动运行").click()
     await user.should_see("界面显示时区")
     _choose(user, "界面显示时区", "Asia/Taipei")
@@ -187,7 +187,7 @@ async def test_display_timezone_setting(user: User):
     with get_conn() as conn:
         assert conn.execute("SELECT timezone FROM accounts WHERE id=1").fetchone()["timezone"] == acc_tz_before  # 账号自己的时区不被改动
     await user.open("/queue")
-    await user.should_see("🕒 Asia/Taipei")
+    await user.should_see("Asia/Taipei")
     config.set_value("display_timezone", "Asia/Tokyo"); refresh_display_tz()
 
 
@@ -241,11 +241,11 @@ async def test_tag_legends(user: User):
     await user.open("/targets")
     await user.should_see("标签颜色：")
     await user.should_see("已进任务队列")
-    # 颜色真的能生效：badge 不能带 Quasar 的 color 属性（它会加 !important 的主题蓝把 Tailwind 类压掉）
+    # 颜色真的能生效：badge 不能带 Quasar 的 color 属性（它会加 !important 的主题蓝把颜色类压掉）；配色走 theme.css 的 xo-tag-* 类
     for b in [e for e in user.find(kind=ui.badge).elements]:
         assert "color" not in b._props, (b.text, b._props)
     st = [e for e in user.find("已进任务队列").elements if isinstance(e, ui.badge)][0]
-    assert "bg-green-600" in st._classes, st._classes
+    assert "xo-tag" in st._classes and "xo-tag-ok" in st._classes, st._classes
     await user.open("/queue")
     await user.should_see("标签颜色：")
     await user.should_see("来源：AI 匹配素材")
@@ -810,7 +810,8 @@ async def test_watched_dialog_views_range(user: User):
 
 async def test_settings_llm_timeout_and_wait_dialog(user: User):
     """设置 → LLM：有「返回超时（秒）」（默认 60），改成 90 随「保存 LLM 设置」落库，越界拒绝；
-    等 AI 的地方（以「AI 生成规则」为例）会弹带计时进度条的等待框，跑完自动关掉；超时的报错文字原样弹给用户。"""
+    等 AI 的地方（以「AI 生成规则」为例）在右下角任务面板里显示进度和超时秒数，跑完给「查看生成结果」按钮打开规则弹窗；
+    超时的报错文字原样弹给用户。"""
     import asyncio
     import time as _time
     from x_operator.llm.client import LLMTimeoutError, timeout_seconds
@@ -833,7 +834,7 @@ async def test_settings_llm_timeout_and_wait_dialog(user: User):
     with get_conn() as c:
         assert c.execute("SELECT value FROM app_settings WHERE key='llm_timeout_sec'").fetchone()["value"] == "90"
     assert timeout_seconds() == 90
-    # 等待框：把 AI 生成规则换成一个要跑 1.5 秒的假函数，点「生成」后应看到等待框和「最多等 90 秒」，跑完看到结果
+    # 任务面板：把 AI 生成规则换成一个要跑 1.5 秒的假函数，点「生成」后应看到面板里的进行中任务和超时秒数，跑完能打开结果
     with get_conn() as c:
         c.execute("UPDATE app_settings SET value='http://fake' WHERE key='llm_base_url'")
         c.execute("UPDATE app_settings SET value='k' WHERE key='llm_api_key'"); c.commit()
@@ -849,11 +850,16 @@ async def test_settings_llm_timeout_and_wait_dialog(user: User):
         await user.should_see("用大白话描述你想找什么人")
         [e for e in user.find("用大白话描述").elements if isinstance(e, ui.textarea)][0].set_value("找抱怨太贵的人")
         _click_button(user, "生成")
-        await user.should_see("AI 生成搜索规则中，AI 正在生成…")
-        await user.should_see("最多等 90 秒")
-        await user.should_see("已生成，请检查后保存", retries=30)
+        await user.should_see("任务进度 · 1 项进行中", retries=12)   # 面板每 0.5 秒刷新一次，默认只等 0.3 秒
+        await user.should_see("AI 正在生成…")
+        await user.should_see("单次请求超时 90 秒")
+        await user.should_see("规则已生成，点击「查看生成结果」检查后保存。", retries=30)
+        await user.should_see("任务进度 · 已完成")
+        _click_button(user, "查看生成结果")
+        await user.should_see("新建规则")
+        name = [e for e in user.find("规则名").elements if isinstance(e, ui.input)][0]
+        assert name.value == "慢规则", name.value
         await asyncio.sleep(0.2)
-        await user.should_not_see("AI 正在生成…")
 
         def timeout_rule(desc):
             raise LLMTimeoutError("AI 生成搜索规则超时：模型 x 在 90 秒内没有返回结果（已等 90 秒），这次AI 生成搜索规则没有生成。"

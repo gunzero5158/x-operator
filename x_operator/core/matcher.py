@@ -384,7 +384,8 @@ class MatchEngine:
             reason += f"｜置信度 {confidence:.2f} ≥ {auto_threshold:.2f}，按这条规则的免审核设置直接进待发送"
         with get_conn() as conn:
             # 生成期间其他操作也可能处理同一记录；入队检查与写入必须原子执行。
-            conn.execute("BEGIN IMMEDIATE")
+            if not conn.in_transaction:   # 线程内复用连接：前面若有没 commit 的写入，再 BEGIN 会报错
+                conn.execute("BEGIN IMMEDIATE")
             target = conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (target_id,)).fetchone()
             if target is None:
                 raise ValueError("抓取记录已删除，未创建回复草稿")

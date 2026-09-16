@@ -321,6 +321,9 @@ def register(jobs) -> None:
                 with client.content:
                     ui.notify(f"生成失败：{e}", type="negative", multi_line=True, close_button=True)
             return
+        if not obj:   # 程序正在关闭时 run.io_bound 会返回 None
+            task.finish("生成被中断，请重试", ok=False)
+            return
         preset = {
             "name": obj.get("name") or "AI 规则",
             "keyword_query": ", ".join(obj.get("keywords") or []),
