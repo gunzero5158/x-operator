@@ -295,59 +295,74 @@ def register(jobs) -> None:
             ui.label("例：对方在抱怨某工具太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。").classes("text-xs text-gray-400 -mt-2 mb-1")
             must = ui.input("必须包含（选填，多个用逗号）", value="").classes("w-full").props("outlined")
             ui.label("例：@你的官号, https://你的官网 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。").classes("text-xs text-gray-400 -mt-2 mb-1")
-            preview = ui.column().classes("w-full gap-1")
-            chosen: dict[int, bool] = {}
-            items_holder: dict = {"items": []}
-            status_sel = ui.select({"active": "直接启用", "draft": "先存为草稿"}, value="active", label="入库状态").classes("w-64").props("outlined dense")
-
             async def gen():
                 if not (topic.value or "").strip():
                     ui.notify("请先填主题", type="negative"); return
-                gen_btn.disable(); preview.clear()
+                if not gen_btn.enabled:
+                    return
+                gen_btn.disable()
+                kind_value, lang_value = kind.value, lang.value
+                args = (kind_value, lang_value, topic.value.strip(),
+                        (style.value or "").strip(), (scenario.value or "").strip(),
+                        [m.strip() for m in (must.value or "").replace("，", ",").split(",") if m.strip()],
+                        int(count.value or 5))
+                dlg.close()
                 try:
                     async with llm_wait("AI 生成素材", scene="material_gen",
-                                        note="一次要写好几条，比单条慢；这里按「返回超时」的 2 倍等。"):
-                        items = await run.io_bound(jobs.llm.generate_materials, kind.value, lang.value, topic.value.strip(),
-                                                   (style.value or "").strip(), (scenario.value or "").strip(),
-                                                   [m.strip() for m in (must.value or "").replace("，", ",").split(",") if m.strip()],
-                                                   int(count.value or 5))
-                except Exception as e:
-                    preview.clear()
-                    with preview:
-                        ui.label(f"生成失败：{e}").classes("text-red-500 whitespace-pre-wrap")
-                    gen_btn.enable(); return
-                gen_btn.enable()
-                items_holder["items"] = items
-                chosen.clear()
-                preview.clear()
-                with preview:
-                    if not items:
-                        ui.label("AI 没有返回内容，换个说法再试").classes("text-orange-600"); return
-                    ui.label(f"生成了 {len(items)} 条，取消勾选不想要的，可以直接在框里改：").classes("text-sm font-semibold")
-                    for i, it in enumerate(items):
-                        chosen[i] = True
-                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
-                            cb = ui.checkbox(value=True)
-                            cb.on("update:model-value", lambda e, i=i: chosen.__setitem__(i, bool(e.args)))
-                            with ui.column().classes("flex-1 gap-0"):
-                                ta = ui.textarea(value=it["text"]).classes("w-full").props("outlined autogrow dense")
-                                ta.on("update:model-value", lambda e, i=i: items_holder["items"][i].__setitem__("text", e.args))
-                                ui.label("场景：" + (it["scenario_tags"] or "").replace(",", ", ")).classes("text-xs text-gray-400")
-
-            def save_all():
-                items = items_holder["items"]
-                picked = [it for i, it in enumerate(items) if chosen.get(i)]
-                if not picked:
-                    ui.notify("没有勾选任何一条", type="warning"); return
-                with get_conn() as conn:
-                    for it in picked:
-                        conn.execute("INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) VALUES (?,?,?,?,?,'ai')",
-                                     (kind.value, (it["text"] or "").strip(), lang.value, it.get("scenario_tags", ""), status_sel.value))
-                    conn.commit()
-                dlg.close(); refresh(); ui.notify(f"已入库 {len(picked)} 条（标记为 AI 生成）", type="positive")
+                                        note="生成后可在任务面板查看预览，勾选确认后才会入库。") as task:
+                        items = await run.io_bound(jobs.llm.generate_materials, *args)
+                        if items:
+                            task.result_action = lambda: _material_preview(items, kind_value, lang_value, task)
+                            task.finish(f"已生成 {len(items)} 条素材，点击「查看生成结果」选择并入库。")
+                        else:
+                            task.finish("AI 没有返回内容，请换个说法再试。", ok=False)
+                except Exception:
+                    # 任务面板保留完整错误；离开原页面也能查看。
+                    return
 
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=dlg.close).props("flat")
                 gen_btn = ui.button("生成预览", icon="auto_awesome", on_click=gen).props("color=purple")
-                ui.button("入库勾选的", icon="save", on_click=save_all).props("color=primary")
         dlg.open()
+
+
+def _material_preview(items: list[dict], kind: str, lang: str, task) -> None:
+    """从任意页面打开生成结果；草稿数据不依赖最初的表单生命周期。"""
+    if task.result_action is None:
+        ui.notify("这批素材已入库", type="info")
+        return
+    with ui.dialog() as dlg, ui.card().classes("w-[760px] max-w-[95vw] max-h-[92vh] overflow-auto"):
+        ui.label(f"已生成 {len(items)} 条素材").classes("text-lg font-bold")
+        ui.label("取消勾选不想要的内容，也可以直接修改正文。").classes("text-sm text-slate-500")
+        chosen, editors = {}, {}
+        for i, item in enumerate(items):
+            with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                chosen[i] = ui.checkbox("入库", value=True)
+                with ui.column().classes("flex-1 gap-0"):
+                    editors[i] = ui.textarea(value=item["text"]).classes("w-full").props("outlined autogrow dense")
+                    editors[i].on_value_change(lambda e, i=i: items[i].__setitem__("text", e.value))
+                    ui.label("场景：" + (item.get("scenario_tags") or "")).classes("text-xs text-slate-500")
+        status_sel = ui.select({"active": "直接启用", "draft": "先存为草稿"}, value="active",
+                               label="入库状态").props("outlined dense")
+
+        def save():
+            if task.result_action is None:
+                ui.notify("这批素材已入库", type="info"); return
+            picked = [i for i in chosen if chosen[i].value]
+            if not picked:
+                ui.notify("没有勾选任何一条", type="warning"); return
+            with get_conn() as conn:
+                for i in picked:
+                    conn.execute("INSERT INTO materials(kind, text, lang, scenario_tags, status, created_by) VALUES (?,?,?,?,?,'ai')",
+                                 (kind, editors[i].value.strip(), lang, items[i].get("scenario_tags", ""), status_sel.value))
+                conn.commit()
+            task.result_action = None
+            task.result_link = ("查看素材库", "/materials")
+            task.finish(f"已入库 {len(picked)} 条素材。")
+            dlg.close()
+            ui.navigate.to("/materials")
+
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("稍后处理", on_click=dlg.close).props("flat")
+            ui.button("入库勾选的", icon="save", on_click=save).props("color=primary")
+    dlg.open()

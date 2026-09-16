@@ -309,6 +309,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
 
 async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: str = ""):
     """弹出「AI 撰写」框：填创作要求 → 调 LLM 生成 → 直接进待审核。返回 MatchOutcome 或 None。"""
+    client = ui.context.client
     with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
         ui.label("AI 按要求撰写回复").classes("text-lg font-bold")
         with ui.card().classes("bg-slate-50 w-full"):
@@ -335,10 +336,17 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
         return None
     text, files = res
     try:
-        async with llm_wait("AI 撰写回复", scene="write"):
+        async with llm_wait("AI 撰写回复", scene="write", result_link=("查看待审核", "/queue?status=pending")) as task:
             outcome = await run.io_bound(jobs.match.ai_write, target_id, text, None, "ai_write", "", files)
+            task.finish(("已进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
+                        ok=outcome.status == "queued")
     except Exception as e:
-        notify_long(f"AI 撰写出错：{e}", ok=False, kind="negative"); return None
-    notify_long(("已生成并进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
-                ok=outcome.status == "queued")
+        if not client.is_deleted:
+            with client.content:
+                notify_long(f"AI 撰写出错：{e}", ok=False, kind="negative")
+        return None
+    if not client.is_deleted:
+        with client.content:
+            notify_long(("已生成并进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
+                        ok=outcome.status == "queued")
     return outcome

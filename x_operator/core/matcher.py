@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -28,9 +29,28 @@ REPLY_MODE_LABEL = {"material": "匹配素材库", "ai_write": "AI 按要求创�
 
 @dataclass(frozen=True)
 class MatchOutcome:
-    status: Literal["queued", "no_match"]
+    status: Literal["queued", "no_match", "skipped"]
     queue_id: int | None
     reason: str
+
+
+@dataclass
+class BatchMatchResult:
+    total: int
+    queued: int = 0
+    no_match: int = 0
+    skipped: int = 0
+    failed: int = 0
+    details: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not (self.failed or self.no_match)
+
+    def as_msg(self) -> str:
+        summary = (f"共 {self.total} 条：进入待审核 {self.queued} 条，未匹配 {self.no_match} 条，"
+                   f"跳过 {self.skipped} 条，出错 {self.failed} 条。")
+        return summary + ("\n" + "\n".join(self.details) if self.details else "")
 
 
 def auto_approve_threshold(cfg) -> float | None:
@@ -77,6 +97,8 @@ def load_source_cfg(target: sqlite3.Row) -> sqlite3.Row | None:
 class MatchEngine:
     def __init__(self, llm: LLMClient):
         self.llm = llm
+        self._rematch_lock = Lock()
+        self._rematching: set[int] = set()
 
     # ---------------- 素材候选 ----------------
     def pick_candidates(self, lang: str, tags: list[str], limit: int = 15) -> tuple[list[sqlite3.Row], str]:
@@ -259,14 +281,67 @@ class MatchEngine:
                             media_files=media_files, auto_threshold=auto_threshold)
         return MatchOutcome("queued", qid, reason)
 
-    def rematch(self, target_id: int) -> MatchOutcome:
+    def rematch(self, target_id: int, *, expected_status: str | None = None) -> MatchOutcome:
+        """同一记录的批量/单条自动匹配互斥，避免重复生成。"""
+        with self._rematch_lock:
+            if target_id in self._rematching:
+                return MatchOutcome("skipped", None, "该记录正在自动匹配")
+            self._rematching.add(target_id)
+        try:
+            if expected_status is not None:
+                with get_conn() as conn:
+                    row = conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (target_id,)).fetchone()
+                if row is None or row["process_status"] != expected_status:
+                    return MatchOutcome("skipped", None, "记录已删除或状态已改变")
+            return self._rematch(target_id, expected_status=expected_status)
+        except Exception as e:
+            # 不让中途异常遗留为「待匹配」，也不覆盖并发操作已入队的结果。
+            with get_conn() as conn:
+                conn.execute("UPDATE target_tweets SET process_status='no_match', llm_relevance_reason=? "
+                             "WHERE id=? AND process_status='new'", (f"自动匹配出错：{e}", target_id))
+                conn.commit()
+            raise
+        finally:
+            with self._rematch_lock:
+                self._rematching.discard(target_id)
+
+    def rematch_many(self, target_ids: list[int], progress, *, expected_status: str = "filtered") -> BatchMatchResult:
+        """只处理用户勾选时的记录快照；复用手动匹配，始终生成待审核草稿。"""
+        if expected_status not in ("filtered", "no_match"):
+            raise ValueError("批量自动匹配只支持已过滤/未达标或达标但未生成回复的记录")
+        ids = list(dict.fromkeys(target_ids))
+        result = BatchMatchResult(total=len(ids))
+        for index, tid in enumerate(ids):
+            progress(index / len(ids), f"正在匹配第 {index + 1}/{len(ids)} 条（记录 #{tid}）\n{result.as_msg().splitlines()[0]}")
+            try:
+                outcome = self.rematch(tid, expected_status=expected_status)
+                if outcome.status == "queued":
+                    result.queued += 1
+                elif outcome.status == "skipped":
+                    result.skipped += 1
+                    result.details.append(f"#{tid} 跳过：{outcome.reason}")
+                else:
+                    result.no_match += 1
+                    result.details.append(f"#{tid} 未匹配：{outcome.reason}")
+            except Exception as e:
+                result.failed += 1
+                result.details.append(f"#{tid} 出错：{e}")
+            progress((index + 1) / len(ids), result.as_msg().splitlines()[0])
+        return result
+
+    def _rematch(self, target_id: int, *, expected_status: str | None = None) -> MatchOutcome:
         """「抓取记录」页的重新匹配：按来源规则的回复方式再跑一次。"""
         target, account, err, acc_note = self._prepare(target_id, None)
         if err:
             return MatchOutcome("no_match", None, err)
         with get_conn() as conn:
-            conn.execute("UPDATE target_tweets SET process_status='new', llm_relevance_reason=NULL WHERE id=?", (target_id,))
+            condition = "process_status=?" if expected_status is not None else "process_status!='queued'"
+            args = (target_id, expected_status) if expected_status is not None else (target_id,)
+            changed = conn.execute("UPDATE target_tweets SET process_status='new', llm_relevance_reason=NULL "
+                                   f"WHERE id=? AND {condition}", args).rowcount
             conn.commit()
+        if not changed:
+            return MatchOutcome("skipped", None, "记录已删除、状态已改变或已经进入任务队列")
         cfg = load_source_cfg(target)
         if _cfg_get(cfg, "reply_mode", "material") == "manual":
             # 手动模式下点「重新匹配」= 用素材库自动配一次
@@ -308,6 +383,17 @@ class MatchEngine:
             status, auto_ok = "approved", 1
             reason += f"｜置信度 {confidence:.2f} ≥ {auto_threshold:.2f}，按这条规则的免审核设置直接进待发送"
         with get_conn() as conn:
+            # 生成期间其他操作也可能处理同一记录；入队检查与写入必须原子执行。
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (target_id,)).fetchone()
+            if target is None:
+                raise ValueError("抓取记录已删除，未创建回复草稿")
+            if target["process_status"] == "queued":
+                existing = conn.execute("SELECT id FROM review_queue WHERE target_tweet_id=? ORDER BY id DESC LIMIT 1",
+                                        (target_id,)).fetchone()
+                if existing:
+                    conn.commit()
+                    return existing["id"]
             cur = conn.execute(
                 "INSERT INTO review_queue(account_id, action_type, target_tweet_id, material_id, "
                 "final_text, final_media_files, llm_reason, llm_confidence, status, auto_approve, decided_at, expires_at, origin, created_at) "
@@ -323,7 +409,7 @@ class MatchEngine:
     def _mark_no_match(self, target_id: int, reason: str) -> None:
         with get_conn() as conn:
             conn.execute(
-                "UPDATE target_tweets SET process_status='no_match', llm_relevance_reason=? WHERE id=?",
+                "UPDATE target_tweets SET process_status='no_match', llm_relevance_reason=? WHERE id=? AND process_status!='queued'",
                 (reason, target_id),
             )
             conn.commit()

@@ -12,9 +12,9 @@ import json
 
 from ..adapters.base import MEDIA_KIND_LABEL
 from ..core.langdetect import lang_name
-from ..core.matcher import load_source_cfg
+from ..core.matcher import BatchMatchResult, load_source_cfg
 from ..db.database import get_conn, utcnow_iso
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, llm_wait, notify_long, run_job, tag, tag_legend,
+from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, tag, tag_legend,
                      run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
@@ -134,6 +134,8 @@ def register(jobs) -> None:
                     "- **已过期**：待审核超时（设置 → 合规参数「回复条目时效」）。"
                 ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-2")
+            selected: set[int] = set()
+            visible_ids: list[int] = []
 
             async def clear(statuses: list[str]):
                 c = _counts()
@@ -146,15 +148,26 @@ def register(jobs) -> None:
                     render()
 
             async def rematch(tid: int):
-                if jobs.llm.configured:
-                    async with llm_wait("自动匹配素材", scene="match"):
-                        outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
-                else:
-                    outcome = await run_job(lambda: jobs.match.rematch(tid), "重新匹配")
-                if outcome is not None:
-                    ui.notify(("已生成回复并进入任务队列：" if outcome.status == "queued" else "仍未匹配：") + outcome.reason,
-                              type="positive" if outcome.status == "queued" else "warning", multi_line=True, close_button=True)
-                render()
+                def work(progress):
+                    progress(0, "正在按来源规则自动匹配…")
+                    outcome = jobs.match.rematch(tid)
+                    result = BatchMatchResult(total=1)
+                    setattr(result, outcome.status, 1)
+                    result.details.append(outcome.reason)
+                    return result
+                await run_job_with_progress(work, f"自动匹配 #{tid}", render,
+                                            ("查看待审核", "/queue?status=pending"))
+
+            async def rematch_selected():
+                ids = [tid for tid in visible_ids if tid in selected]
+                if not ids:
+                    ui.notify("请先勾选要自动匹配的记录", type="info")
+                    return
+                expected_status = status_f.value
+                await run_job_with_progress(lambda progress: jobs.match.rematch_many(
+                                                ids, progress, expected_status=expected_status),
+                                            f"批量自动匹配（{len(ids)} 条）", render,
+                                            ("查看待审核", "/queue?status=pending"), task_key="batch-rematch")
 
             def delete_one(tid: int):
                 err = _delete(tid)
@@ -188,7 +201,11 @@ def register(jobs) -> None:
                 render()
 
             def render():
+                if body.is_deleted or body.client.is_deleted:
+                    return
                 body.clear()
+                selected.clear()
+                visible_ids.clear()
                 rid = int(rule_f.value or 0)
                 src = source_f.value
                 if rid and src != "search":
@@ -206,8 +223,35 @@ def register(jobs) -> None:
                             ui.label("这个状态下没有记录，换个状态筛选看看。").classes("text-gray-400")
                         return
                     ui.label(f"最近 {len(rows)} 条" + ("（已达显示上限，可清理旧记录）" if len(rows) >= _LIMIT else "")).classes("text-xs text-gray-400")
+                    selection_box = None
+                    if status_f.value in ("filtered", "no_match"):
+                        visible_ids.extend(t["id"] for t in rows)
+                        checkboxes = {}
+                        with ui.row().classes("w-full items-center gap-2 bg-sky-50 p-3 rounded-lg"):
+                            def set_all(value):
+                                for cb in checkboxes.values():
+                                    cb.set_value(value)
+
+                            ui.button("全选当前列表", on_click=lambda: set_all(True)).props("flat dense")
+                            ui.button("取消全选", on_click=lambda: set_all(False)).props("flat dense")
+                            count_label = ui.label("已选 0 条").classes("text-sm text-slate-600")
+                            batch_btn = ui.button("批量自动匹配", icon="autorenew", on_click=rematch_selected).props("color=primary")
+                            batch_btn.disable()
+                        ui.label("按各自来源规则重新匹配，跳过打分和预检，成功后进入待审核。"
+                                 f"全选只包含当前显示的 {len(rows)} 条；运行中可以继续使用其他功能。").classes("text-xs text-slate-500")
+
+                        def selection_box(tid):
+                            def change(e):
+                                if e.value:
+                                    selected.add(tid)
+                                else:
+                                    selected.discard(tid)
+                                count_label.set_text(f"已选 {len(selected)} 条")
+                                batch_btn.set_enabled(bool(selected))
+                            checkboxes[tid] = ui.checkbox("选择", on_change=change).props("dense")
+
                     for t in rows:
-                        _card(t, rematch, delete_one, blacklist, pick, write)
+                        _card(t, rematch, delete_one, blacklist, pick, write, selection_box)
 
             status_f.on("update:model-value", lambda e: render())
             source_f.on("update:model-value", lambda e: render())
@@ -247,9 +291,11 @@ def media_tags(media_json: str | None) -> list[tuple[str, str]]:
     return out
 
 
-def _card(t, rematch, delete_one, blacklist, pick, write):
+def _card(t, rematch, delete_one, blacklist, pick, write, selection_box=None):
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
+            if selection_box is not None:
+                selection_box(t["id"])
             tag(source_label(t["source"], t["rule_name"], t["rule_kind"], t["watched_handle"]), "source",
                 "这条推文是哪条规则 / 哪个推主抓来的")
             tag(TARGET_STATUS_LABEL.get(t["process_status"], t["process_status"]), _STATUS_KIND.get(t["process_status"], "off"),
@@ -272,7 +318,7 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_one(t["id"])).props("flat dense round color=negative").tooltip("删除此记录")
         ui.label(f"@{t['author_handle'] or t['author_id']}").classes("text-xs text-gray-500")
-        ui.label(t["text"]).classes("text-sm whitespace-pre-wrap")
+        ui.label(t["text"]).classes("xo-prose whitespace-pre-wrap")
         if t["text_zh"]:
             ui.label("中文：" + t["text_zh"]).classes("text-xs text-gray-500")
         if t["llm_relevance_reason"]:
@@ -283,7 +329,7 @@ def _card(t, rematch, delete_one, blacklist, pick, write):
             else:
                 ui.label("打分理由：" + t["llm_relevance_reason"]).classes("text-xs text-gray-500")
         tweet_link(t["author_handle"], t["tweet_id"])
-        with ui.row().classes("gap-2 items-center flex-wrap"):
+        with ui.row().classes("xo-actions gap-2 items-center flex-wrap"):
             if t["process_status"] == "queued" and t["queue_id"]:
                 ui.link(f"查看任务队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
             elif t["process_status"] in ("no_match", "filtered", "expired", "new"):

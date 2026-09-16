@@ -290,6 +290,7 @@ def _llm_panel():
         return True
 
     async def test():
+        page_client = ui.context.client
         if not save():
             return
         client = LLMClient()
@@ -298,11 +299,16 @@ def _llm_panel():
                       "填入 base_url + api_key 后再测，即可切真实 LLM。", type="warning", multi_line=True)
             return
         try:
-            async with llm_wait("测试连接", scene="ping"):
+            async with llm_wait("测试连接", scene="ping") as task:
                 await run.io_bound(client.ping)
-            ui.notify("连接成功 ✅ 打分/匹配将走真实 LLM", type="positive")
+                task.finish("连接成功，打分/匹配将走真实 LLM")
+            if not page_client.is_deleted:
+                with page_client.content:
+                    ui.notify("连接成功 ✅ 打分/匹配将走真实 LLM", type="positive")
         except Exception as e:
-            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=12000)
+            if not page_client.is_deleted:
+                with page_client.content:
+                    ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=12000)
 
     with ui.row():
         ui.button("保存 LLM 设置", on_click=save).props("color=primary")

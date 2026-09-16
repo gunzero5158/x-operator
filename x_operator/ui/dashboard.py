@@ -44,13 +44,13 @@ def register(jobs) -> None:
         with shell("/"):
             ui.label("仪表盘").classes("text-2xl font-bold")
 
-            body = ui.column().classes("w-full gap-4")
+            body = ui.column().classes("xo-dashboard w-full")
 
             def render():
                 body.clear()
                 s = _stats()
                 with body:
-                    with ui.row().classes("gap-4 w-full"):
+                    with ui.row().classes("xo-kpi-grid w-full"):
                         _card("今日发送", str(s["sent_today"]), "已发出的推文/回复")
                         _card("待审核", str(s["pending"]), "任务队列积压", warn=s["pending"] > 0, link="/queue")
                         _card("待发送", str(s["approved"]), "已批准、等分发器发出", link="/queue")
@@ -60,7 +60,7 @@ def register(jobs) -> None:
                         _card("24h 异常", str(s["fails"]), "失败的 API/LLM 调用", warn=s["fails"] > 0)
 
                     # 就绪检查：告诉用户为什么可能「跑了没结果」
-                    with ui.card().classes("w-full"):
+                    with ui.card().classes("xo-overview-panel w-full"):
                         ui.label("就绪检查").classes("font-semibold")
                         from ..adapters.real import credentials_ready, parse_credentials
                         active_accounts = [a for a in s["accounts"] if a["status"] == "active"]
@@ -76,7 +76,7 @@ def register(jobs) -> None:
                         llm_ok = jobs.llm.configured
                         _check(True, "LLM：" + ("已配置网关（真实 LLM 打分/匹配）" if llm_ok else "未配置，用关键词启发式兜底（可用但粗糙）"), "", "/settings")
 
-                    with ui.card().classes("w-full"):
+                    with ui.card().classes("xo-overview-panel w-full"):
                         b = budget.current()
                         ra = get_read_account()
                         billed = ra is not None and read_is_billed(ra)
@@ -147,7 +147,7 @@ def register(jobs) -> None:
 
 
 def _card(title: str, value: str, sub: str, warn: bool = False, link: str | None = None):
-    with ui.card().classes("min-w-36"):
+    with ui.card().classes("xo-kpi" + (" is-warning" if warn else "")):
         ui.label(title).classes("text-sm text-gray-500")
         ui.label(value).classes("text-3xl font-bold " + ("text-red-500" if warn else ""))
         if link:

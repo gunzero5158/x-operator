@@ -82,17 +82,22 @@ def register(jobs) -> None:
                     _delete(sp["id"]); ui.notify("已删除", type="positive"); render()
 
             async def fire_now(sp):
+                client = ui.context.client
                 mode = sp["content_mode"] or "fixed"
                 uses_ai = jobs.llm.configured and (mode == "ai_topic" or (sp["ai_rewrite"] and mode in ("fixed", "pool")))
                 if uses_ai:
-                    async with llm_wait("生成主贴", scene="post_write" if mode == "ai_topic" else "post_rewrite"):
+                    async with llm_wait("生成主贴", scene="post_write" if mode == "ai_topic" else "post_rewrite",
+                                        result_link=("查看任务队列", "/queue")) as task:
                         ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
+                        task.finish(("已生成一条到任务队列：" if ok else "生成失败：") + msg, ok=ok)
                 else:
                     ui.notify("正在生成…", type="info")
                     ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
-                ui.notify(("已生成一条到任务队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
-                          multi_line=True, close_button=True, timeout=12000)
-                render()
+                if not client.is_deleted:
+                    with client.content:
+                        ui.notify(("已生成一条到任务队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
+                                  multi_line=True, close_button=True, timeout=12000)
+                        render()
 
             def render():
                 body.clear()

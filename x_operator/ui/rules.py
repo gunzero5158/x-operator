@@ -142,9 +142,9 @@ def register(jobs) -> None:
                     for r in rows:
                         c = counts.get(r["id"], {})
                         total = sum(c.values())
-                        with ui.card().classes("w-full"):
+                        with ui.card().classes("xo-rule-card w-full"):
                             with ui.row().classes("items-center gap-2 w-full"):
-                                ui.label(r["name"]).classes("font-semibold")
+                                ui.label(r["name"]).classes("xo-record-title")
                                 tag(SOURCE_KIND_LABEL[rule_source_kind(r)], "source", "推文来源：关键词搜索 / 某账号的推荐流 / 关注流")
                                 tag(langs_label(rule_langs(r)), "metric", "只要这些语言的推文")
                                 tag(f"达标分 ≥{r['min_llm_score']}", "metric", "AI 相关性打分达到这个分才进下一步")
@@ -177,12 +177,12 @@ def register(jobs) -> None:
                                          + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（账号池挑的号）")
                                          + " 的时间线，不用关键词").classes("text-xs text-gray-600")
                             else:
-                                ui.label("关键词：" + r["keyword_query"]).classes("text-xs font-mono text-gray-600")
-                                ui.label("实际查询（Cookie）：" + effective_query(r, access_type="unofficial")).classes("text-xs font-mono text-gray-400")
+                                ui.label("关键词：" + r["keyword_query"]).classes("text-xs text-gray-600")
+                                ui.label("实际查询（Cookie）：" + effective_query(r, access_type="unofficial")).classes("xo-query text-xs font-mono")
                                 ui.label("Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。").classes("text-xs text-gray-400")
                                 if config.get_bool("read_official_enabled", False):
-                                    ui.label("实际查询（官方 API）：" + effective_query(r, access_type="official")).classes("text-xs font-mono text-gray-400")
-                            ui.label("语义：" + r["semantic_criteria"]).classes("text-sm")
+                                    ui.label("实际查询（官方 API）：" + effective_query(r, access_type="official")).classes("xo-query text-xs font-mono")
+                            ui.label("语义：" + r["semantic_criteria"]).classes("xo-prose")
                             if r["reply_mode"] == "ai_write":
                                 ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
                                     "text-xs " + ("text-gray-500" if r["ai_brief"] else "text-red-500"))
@@ -192,15 +192,16 @@ def register(jobs) -> None:
                                          ).classes("text-xs text-gray-500")
                             else:
                                 ui.label("还没有抓取记录").classes("text-xs text-gray-400")
-                            with ui.row().classes("gap-2"):
+                            with ui.row().classes("xo-actions gap-2"):
                                 ui.button("查看结果", icon="travel_explore",
                                           on_click=lambda rid=r["id"]: ui.navigate.to(f"/targets?source=search&rule={rid}")
                                           ).props("flat dense color=primary")
                                 ui.button("编辑", on_click=lambda rr=r: _edit(rr, render)).props("flat dense")
                                 ui.button("运行此规则", icon="play_arrow",
                                           on_click=lambda rid=r["id"]: run_job_with_progress(
-                                              lambda progress, rid=rid: jobs.search.run_once(rule_ids=[rid], progress=progress), "搜索", render,
-                                              result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"))
+                                              lambda progress, rid=rid: jobs.search.run_once(rule_ids=[rid], progress=progress), f"搜索规则 #{rid}", render,
+                                              result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"),
+                                              task_key=f"search-rule:{rid}")
                                           ).props("flat dense").tooltip("只跑这一条规则（停用状态也能跑）；结果进抓取记录、推进游标，和正式运行一样")
                                 ui.button("重置游标", on_click=lambda rid=r["id"]: (_reset_cursor(rid), ui.notify("已重置，下次搜索按「首次回溯」小时数重新抓", type="info"), render())).props("flat dense")
                                 ui.button("删除", icon="delete", on_click=lambda rr=r: delete(rr)).props("flat dense color=negative")
@@ -297,6 +298,7 @@ def register(jobs) -> None:
         dialog.open()
 
     async def _ai_generate(jobs, refresh):
+        client = ui.context.client
         if not jobs.llm.configured:
             ui.notify("「AI 生成规则」需要先到「设置 → LLM」配置网关", type="warning", multi_line=True); return
         with ui.dialog() as dlg, ui.card().classes("w-[640px] max-w-[95vw]"):
@@ -312,18 +314,21 @@ def register(jobs) -> None:
         if not text or not text.strip():
             return
         try:
-            async with llm_wait("AI 生成搜索规则", scene="rule_gen"):
+            async with llm_wait("AI 生成搜索规则", scene="rule_gen") as task:
                 obj = await run.io_bound(jobs.llm.generate_search_rule, text.strip())
         except Exception as e:
-            ui.notify(f"生成失败：{e}", type="negative", multi_line=True, close_button=True); return
+            if not client.is_deleted:
+                with client.content:
+                    ui.notify(f"生成失败：{e}", type="negative", multi_line=True, close_button=True)
+            return
         preset = {
             "name": obj.get("name") or "AI 规则",
             "keyword_query": ", ".join(obj.get("keywords") or []),
             "semantic_criteria": obj.get("semantic_criteria") or "",
             "langs": obj.get("langs") or ["ja"],
         }
-        ui.notify("已生成，请检查后保存", type="positive")
-        _edit(None, refresh, preset=preset)
+        task.result_action = lambda: _edit(None, lambda: ui.navigate.to("/rules"), preset=preset)
+        task.finish("规则已生成，点击「查看生成结果」检查后保存。")
 
 
 def _toggle(rid: int, enabled):

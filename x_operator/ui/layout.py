@@ -1,7 +1,6 @@
 """公共页面外壳（design-v1.1 §8.0）：深色顶栏 + 醒目导航 + 内容插槽，以及各页共用的小工具。"""
 from __future__ import annotations
 
-import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Callable
 
@@ -9,6 +8,8 @@ from nicegui import run, ui
 
 from ..db.database import get_conn
 from ..llm.client import timeout_for
+from .task_progress import start_task, mount_task_panel
+from .theme import apply_theme
 
 # (路径, 名称, material 图标)
 NAV = [
@@ -37,36 +38,35 @@ def _alert_count() -> int:
 
 @contextmanager
 def shell(active: str):
-    with ui.header().classes("items-center justify-between bg-slate-900 text-white px-4 py-2 shadow-lg gap-3"):
+    apply_theme()
+    with ui.header().classes("xo-header items-center justify-between"):
         # 左：品牌
-        with ui.row().classes("items-center gap-2 shrink-0"):
-            ui.icon("smart_toy").classes("text-2xl text-sky-400")
-            ui.label("x-operator").classes("text-lg font-bold")
+        with ui.row().classes("xo-brand items-center shrink-0"):
+            ui.icon("smart_toy").classes("xo-brand-icon")
+            ui.label("x-operator").classes("xo-brand-name")
 
         # 中：醒目导航区——成块底色 + 图标 + hover/active 高亮（密集操作区，视觉强化）
         pc = _pending_count()
-        with ui.row().classes("items-center gap-1 bg-slate-800/70 rounded-xl p-1 flex-wrap"):
+        with ui.row().classes("xo-nav items-center").props('role=navigation aria-label="主导航"'):
             for path, name, icon in NAV:
                 is_active = path == active
-                cls = ("flex items-center gap-1 px-3 py-1.5 rounded-lg no-underline "
-                       "text-sm font-medium transition-colors ")
-                cls += ("bg-sky-600 text-white shadow"
-                        if is_active else
-                        "text-slate-200 hover:bg-slate-700 hover:text-white")
-                with ui.link(target=path).classes(cls):
+                cls = "xo-nav-link" + (" is-active" if is_active else "")
+                with ui.link(target=path).classes(cls).props('aria-current=page' if is_active else ''):
                     ui.icon(icon).classes("text-lg")
                     ui.label(name)
                     if path == "/queue" and pc:
-                        ui.badge(str(pc), color=None).classes("bg-red-600 text-white ml-1")
+                        ui.badge(str(pc), color=None).classes("xo-nav-count ml-1")
 
         # 右：显示时区 + 账号告警
-        with ui.row().classes("items-center gap-2 shrink-0"):
-            ui.label(f"🕒 {display_tz_name()}").classes("text-xs text-slate-400") \
+        with ui.row().classes("xo-timezone items-center shrink-0"):
+            ui.icon("schedule").classes("text-base")
+            ui.label(display_tz_name()) \
                 .tooltip("页面上所有时间按这个时区显示，可在「设置 → 自动运行」里改；不影响账号活跃时段 / 定时计划的判断")
             ac = _alert_count()
             if ac:
                 ui.badge(f"⚠ {ac} 账号凭据失效", color=None).classes("bg-red-600 text-white")
-    container = ui.column().classes("max-w-5xl mx-auto p-4 w-full")
+    mount_task_panel()
+    container = ui.column().classes("xo-page")
     with container:
         yield container
 
@@ -126,90 +126,43 @@ async def run_job(fn: Callable[[], Any], label: str, refresh: Callable[[], None]
 
 
 @asynccontextmanager
-async def llm_wait(label: str, scene: str = "write", note: str = ""):
-    """等大模型生成时弹一个等待框：转圈 + 已等几秒 + 按「返回超时」算的进度条，让人知道没卡死、大概还要多久。
-
-    用法：async with llm_wait("AI 撰写回复", scene="write"): outcome = await run.io_bound(...)
-    scene 用来取该场景的超时秒数（设置 → LLM 的「返回超时」）；退出时自动关掉。"""
-    limit = timeout_for(scene)
-    started = time.monotonic()
-    with ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[420px] max-w-[90vw]"):
-        with ui.row().classes("items-center gap-2 no-wrap"):
-            ui.spinner(size="lg")
-            ui.label(f"{label}中，AI 正在生成…").classes("text-lg font-bold")
-        bar = ui.linear_progress(0.0, show_value=False, size="12px").classes("w-full")
-        info = ui.label("").classes("text-sm text-gray-600")
-        ui.label(note or f"生成速度取决于模型和网关，快的几秒、慢的一两分钟。超过 {limit} 秒按超时处理并提示；"
-                 "觉得太短可到「设置 → LLM」调「返回超时」。").classes("text-xs text-gray-400")
-    dlg.open()
-
-    def tick() -> None:
-        elapsed = time.monotonic() - started
-        bar.value = min(1.0, elapsed / limit) if limit > 0 else 0.0
-        if elapsed <= limit:
-            info.text = f"已等 {int(elapsed)} 秒，最多等 {limit} 秒"
-        else:
-            info.text = f"已等 {int(elapsed)} 秒，超过了 {limit} 秒——多半是 AI 第一稿不合格正在重写（会再来一轮），再等一下"
-    tick()
-    timer = ui.timer(0.5, tick)
+async def llm_wait(label: str, scene: str = "write", note: str = "", result_link: tuple[str, str] | None = None):
+    """AI 等待使用不阻挡操作的任务面板；不把超时比例冒充真实生成进度。"""
+    client = ui.context.client
+    task = start_task(label, result_link=result_link,
+                      note=note or f"AI 正在生成，单次请求超时 {timeout_for(scene)} 秒；重写可能需要更久。")
+    task.message = "AI 正在生成…"
     try:
-        yield
+        # 触发按钮所在的卡片可能被其他操作刷新，后续提示挂在页面根节点。
+        with client.content:
+            yield task
+    except Exception as e:
+        task.finish(f"{label}出错：{e}", ok=False)
+        raise
     finally:
-        timer.cancel()
-        dlg.close()
-        dlg.delete()
+        if task.finished is None:
+            task.finish(f"{label}处理完成")
 
 
 async def run_job_with_progress(fn: Callable[..., Any], label: str, refresh: Callable[[], None] | None = None,
-                                result_link: tuple[str, str] | None = None):
-    """跟 run_job 一样在线程池里跑，但先弹一个进度框：fn 必须接受 progress 参数，
-    在工作线程里调 progress(0~1 的进度, 当前在做什么) 就会实时显示。跑完进度框变成结果框。"""
-    state = {"frac": 0.0, "text": "准备中…"}
-
-    def progress(frac: float, text: str) -> None:
-        state["frac"] = max(0.0, min(1.0, float(frac)))
-        state["text"] = text
-
-    # 挂在页面根节点，避免 refresh 清空触发按钮所在的卡片时连结果框一起删除。
-    with ui.context.client.content, ui.dialog().props("persistent") as dlg, ui.card().classes("min-w-[480px] max-w-[90vw]"):
-        with ui.row().classes("items-center gap-2"):
-            icon = ui.spinner(size="lg")
-            title = ui.label(f"{label}进行中…").classes("text-lg font-bold")
-        bar = ui.linear_progress(0.0, show_value=False, size="12px").classes("w-full")
-        pct = ui.label("0%").classes("text-xs text-gray-400")
-        info = ui.label(state["text"]).classes("text-sm text-gray-600 whitespace-pre-wrap")
-        result_box = ui.column().classes("w-full")
-        btn_row = ui.row().classes("w-full justify-end gap-2")
-    dlg.open()
-
-    def tick():
-        bar.value = state["frac"]
-        pct.text = f"{int(state['frac'] * 100)}%"
-        info.text = state["text"]
-    timer = ui.timer(0.25, tick)
-
+                                result_link: tuple[str, str] | None = None, *, task_key: str | None = None):
+    """在线程池执行任务，进度保存在进程中，页面刷新/切换不影响执行。"""
+    client = ui.context.client
+    task = start_task(label, key=task_key or label, result_link=result_link)
+    if task is None:
+        with client.content:
+            ui.notify("这个任务正在运行，请在右下角查看进度", type="info")
+        return None
     try:
-        res = await run.io_bound(fn, progress)
+        res = await run.io_bound(fn, task.update)
         ok = getattr(res, "ok", True)
         msg = res.as_msg() if hasattr(res, "as_msg") else f"{label}完成"
     except Exception as e:
         res, ok, msg = None, False, f"{label}出错：{e}"
-    timer.cancel()
-    state["frac"], state["text"] = 1.0, "完成"
-    tick()
-    icon.delete()
-    title.text = f"{label}结果"
-    with result_box:
-        with ui.row().classes("items-center gap-2 no-wrap"):
-            ui.icon("check_circle" if ok else "warning").classes("text-2xl " + ("text-green-600" if ok else "text-orange-500"))
-            ui.label(msg).classes("text-sm whitespace-pre-wrap")
-    with btn_row:
-        ui.button("关闭", on_click=dlg.close).props("flat")
-        if result_link:
-            text, href = result_link
-            ui.button(text, icon="arrow_forward", on_click=lambda: ui.navigate.to(href)).props("color=primary")
-    if refresh:
-        refresh()
+    task.finish(msg, ok=ok)
+    if refresh and not client.is_deleted:
+        with client.content:
+            refresh()
     return res
 
 
@@ -240,23 +193,24 @@ QUEUE_STATUS_LABEL = {
 
 # 标签配色约定（全站统一）：颜色 = 这个标签在说哪一类信息，各页面卡片都按这套来
 TAG = {
-    "source":  "bg-sky-700 text-white",                                   # 出处：来自哪条规则 / 哪个推主 / 文案怎么来的
-    "account": "bg-slate-700 text-white",                                 # 账号：@谁 / 用哪个号
-    "reply":   "bg-indigo-600 text-white",                                # 类型：回复（在别人推文下）
-    "post":    "bg-orange-600 text-white",                                # 类型：发帖（自己的主贴）
-    "ok":      "bg-green-600 text-white",                                 # 状态：好 / 已完成 / 启用
-    "wait":    "bg-blue-500 text-white",                                  # 状态：进行中 / 等待
-    "attn":    "bg-orange-500 text-white",                                # 状态：要人处理
-    "bad":     "bg-red-600 text-white",                                   # 状态：失败 / 危险
-    "off":     "bg-gray-400 text-white",                                  # 状态：停用 / 过期 / 跳过
-    "metric":  "bg-white text-gray-700 border border-gray-400",          # 数值 / 参数（相关性、观看量、语言、条数…）：白底描边
-    "metric_ok":  "bg-white text-emerald-700 border border-emerald-600",  # 数值达标
-    "metric_bad": "bg-white text-red-600 border border-red-500",          # 数值不达标
-    "mode":    "bg-teal-600 text-white",                                  # 处理方式：回复方式 / 内容来源模式
-    "ai":      "bg-purple-600 text-white",                                # AI 参与
-    "warn":    "bg-amber-500 text-white",                                 # 注意事项
-    "media":   "bg-pink-600 text-white",                                  # 附件
+    "source": "xo-tag xo-tag-source",
+    "account": "xo-tag xo-tag-account",
+    "reply": "xo-tag xo-tag-reply",
+    "post": "xo-tag xo-tag-post",
+    "ok": "xo-tag xo-tag-ok",
+    "wait": "xo-tag xo-tag-wait",
+    "attn": "xo-tag xo-tag-attn",
+    "bad": "xo-tag xo-tag-bad",
+    "off": "xo-tag xo-tag-off",
+    "metric": "xo-tag xo-tag-metric",
+    "metric_ok": "xo-tag xo-tag-metric_ok",
+    "metric_bad": "xo-tag xo-tag-metric_bad",
+    "mode": "xo-tag xo-tag-mode",
+    "ai": "xo-tag xo-tag-ai",
+    "warn": "xo-tag xo-tag-warn",
+    "media": "xo-tag xo-tag-media",
 }
+
 TAG_LEGEND = [("来源", "source"), ("账号", "account"), ("回复", "reply"), ("发帖", "post"), ("正常", "ok"), ("等待", "wait"),
               ("待处理", "attn"), ("失败", "bad"), ("停用", "off"), ("数值 / 参数", "metric"), ("方式", "mode"), ("AI", "ai"),
               ("注意", "warn"), ("附件", "media")]
@@ -286,7 +240,7 @@ def source_label(source: str | None, rule_name: str | None, rule_kind: str | Non
 def tag_legend(kinds: list[str] | None = None):
     """页顶一行「标签颜色说明」。kinds 不传 = 全部；传了只显示这几类。"""
     items = [(t, k) for t, k in TAG_LEGEND if kinds is None or k in kinds]
-    with ui.row().classes("items-center gap-1 flex-wrap") as row:
+    with ui.row().classes("xo-tag-legend items-center flex-wrap") as row:
         ui.label("标签颜色：").classes("text-xs text-gray-500")
         for text, kind in items:
             ui.badge(text, color=None).classes(TAG[kind] + " text-[10px]")

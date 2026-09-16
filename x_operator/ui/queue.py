@@ -379,11 +379,17 @@ def register(jobs) -> None:
             async def shorten_cb(it, text: str, account_id: int):
                 if not jobs.llm.configured:
                     ui.notify("AI 缩写需要先到「设置 → LLM」配置网关", type="warning"); return
-                async with llm_wait("AI 缩写", scene="shorten"):
+                client = ui.context.client
+                async with llm_wait("AI 缩写", scene="shorten", result_link=("查看任务队列", "/queue")) as task:
                     new, note = await run.io_bound(_shorten, jobs, it["id"], text, account_id)
-                notify_long(note, ok=bool(new), kind=None if new else "warning")
-                if new:
-                    state["dirty"].discard(it["id"]); render()
+                    task.finish(note, ok=bool(new))
+                if not client.is_deleted:
+                    with client.content:
+                        notify_long(note, ok=bool(new), kind=None if new else "warning")
+                        if new:
+                            state["dirty"].discard(it["id"])
+                            state["sig"] = None
+                            render(force=False)
 
             async def verify_cb(it):
                 ui.notify("正在到 X 上回查…", type="info")
