@@ -6,6 +6,7 @@
     --xo-line: #CBC6D8;
     --xo-ink: #343046;
     --xo-muted: #686175;
+    --xo-hint: #8E88A1;      /* 说明性文字：比正文明显浅一档，和功能内容拉开 */
     --xo-accent: #61508E;
     --xo-soft: #EAE4F5;
     --xo-card-pad: 22px;
@@ -57,9 +58,23 @@ body {
 .xo-page > .nicegui-row:first-child { align-items: center; gap: 16px; }
 .xo-page > .nicegui-row:first-child > .nicegui-row { gap: 8px; }
 .xo-page .text-2xl { font-size: 26px; line-height: 1.35; letter-spacing: -.5px; color: var(--xo-ink); }
-.xo-page .text-xs, .q-dialog .text-xs { font-size: 13px; line-height: 1.75; }
-.xo-page .text-gray-400, .q-dialog .text-gray-400 { color: var(--xo-muted); }
+/* 文字三档：正文 14px 墨色（功能内容）；辅助信息 12px 灰（时间、计数、@谁）；说明 12px 浅灰（怎么用、推荐值），
+   说明还会折成一行，点「更多」才展开，免得每个输入框下面都挂一段话 */
+.xo-page .text-xs, .q-dialog .text-xs { font-size: 12px; line-height: 1.6; }
+.xo-page .text-gray-400, .q-dialog .text-gray-400 { color: var(--xo-hint); }
 .xo-page .text-gray-500, .q-dialog .text-gray-500 { color: var(--xo-muted); }
+.xo-page .text-gray-600, .q-dialog .text-gray-600 { color: var(--xo-muted); }
+.xo-page .q-expansion-item__content .text-xs, .q-dialog .q-expansion-item__content .text-xs { line-height: 1.8; }
+.xo-hint-short { max-width: 88ch; }
+.xo-hint { gap: 6px; max-width: 88ch; cursor: pointer; align-items: flex-start; user-select: none; }
+.xo-hint__icon { font-size: 15px; color: var(--xo-hint); margin-top: 2px; flex: 0 0 auto; }
+.xo-hint__text {
+    flex: 1 1 auto; min-width: 0;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden;
+}
+.xo-hint.is-open .xo-hint__text { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.xo-hint__more { flex: 0 0 auto; font-size: 12px; line-height: 1.6; color: var(--xo-accent); white-space: nowrap; }
+.xo-hint:hover .xo-hint__text { color: var(--xo-muted); }
 .xo-page .text-sm, .q-dialog .text-sm { line-height: 1.75; }
 .xo-page a:not(.q-btn), .q-dialog a:not(.q-btn) { text-underline-offset: 3px; }
 .xo-page .q-card, .q-dialog .q-card, .xo-task-panel.q-card {

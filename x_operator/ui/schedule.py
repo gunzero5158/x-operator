@@ -71,9 +71,9 @@ def register(jobs) -> None:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("定时发帖").classes("text-2xl font-bold")
                 ui.button("新建发帖计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-            ui.label("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），"
+            hint("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），"
                      "再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。"
-                     "周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。").classes("text-xs text-gray-400")
+                     "周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。", after_row=True)
 
             body = ui.column().classes("w-full gap-2")
 
@@ -196,7 +196,7 @@ def register(jobs) -> None:
                     pool_tags = ui.input("场景标签（选填，逗号隔开）", value=sp["pool_tags"] if sp else "").classes("flex-1").props("outlined")
                 hint(HINTS["pool"], after_row=True)
             rewrite = ui.switch("AI 改写变体（每次换个说法再发，需 LLM）", value=bool(sp["ai_rewrite"]) if sp else True)
-            rw_hint = ui.label(HINTS["rewrite"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+            rw_hint = hint(HINTS["rewrite"])
             # AI 主题
             ai_box = ui.column().classes("w-full gap-1")
             with ai_box:

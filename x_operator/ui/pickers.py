@@ -11,6 +11,7 @@ from ..db.database import get_conn, utcnow_iso
 from ..core.accounts import REPLY_ACCOUNT_MODE_LABEL, account_options, reply_account_setting
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
 from .layout import confirm, llm_wait, notify_long
+from .layout import hint as _hint
 from .media_widget import MediaField, media_badge
 
 
@@ -118,9 +119,7 @@ REPLY_HINTS = {
 }
 
 
-def hint(text: str, after_row: bool = False):
-    """输入框下面的小字说明。after_row：前面是一行并排的输入框时用（负边距会压到框上）。"""
-    ui.label(text).classes("text-xs text-gray-400 mb-1" + ("" if after_row else " -mt-2"))
+hint = _hint   # 输入框下面的说明（共用实现在 layout.hint：长说明折成一行，点「更多」展开）
 
 
 MEDIA_MODE_LABEL = {"fixed": "固定：每条回复都带下面这几个", "pool": "素材池：每条回复从下面随机挑 1 个"}
@@ -174,7 +173,7 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     acc = ReplyAccountField(account_cfg)
     hint(REPLY_HINTS["reply_account"])
     brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
-    brief_hint = ui.label(REPLY_HINTS["ai_brief"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+    brief_hint = hint(REPLY_HINTS["ai_brief"])
     tpl_box = ui.column().classes("w-full gap-0")
     with tpl_box:
         template_controls(brief)
@@ -190,7 +189,7 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
             mf.set_limit(media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS, "", label=MEDIA_FIELD_LABEL[media_mode.value])
         media_mode.on("update:model-value", lambda e: sync_media_mode()); sync_media_mode()
     polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
-    polish_hint = ui.label(REPLY_HINTS["polish"]).classes("text-xs text-gray-400 -mt-2 mb-1")
+    polish_hint = hint(REPLY_HINTS["polish"])
 
     auto_box = ui.column().classes("w-full gap-4")
     with auto_box:
@@ -285,7 +284,7 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
                         with ui.row().classes("items-center gap-2"):
                             ui.badge(lang_name(m["lang"]), color=None).classes("bg-slate-500")
                             if m["scenario_tags"]:
-                                ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
+                                hint("场景：" + m["scenario_tags"].replace(",", ", "), after_row=True).tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
                             ui.label(f"用过 {m['usage_count']} 次").classes("text-xs text-gray-400")
                             if m["created_by"] == "ai":
                                 ui.badge("AI", color=None).classes("bg-purple-600")
@@ -316,9 +315,9 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
             ui.label("目标推文").classes("text-xs text-gray-500")
             ui.label(tweet_text).classes("text-sm whitespace-pre-wrap")
         brief = ui.textarea("创作要求", value=default_brief).classes("w-full").props("outlined autogrow")
-        ui.label("写清楚：① 主题/立场（比如：推荐我们的 XX 产品）；② 必须带的东西——直接把链接或 @账号写在要求里，"
+        hint("写清楚：① 主题/立场（比如：推荐我们的 XX 产品）；② 必须带的东西——直接把链接或 @账号写在要求里，"
                  "AI 会原样放进正文，少了会自动重写；③ 语气（比如：像同行随口聊，不像客服）。"
-                 "AI 会先回应对方说的内容，再自然带出你的主题。").classes("text-xs text-gray-400")
+                 "AI 会先回应对方说的内容，再自然带出你的主题。", after_row=True)
         template_controls(brief)
         must_lbl = ui.label("").classes("text-xs text-sky-700")
 

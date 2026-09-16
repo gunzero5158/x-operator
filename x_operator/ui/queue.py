@@ -13,7 +13,7 @@ from ..core import media, textlimit
 from ..core.compliance import SKIP_REASON_LABEL
 from ..core.langdetect import lang_name
 from ..db.database import get_conn, utcnow_iso
-from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, llm_wait, notify_long, run_job,
+from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, hint, llm_wait, notify_long, run_job,
                      shell, source_label, tag, tag_legend, tweet_link)
 from .media_widget import MediaField, media_badge, media_strip
 from .pickers import pick_material_dialog
@@ -285,8 +285,8 @@ def register(jobs) -> None:
                               on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
             acc_hint = ui.label("").classes("text-sm text-orange-600")
 
-            ui.label("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
-                     ).classes("text-xs text-gray-400")
+            hint("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
+                     , after_row=True)
             tag_legend(["account", "reply", "post", "source", "ai", "warn", "media", "metric"])
             with ui.expansion("卡片上的标签是什么意思？", icon="help_outline").classes("w-full text-sm"):
                 ui.markdown(
@@ -542,9 +542,9 @@ async def _transfer_dialog(scope: str, n: int, source_id: int) -> list[int] | No
         if not opts:
             ui.label("除了这个账号没有其他启用中的账号：先到「设置 → 账号」启用或添加一个。").classes("text-sm text-orange-600")
         sel = ui.select(opts, value=[], multiple=True, label="转给哪些账号（选多个 = 平均分）").classes("w-full").props("outlined use-chips")
-        ui.label("条目状态不变：待审核的仍待审核，待发送的按新账号的活跃时段 / 发送间隔 / 日上限发出；"
+        hint("条目状态不变：待审核的仍待审核，待发送的按新账号的活跃时段 / 发送间隔 / 日上限发出；"
                  "失败的转过去后可以再点「捞回待审核」。待发送的条目超出新账号长度上限（免费账号 280 单位）会退回待审核。"
-                 "发送中 / 已发送的不会动。").classes("text-xs text-gray-400")
+                 "发送中 / 已发送的不会动。", after_row=True)
 
         def ok():
             if not sel.value:

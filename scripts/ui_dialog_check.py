@@ -877,3 +877,33 @@ async def test_settings_llm_timeout_and_wait_dialog(user: User):
         with get_conn() as c:
             c.execute("UPDATE app_settings SET value='' WHERE key IN ('llm_base_url','llm_api_key')")
             c.execute("UPDATE app_settings SET value='60' WHERE key='llm_timeout_sec'"); c.commit()
+
+
+async def test_long_hints_collapse_and_expand(user: User):
+    """说明文字分层：长说明默认折成一行（带「更多」），点一下展开、再点收起；短说明直接显示。"""
+    from x_operator.ui.rules import HINTS
+    _pages()
+    await user.open("/rules")
+    _click_button(user, "新建规则")
+    await user.should_see("观看量下限（0 = 不限）")
+    rows = [e for e in user.find(kind=ui.row).elements if "xo-hint" in e._classes]
+    assert rows, "规则弹窗里应有折叠起来的长说明"
+    row = [r for r in rows if any(getattr(c, "text", "") == HINTS["min_views"] for c in r.default_slot.children)][0]
+    assert "is-open" not in row._classes
+    more = [c for c in row.default_slot.children if getattr(c, "text", "") == "更多"][0]
+    UserInteraction(user, {row}, None).click()
+    assert "is-open" in row._classes and more.text == "收起", (row._classes, more.text)
+    UserInteraction(user, {row}, None).click()
+    assert "is-open" not in row._classes and more.text == "更多"
+    # 短说明（≤ 60 字）不折叠、没有「更多」：监控推主弹窗的「含回复」说明就是一条
+    await user.open("/watched")
+    with get_conn() as c:
+        c.execute("INSERT OR IGNORE INTO watched_users(handle, x_user_id) VALUES ('hintshort','hintshort_id')"); c.commit()
+    await user.open("/watched")
+    btn = [b for b in user.find(kind=ui.button).elements if b.text == "编辑" and "@hintshort" in _card_text(b)]
+    UserInteraction(user, set(btn), None).click()
+    await user.should_see("监控时包含其回复")
+    short = [e for e in user.find(kind=ui.label).elements if "xo-hint-short" in e._classes]
+    assert short and all(len(e.text) <= 60 for e in short) and all("更多" not in e.text for e in short), [e.text for e in short][:3]
+    with get_conn() as c:
+        c.execute("DELETE FROM watched_users WHERE handle='hintshort'"); c.commit()

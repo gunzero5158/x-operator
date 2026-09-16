@@ -16,7 +16,7 @@ from ..core.readpool import official_enabled
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (DEFAULT_TIMEOUT_SEC, SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           TIMEOUT_MAX_SEC, TIMEOUT_MIN_SEC, LLMClient, timeout_seconds)
-from .layout import confirm, llm_wait, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
+from .layout import confirm, hint, llm_wait, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
                "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin"]
@@ -46,7 +46,7 @@ def register(jobs) -> None:
                 with ui.tab_panel(t_llm):
                     _llm_panel()
                 with ui.tab_panel(t_comp):
-                    ui.label("这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。").classes("text-xs text-gray-400")
+                    hint("这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。", after_row=True)
                     _numeric_panel([
                         ("cooldown_days", "作者冷却天数",
                          "对同一个作者两次互动之间至少隔几天，避免被对方和 X 当成骚扰。推荐 7；养号期小号 14。", int, 0, 365),
@@ -63,10 +63,10 @@ def register(jobs) -> None:
                 with ui.tab_panel(t_fetch):
                     _read_channel_panel()
                 with ui.tab_panel(t_budget):
-                    ui.label("读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。"
+                    hint("读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。"
                              "怎么数：每次抓取按 X 返回的推文条数记（被过滤掉的也算，开了观看量门槛时按扫描条数记），发送后回查算 1 条，发送本身不占读额度。"
                              "真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。"
-                             "这是程序自己的估算，不是 X 的账单；实际费用以开发者后台为准。").classes("text-xs text-gray-400")
+                             "这是程序自己的估算，不是 X 的账单；实际费用以开发者后台为准。", after_row=True)
                     _numeric_panel([
                         ("daily_read_budget", "每日读额度（条）",
                          "每天最多从官方 API 读多少条推文（监控+搜索+回查合计），防止账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。填 0 = 不限。", int, 0, 1000000),
@@ -84,12 +84,12 @@ def register(jobs) -> None:
 
 def _read_channel_panel():
     ui.label("抓取账号池（监控 / 搜索用哪个账号去读、限额与 429 冷却）").classes("font-semibold")
-    ui.label("每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；"
+    hint("每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；"
              "小号都到上限时才轮到官方号（且要打开下面的开关）。撞到 429 的账号会暂停一段时间，本次运行停下并记住进度，到点自动续跑。"
-             "仪表盘能看到每个账号当前窗口的用量。").classes("text-xs text-gray-400 -mt-2 mb-1")
+             "仪表盘能看到每个账号当前窗口的用量。")
     sw = ui.switch("官方 API 也参与抓取（按条计费，默认关）", value=official_enabled())
-    ui.label("关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，"
-             "受「预算」标签页里的读额度限制。只有一个官方号、没有小号的用户要打开这个。").classes("text-xs text-gray-400 -mt-2 mb-2")
+    hint("关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，"
+             "受「预算」标签页里的读额度限制。只有一个官方号、没有小号的用户要打开这个。")
     sw.on("update:model-value", lambda e: (config.set_value("read_official_enabled", 1 if e.args else 0),
                                            ui.notify("官方 API " + ("已参与抓取（计费）" if e.args else "不再参与抓取"), type="positive")))
     _numeric_panel([
@@ -114,14 +114,14 @@ def _run_panel(jobs):
     from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, DISPATCH_INTERVAL_MAX, DISPATCH_INTERVAL_MIN, describe_schedule,
                                   dispatch_interval_seconds, job_enabled, next_runs, parse_daily_times, reschedule_auto_jobs)
     ui.label("自动运行").classes("font-semibold")
-    ui.label("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
-             "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。").classes("text-xs text-gray-400")
+    hint("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
+             "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。", after_row=True)
 
     cur_disp = display_tz_name()
     disp_tz = ui.select(_TZ_CHOICES if cur_disp in _TZ_CHOICES else [cur_disp] + _TZ_CHOICES, value=cur_disp,
                         label="界面显示时区").classes("w-72").props("outlined dense")
-    ui.label("任务队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
-             "每日上限、定时计划到点时间仍按各账号自己的时区判断。").classes("text-xs text-gray-400 -mt-1 mb-1")
+    hint("任务队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
+             "每日上限、定时计划到点时间仍按各账号自己的时区判断。")
 
     status_box = ui.column().classes("w-full gap-0")
 
@@ -318,9 +318,9 @@ def _llm_panel():
 def _numeric_panel(fields):
     """fields：(key, 标签, 说明, 类型 int/float, 最小, 最大)。保存前逐项校验，填错哪个就提示哪个，全部合格才写库。"""
     inputs = {}
-    for key, label, hint, _kind, lo, hi in fields:
+    for key, label, text, _kind, lo, hi in fields:
         inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
-        ui.label(hint + f"（允许范围 {lo:g}~{hi:g}）").classes("text-xs text-gray-400 -mt-2 mb-2")
+        hint(text + f"（允许范围 {lo:g}~{hi:g}）")
 
     def save():
         parsed = {}
@@ -422,15 +422,15 @@ _OFFICIAL_GUIDE = """
 
 def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
-    ui.label("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
-             "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。").classes("text-xs text-gray-400")
-    ui.label("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
+    hint("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
+             "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。", after_row=True)
+    hint("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可改成只用指定的一个或几个账号、或排除某些账号，任务队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
-             "发帖的账号在定时发帖计划里选。").classes("text-xs text-gray-400")
+             "发帖的账号在定时发帖计划里选。", after_row=True)
     sys_proxy = detect_system_proxy()
-    ui.label("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
-             "。账号里代理留空时自动使用它。").classes("text-xs text-gray-400")
+    hint("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
+             "。账号里代理留空时自动使用它。", after_row=True)
     body = ui.column().classes("w-full gap-2")
 
     def save_account(data: dict, creds: dict, existing_id: int | None = None) -> bool:
@@ -491,9 +491,9 @@ def _accounts_panel():
                 .classes("w-full").props("outlined dense")
             primary = ui.switch("设为主号", value=bool(existing["is_primary"]) if existing else False)
             premium = ui.switch("已订阅 X Premium（会员）", value=bool(existing["is_premium"]) if existing else False)
-            ui.label("影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），"
+            hint("影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），"
                      "超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。"
-                     "请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。").classes("text-xs text-gray-400 -mt-2 mb-1")
+                     "请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。")
 
             # ---- 凭据区：按通道类型显示不同字段 ----
             ui.separator()
@@ -567,8 +567,8 @@ def _accounts_panel():
                     .props("outlined dense").classes("flex-1")
                 mx = ui.number("最大间隔(秒)", value=existing["max_interval_sec"] if existing else 600, min=0) \
                     .props("outlined dense").classes("flex-1")
-            ui.label("两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；"
-                     "同一账号主贴和回复都到点时先发主贴。").classes("text-xs text-gray-400 -mt-2")
+            hint("两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；"
+                     "同一账号主贴和回复都到点时先发主贴。")
             with ui.row().classes("w-full gap-2 no-wrap"):
                 a_start = ui.input("活跃开始 HH:MM", value=existing["active_hours_start"] if existing else "09:00") \
                     .props("outlined dense").classes("flex-1")
@@ -577,10 +577,10 @@ def _accounts_panel():
                 tz_val = existing["timezone"] if existing else "Asia/Tokyo"
                 tz_opts = _TZ_OPTIONS if tz_val in _TZ_OPTIONS else [tz_val] + _TZ_OPTIONS
                 tz = ui.select(tz_opts, value=tz_val, label="时区").props("outlined dense").classes("flex-1")
-            ui.label("日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。"
+            hint("日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。"
                      "间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。"
                      "活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。"
-                     ).classes("text-xs text-gray-400")
+                     , after_row=True)
             note = ui.input("备注", value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
 
             def collect():
@@ -771,7 +771,7 @@ def _resolve_blacklist_entry(raw: str) -> tuple[str, str, str]:
 
 
 def _blacklist_panel():
-    ui.label("黑名单里的作者不会被回复（监控/搜索预检和发送前都会拦）；可填 @handle 或 X 的数字 user_id，两者都能匹配。").classes("text-xs text-gray-400")
+    hint("黑名单里的作者不会被回复（监控/搜索预检和发送前都会拦）；可填 @handle 或 X 的数字 user_id，两者都能匹配。", after_row=True)
     with ui.row().classes("items-end gap-2"):
         inp = ui.input("@handle 或 user_id").props("outlined dense")
         reason_in = ui.input("原因（选填）").props("outlined dense")
@@ -824,7 +824,7 @@ def _del_bl(bid):
 # ====================================================================================
 def _data_panel():
     ui.label("数据清理").classes("font-semibold")
-    ui.label("测试期可以把抓取记录和任务队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。").classes("text-xs text-gray-400")
+    hint("测试期可以把抓取记录和任务队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。", after_row=True)
     info = ui.label("").classes("text-sm")
 
     def refresh_info():
@@ -855,8 +855,8 @@ def _data_panel():
 def _media_storage_panel():
     """素材附件占用空间：只统计、不代删。给一个按钮打开目录，让用户自己去删。"""
     ui.label("素材附件占用空间").classes("font-semibold")
-    ui.label("图片 / 视频上传后都复制存在下面这个目录里（数据库只记路径）。程序不会自动删文件；素材删到回收站、审核条目删掉后，"
-             "文件还留着。点「前往清理」在文件管理器里打开目录，自己挑着删。").classes("text-xs text-gray-400")
+    hint("图片 / 视频上传后都复制存在下面这个目录里（数据库只记路径）。程序不会自动删文件；素材删到回收站、审核条目删掉后，"
+             "文件还留着。点「前往清理」在文件管理器里打开目录，自己挑着删。", after_row=True)
     path_lbl = ui.label("").classes("text-xs text-gray-500 font-mono break-all")
     info = ui.label("").classes("text-sm")
     orphan_box = ui.column().classes("w-full gap-0")
@@ -870,7 +870,7 @@ def _media_storage_panel():
             if st["orphans"]:
                 with ui.expansion(f"其中 {len(st['orphans'])} 个已没有任何素材 / 条目引用（{media.fmt_size(st['orphan_bytes'])}），删掉不影响功能",
                                   icon="cleaning_services").classes("w-full text-sm"):
-                    ui.label("按大小从大到小排；其余文件仍被素材库（含回收站）、任务队列或定时发帖引用，删了会导致发送时找不到附件。").classes("text-xs text-gray-400")
+                    hint("按大小从大到小排；其余文件仍被素材库（含回收站）、任务队列或定时发帖引用，删了会导致发送时找不到附件。", after_row=True)
                     for rel, size in st["orphans"][:200]:
                         ui.label(f"{rel}　{media.fmt_size(size)}").classes("text-xs font-mono")
                     if len(st["orphans"]) > 200:
@@ -898,8 +898,8 @@ async def _delete_blocked_dialog(a, refs: dict, blockers: list[str]) -> None:
         ui.label(f"@{a['handle']} 暂时不能删除").classes("text-lg font-bold")
         for b in blockers:
             ui.label("· " + b).classes("text-sm")
-        ui.label("处理完再点删除。已发送的记录不用管：删除时会保留它们（用于去重和作者冷却），账号本身照样从各处消失。"
-                 ).classes("text-xs text-gray-400")
+        hint("处理完再点删除。已发送的记录不用管：删除时会保留它们（用于去重和作者冷却），账号本身照样从各处消失。"
+                 , after_row=True)
         with ui.row().classes("w-full justify-end gap-2"):
             if refs["unsent"]:
                 ui.button("去任务队列处理", icon="list_alt",

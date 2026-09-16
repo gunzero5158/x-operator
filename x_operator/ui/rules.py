@@ -14,7 +14,7 @@ from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule, views_range_text,
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
-from .layout import confirm, fmt_time, llm_wait, run_job_with_progress, shell, tag
+from .layout import confirm, fmt_time, hint, llm_wait, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, media_values, reply_mode_fields, reply_mode_invalid
 
 _LANG_OPTIONS = {k: v for k, v in LANG_LABEL.items()}
@@ -47,7 +47,7 @@ HINTS = {
 
 
 def _hint(key: str, after_row: bool = False):
-    ui.label(HINTS[key]).classes("text-xs text-gray-400 mb-1" + ("" if after_row else " -mt-2"))
+    return hint(HINTS[key], after_row)
 
 
 def _save(rid, data: dict):
@@ -95,9 +95,9 @@ def register(jobs) -> None:
                                   lambda progress: jobs.search.run_once(progress=progress), "搜索", render,
                                   result_link=("查看抓取记录", "/targets?source=search"))
                               ).props("outline").tooltip("把所有「启用」的规则各跑一次；只想跑某一条就点该规则卡片上的「运行此规则」")
-            ui.label("推文来源可选：关键词搜索，或直接读某个小号的推荐流 / 关注流（热门内容多，观看量高）。之后统一走：按语义条件给每条推文打 0-10 分 → "
+            hint("推文来源可选：关键词搜索，或直接读某个小号的推荐流 / 关注流（热门内容多，观看量高）。之后统一走：按语义条件给每条推文打 0-10 分 → "
                      "分数 ≥ 达标分的按规则的「回复方式」生成草稿、进任务队列。抓到的每一条（含未达标的、以及为什么）都在「抓取记录」页。"
-                     ).classes("text-xs text-gray-400")
+                     , after_row=True)
             llm_on = jobs.llm.configured
             if not llm_on:
                 with ui.row().classes("items-center gap-1 text-xs text-orange-600"):
@@ -304,8 +304,8 @@ def register(jobs) -> None:
         with ui.dialog() as dlg, ui.card().classes("w-[640px] max-w-[95vw]"):
             ui.label("AI 生成搜索规则").classes("text-lg font-bold")
             desc = ui.textarea("用大白话描述你想找什么人 / 什么内容", value="").classes("w-full").props("outlined autogrow")
-            ui.label("例：找在推特上抱怨某类软件订阅太贵、或者在问有没有更便宜替代品的日本独立开发者和小团队；"
-                     "不要新闻和卖课的。AI 会给出关键词列表、语义条件和语言，你可以再改。").classes("text-xs text-gray-400")
+            hint("例：找在推特上抱怨某类软件订阅太贵、或者在问有没有更便宜替代品的日本独立开发者和小团队；"
+                     "不要新闻和卖课的。AI 会给出关键词列表、语义条件和语言，你可以再改。", after_row=True)
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
                 ui.button("生成", icon="auto_awesome", on_click=lambda: dlg.submit(desc.value or "")).props("color=primary")

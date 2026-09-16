@@ -239,6 +239,28 @@ def source_label(source: str | None, rule_name: str | None, rule_kind: str | Non
     return "搜索（规则已删）"
 
 
+HINT_CLAMP_CHARS = 60   # 说明超过这么多字就折成一行，点「更多」展开
+
+
+def hint(text: str, after_row: bool = False, *, clamp: bool = True):
+    """输入框 / 页面顶部的说明文字：浅灰小字；长说明默认只显示一行，点一下展开全文，再点收起。
+    after_row：前面是一行并排的输入框时用（负边距会压到框上）。返回的元素可以 set_visibility。"""
+    margin = "mb-1" + ("" if after_row else " -mt-2")
+    if not clamp or len(text) <= HINT_CLAMP_CHARS:
+        return ui.label(text).classes("xo-hint-short text-xs text-gray-400 " + margin)
+    with ui.row(wrap=False).classes("xo-hint " + margin) as row:
+        ui.icon("help_outline").classes("xo-hint__icon")
+        ui.label(text).classes("xo-hint__text text-xs text-gray-400")
+        more = ui.label("更多").classes("xo-hint__more")
+
+    def toggle(_=None):
+        opening = "is-open" not in row._classes
+        row.classes(add="is-open" if opening else "", remove="" if opening else "is-open")
+        more.set_text("收起" if opening else "更多")
+    row.on("click", toggle)
+    return row
+
+
 def tag_legend(kinds: list[str] | None = None):
     """页顶一行「标签颜色说明」。kinds 不传 = 全部；传了只显示这几类。"""
     items = [(t, k) for t, k in TAG_LEGEND if kinds is None or k in kinds]

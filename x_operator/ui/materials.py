@@ -12,7 +12,7 @@ from nicegui import run, ui
 from ..core import langdetect, media
 from ..core.langdetect import LANG_LABEL
 from ..db.database import get_conn, utcnow_iso
-from .layout import TAG, confirm, fmt_time, llm_wait, shell
+from .layout import TAG, confirm, fmt_time, hint, llm_wait, shell
 from .media_widget import MediaField, media_badge, media_strip
 
 # 标签配色：一眼分清「干什么用的」（类型）、「现在能不能用」（状态）、「谁写的」
@@ -139,7 +139,7 @@ def register(jobs) -> None:
                     ai_btn = ui.button("AI 生成素材", icon="auto_awesome", on_click=lambda: _ai_dialog(jobs, render)).props("outline color=purple")
                     new_btn = ui.button("新建素材", icon="add", on_click=lambda: _edit_dialog(None, render)).props("color=primary")
 
-            hint = ui.label("").classes("text-xs text-gray-400")
+            count_hint = ui.label("").classes("text-xs text-gray-400")
             with ui.row().classes("items-center gap-2 flex-wrap") as legend:
                 ui.label("标签说明：").classes("text-xs text-gray-500")
                 for _k, (_t, _c, _tip) in KIND_BADGE.items():
@@ -188,7 +188,7 @@ def register(jobs) -> None:
                 legend.set_visibility(not trash)
                 new_btn.set_visibility(not trash)
                 ai_btn.set_visibility(not trash)
-                hint.text = ("回收站里的素材不会被匹配引擎使用；可恢复或彻底删除。" if trash
+                count_hint.text = ("回收站里的素材不会被匹配引擎使用；可恢复或彻底删除。" if trash
                              else "「删除」会移入回收站（可恢复）；「归档」保留但不再参与匹配。")
                 rows = _load(kind_f.value, status_f.value, trash)
                 with body:
@@ -252,7 +252,7 @@ def register(jobs) -> None:
             lang.on_value_change(lambda e: refresh_lang_hint())
             refresh_lang_hint()
             tags = ui.input("场景标签（逗号分隔）", value=m["scenario_tags"] if m else "").classes("w-full").props("outlined")
-            ui.label("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时发帖计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            hint("只用于内部筛选：自动匹配时优先挑场景对得上的素材、定时发帖计划的素材池按标签选；不是推文里的 #话题，不会发出去。想带话题请直接写进正文。")
             status = ui.select({"draft": "草稿", "active": "启用", "archived": "归档"},
                                value=m["status"] if m else "active", label="状态").classes("w-full").props("outlined")
             mf = MediaField(media.parse_files(m["media_files"]) if m else [],
@@ -286,15 +286,15 @@ def register(jobs) -> None:
                 kind = ui.select({"reply": "回复（在别人推文下用）", "post": "发帖（自己发的推文）"}, value="reply", label="类型").classes("flex-1").props("outlined")
                 lang = ui.select(LANG_LABEL, value="ja", label="语言").classes("flex-1").props("outlined")
                 count = ui.number("生成条数", value=5, min=1, max=20, step=1).classes("w-32").props("outlined")
-            ui.label("类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            hint("类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。")
             topic = ui.textarea("主题 / 要传达的信息", value="").classes("w-full").props("outlined autogrow")
             ui.label("例：我们是面向独立开发者的 XX 工具，比同类产品便宜、上手快；主打省钱和省事。").classes("text-xs text-gray-400 -mt-2 mb-1")
             style = ui.input("风格 / 语气", value="").classes("w-full").props("outlined")
             ui.label("例：像同行随口聊天，不像客服；简短；可以带一点自嘲。留空=自然口语。").classes("text-xs text-gray-400 -mt-2 mb-1")
             scenario = ui.input("使用场景（选填）", value="").classes("w-full").props("outlined")
-            ui.label("例：对方在抱怨某工具太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            hint("例：对方在抱怨某工具太贵 / 对方在问有没有替代方案。会写进素材的场景标签，方便匹配时优先选用。")
             must = ui.input("必须包含（选填，多个用逗号）", value="").classes("w-full").props("outlined")
-            ui.label("例：@你的官号, https://你的官网 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。").classes("text-xs text-gray-400 -mt-2 mb-1")
+            hint("例：@你的官号, https://你的官网 。会原样出现在每条里。提醒：在别人帖子下带外链容易被折叠/处罚，回复类建议只 @ 或不带。")
             async def gen():
                 if not (topic.value or "").strip():
                     ui.notify("请先填主题", type="negative"); return
