@@ -163,6 +163,19 @@ body {
 .xo-task-heading { background: var(--xo-band); border-bottom: 1px solid var(--xo-line); }
 .xo-task-panel.is-collapsed .xo-task-heading { border-bottom: 0; }
 .xo-task-details { max-height: 42vh; overscroll-behavior: contain; }
+.xo-footer {
+    display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+    width: 100%; gap: 4px 12px; margin-top: 16px; padding-top: 12px;
+    border-top: 1px solid var(--xo-line); color: var(--xo-muted); font-size: 12px;
+}
+.xo-page .xo-footer-link { font-size: 12px; min-height: 36px; padding: 4px 8px; }
+.xo-footer-link:hover { background: var(--xo-soft); }
+.q-dialog .xo-disclaimer-dialog {
+    width: 640px; max-width: calc(100vw - 32px); max-height: 85vh;
+    overflow-y: auto; color: var(--xo-ink);
+}
+.xo-disclaimer-copy { font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; }
+.xo-disclaimer-copy li + li { margin-top: 10px; }
 @media (max-width: 1150px) {
     .xo-header { padding: 10px 20px; gap: 10px; }
     .xo-nav { order: 3; width: 100%; }

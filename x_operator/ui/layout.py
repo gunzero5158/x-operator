@@ -1,4 +1,4 @@
-"""公共页面外壳（design-v1.1 §8.0）：深色顶栏 + 醒目导航 + 内容插槽，以及各页共用的小工具。"""
+"""公共页面外壳：导航、任务面板、内容区与页脚，以及各页共用的小工具。"""
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, contextmanager
@@ -8,6 +8,7 @@ from nicegui import run, ui
 
 from ..db.database import get_conn
 from ..llm.client import timeout_for
+from .disclaimer import disclaimer_footer
 from .task_progress import start_task, mount_task_panel
 from .theme import apply_theme
 
@@ -69,6 +70,7 @@ def shell(active: str):
     container = ui.column().classes("xo-page")
     with container:
         yield container
+        disclaimer_footer()
 
 
 # ------------------------------------------------------------------------------------
