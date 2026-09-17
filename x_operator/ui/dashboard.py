@@ -9,6 +9,7 @@ from ..core.monitor import get_read_account, read_is_billed
 from ..core.readpool import pool_status
 from ..core.scheduler import AUTO_JOBS, describe_schedule, dispatch_interval_seconds, job_enabled, next_runs
 from ..db.database import get_conn, to_iso
+from .layout import page_title, detail_text
 from .layout import fmt_time, run_job, run_job_with_progress, shell, display_tz
 
 
@@ -42,7 +43,7 @@ def register(jobs) -> None:
     @ui.page("/")
     def dashboard_page():
         with shell("/"):
-            ui.label("仪表盘").classes("text-2xl font-bold")
+            page_title("仪表盘", "运行概况与需要关注的事项")
 
             body = ui.column().classes("xo-dashboard w-full")
 
@@ -114,22 +115,22 @@ def register(jobs) -> None:
                                 ui.label(denied).classes("text-xs text-orange-600")
 
                     with ui.card().classes("w-full"):
-                        ui.label("手动运行（测试期用；自动轮询可在设置 → 自动运行 打开）").classes("font-semibold")
+                        ui.label("快捷操作").classes("font-semibold")
                         nr = next_runs(jobs.scheduler)
                         parts = []
                         for jid, (jname, _d, _k, _dm, _dt) in AUTO_JOBS.items():
                             parts.append(f"{jname}：" + (("开，下次 " + nr[jid].astimezone(display_tz()).strftime("%m-%d %H:%M") + "，" + describe_schedule(jid)) if nr.get(jid) else "关"))
                         parts.append("发送分发：" + (f"开（每 {dispatch_interval_seconds()} 秒）" if job_enabled("dispatcher") else "关"))
-                        ui.label("自动运行状态 · " + "；".join(parts)).classes("text-xs text-gray-500")
+                        detail_text("自动运行计划", "；".join(parts))
                         with ui.row().classes("gap-2 flex-wrap"):
                             ui.button("运行监控轮询", icon="visibility",
                                       on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
-                                                                             result_link=("查看抓取记录", "/targets?source=monitor")))
+                                                                             result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
                             ui.button("运行所有搜索规则", icon="manage_search",
                                       on_click=lambda: run_job_with_progress(lambda progress: jobs.search.run_once(progress=progress), "搜索", render,
-                                                                             result_link=("查看抓取记录", "/targets?source=search")))
-                            ui.button("生成到点定时推文", icon="schedule", on_click=lambda: _run_sched(jobs, render))
-                            ui.button("触发发送分发", icon="send", on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render))
+                                                                             result_link=("查看抓取记录", "/targets?source=search"))).props("outline")
+                            ui.button("生成到点定时推文", icon="schedule", on_click=lambda: _run_sched(jobs, render)).props("outline")
+                            ui.button("触发发送分发", icon="send", on_click=lambda: run_job(jobs.dispatcher.tick, "发送", render)).props("outline")
                         ui.label("运行结果会弹出提示；抓到的推文去「抓取记录」看，生成的回复去「任务队列」看。").classes("text-xs text-gray-400")
 
                     with ui.card().classes("w-full"):

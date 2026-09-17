@@ -41,12 +41,13 @@ def _alert_count() -> int:
 def shell(active: str):
     apply_theme()
     with ui.header().classes("xo-header items-center justify-between"):
-        # 左：品牌
+        # 品牌与状态一行，导航独立一行，避免挤压页面的主要操作。
         with ui.row().classes("xo-brand items-center shrink-0"):
-            ui.icon("smart_toy").classes("xo-brand-icon")
+            ui.icon("layers").classes("xo-brand-icon")
             ui.label("x-operator").classes("xo-brand-name")
+            ui.label("内容工作台").classes("xo-brand-caption")
 
-        # 中：醒目导航区——成块底色 + 图标 + hover/active 高亮（密集操作区，视觉强化）
+        # 保留原有导航位置和路径，当前页用短底线标识。
         pc = _pending_count()
         with ui.row().classes("xo-nav items-center").props('role=navigation aria-label="主导航"'):
             for path, name, icon in NAV:
@@ -243,13 +244,13 @@ HINT_CLAMP_CHARS = 60   # 说明超过这么多字就折成一行，点「更多
 
 
 def hint(text: str, after_row: bool = False, *, clamp: bool = True):
-    """输入框 / 页面顶部的说明文字：浅灰小字；长说明默认只显示一行，点一下展开全文，再点收起。
-    after_row：前面是一行并排的输入框时用（负边距会压到框上）。返回的元素可以 set_visibility。"""
-    margin = "mb-1" + ("" if after_row else " -mt-2")
+    """独立说明区；长说明可点击或用键盘展开。after_row 保留调用兼容性。"""
+    margin = "mb-1"
     if not clamp or len(text) <= HINT_CLAMP_CHARS:
         return ui.label(text).classes("xo-hint-short text-xs text-gray-400 " + margin)
-    with ui.row(wrap=False).classes("xo-hint " + margin) as row:
+    with ui.row(wrap=False).classes("xo-hint " + margin).props('role=button tabindex=0 aria-expanded=false aria-label="展开说明"') as row:
         ui.icon("help_outline").classes("xo-hint__icon")
+        ui.label("说明").classes("xo-hint__label")
         ui.label(text).classes("xo-hint__text text-xs text-gray-400")
         more = ui.label("更多").classes("xo-hint__more")
 
@@ -257,18 +258,59 @@ def hint(text: str, after_row: bool = False, *, clamp: bool = True):
         opening = "is-open" not in row._classes
         row.classes(add="is-open" if opening else "", remove="" if opening else "is-open")
         more.set_text("收起" if opening else "更多")
+        accessible_label = "收起说明" if opening else "展开说明"
+        row.props(f'aria-expanded={str(opening).lower()} aria-label="{accessible_label}"')
     row.on("click", toggle)
+    row.on("keydown.enter", toggle)
+    row.on("keydown.space.prevent", toggle)
     return row
 
 
 def tag_legend(kinds: list[str] | None = None):
-    """页顶一行「标签颜色说明」。kinds 不传 = 全部；传了只显示这几类。"""
+    """标签图例按需展开，避免每页都重复铺开。"""
     items = [(t, k) for t, k in TAG_LEGEND if kinds is None or k in kinds]
-    with ui.row().classes("xo-tag-legend items-center flex-wrap") as row:
-        ui.label("标签颜色：").classes("text-xs text-gray-500")
-        for text, kind in items:
-            ui.badge(text, color=None).classes(TAG[kind] + " text-[10px]")
+    with ui.expansion("标签颜色说明", icon="info_outline").classes("xo-help w-full") as row:
+        with ui.row().classes("xo-tag-legend items-center flex-wrap"):
+            for text, kind in items:
+                ui.badge(text, color=None).classes(TAG[kind])
     return row
+
+
+def page_title(title: str, subtitle: str):
+    """统一页标题；返回标题 label，兼容素材库切换回收站。"""
+    with ui.column().classes("xo-page-title"):
+        label = ui.label(title).classes("text-2xl font-bold")
+        ui.label(subtitle).classes("xo-page-subtitle")
+    return label
+
+
+def detail_text(title: str, text: str, *, warning: bool = False):
+    """完整详情按需展开；问题摘要始终可见，不隐藏失败状态。"""
+    summary = " ".join((text or "").split())
+    summary = summary[:64] + ("…" if len(summary) > 64 else "")
+    with ui.expansion(f"{title} · {summary}", icon="info_outline" if warning else "notes").classes(
+            "xo-detail w-full" + (" xo-detail-warning" if warning else "")) as detail:
+        ui.label(text).classes("xo-prose whitespace-pre-wrap")
+    return detail
+
+
+def preview_text(text: str):
+    """长正文先展示四行，可随时展开原文；短正文不增加按钮。"""
+    text = text or ""
+    with ui.column().classes("xo-preview w-full gap-1") as box:
+        label = ui.label(text).classes("xo-prose whitespace-pre-wrap")
+        if len(text) > 180 or text.count("\n") > 3:
+            label.classes("xo-preview-clamped")
+
+            def toggle():
+                opening = "xo-preview-clamped" in label._classes
+                label.classes(remove="xo-preview-clamped" if opening else "",
+                              add="" if opening else "xo-preview-clamped")
+                button.set_text("收起正文" if opening else "展开全文")
+                button.props(f'aria-expanded={str(opening).lower()}')
+
+            button = ui.button("展开全文", on_click=toggle).props("flat dense aria-expanded=false").classes("xo-read-more")
+    return box
 
 
 def fmt_views(n: int | None) -> str:

@@ -14,6 +14,7 @@ from ..core.matcher import REPLY_MODE_LABEL
 from ..core.search import (LANG_LABEL, SOURCE_KIND_LABEL, effective_query, is_feed_rule, views_range_text,
                            langs_label, rule_langs, rule_source_kind)
 from ..db.database import get_conn
+from .layout import page_title, preview_text
 from .layout import confirm, fmt_time, hint, llm_wait, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, media_values, reply_mode_fields, reply_mode_invalid
 
@@ -86,7 +87,7 @@ def register(jobs) -> None:
     def rules_page():
         with shell("/rules"):
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label("搜索规则").classes("text-2xl font-bold")
+                page_title("搜索规则", "设置发现内容的条件与处理方式")
                 with ui.row().classes("gap-2"):
                     ui.button("AI 生成规则", icon="auto_awesome", on_click=lambda: _ai_generate(jobs, render)).props("outline color=purple")
                     ui.button("新建规则", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
@@ -146,46 +147,54 @@ def register(jobs) -> None:
                             with ui.row().classes("items-center gap-2 w-full"):
                                 ui.label(r["name"]).classes("xo-record-title")
                                 tag(SOURCE_KIND_LABEL[rule_source_kind(r)], "source", "推文来源：关键词搜索 / 某账号的推荐流 / 关注流")
-                                tag(langs_label(rule_langs(r)), "metric", "只要这些语言的推文")
-                                tag(f"达标分 ≥{r['min_llm_score']}", "metric", "AI 相关性打分达到这个分才进下一步")
-                                tag(f"每次 {r['max_results_per_run']} 条", "metric", "每次运行最多抓这么多条")
-                                tag(f"首次回溯 {r['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
-                                if r["min_views"] or r["max_views"]:
-                                    tag(f"观看 {views_range_text(r['min_views'], r['max_views'])}", "metric",
-                                        "观看量区间，抓取端就过滤，区间外的不入库")
-                                if r["read_media"]:
-                                    tag("🖼 读附图打分", "metric", "附图 / 视频封面会一起送给打分 AI（token 消耗更高，需要多模态模型）")
-                                if r["reply_mode"] == "ai_write" and media.parse_files(r["media_files"]):
-                                    n = len(media.parse_files(r["media_files"]))
-                                    tag(f"📎 {'素材池 ' if r['media_mode'] == 'pool' else ''}{n} 个附件", "metric",
-                                        "AI 写的回复会带的配图 / 视频" + ("（每条随机挑 1 个）" if r["media_mode"] == "pool" else ""))
+                                tag(REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
+                                    "ai" if r["reply_mode"] == "ai_write" else "mode")
                                 if r["auto_approve"] and r["reply_mode"] != "manual":
-                                    tag(f"免审核 ≥ {float(r['auto_approve_min_confidence'] or 0.7):.2f}", "attn",
-                                        "置信度达到阈值的回复不经人工审核直接进待发送")
-                                tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
-                                    "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
-                                tag("回复账号：" + reply_account_summary(r, acc_opts), "account", "用哪个账号回")
+                                    tag("免审核", "attn", "置信度达到阈值时自动进入待发送")
+                                if r["reply_mode"] == "ai_write" and not r["ai_brief"]:
+                                    tag("未填写创作要求", "bad")
                                 if not r["enabled"]:
                                     tag("已停用", "off", "「运行所有规则」会跳过它；卡片上的「运行此规则」仍可单独跑")
-                                ui.label(f"上次运行 {fmt_time(r['last_run_at']) if r['last_run_at'] else '未运行'}"
-                                         f" · 游标 {r['newest_id_cursor'] or '无（下次按首次回溯抓）'}").classes("text-xs text-gray-400")
                                 ui.space()
                                 sw = ui.switch("启用", value=bool(r["enabled"]))
                                 sw.on("update:model-value", lambda e, rid=r["id"]: _toggle(rid, e.args))
-                            if is_feed_rule(r):
-                                ui.label("来源：" + SOURCE_KIND_LABEL[rule_source_kind(r)] + "，读取 "
-                                         + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（账号池挑的号）")
-                                         + " 的时间线，不用关键词").classes("text-xs text-gray-600")
-                            else:
-                                ui.label("关键词：" + r["keyword_query"]).classes("text-xs text-gray-600")
-                                ui.label("实际查询（Cookie）：" + effective_query(r, access_type="unofficial")).classes("xo-query text-xs font-mono")
-                                ui.label("Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。").classes("text-xs text-gray-400")
-                                if config.get_bool("read_official_enabled", False):
-                                    ui.label("实际查询（官方 API）：" + effective_query(r, access_type="official")).classes("xo-query text-xs font-mono")
-                            ui.label("语义：" + r["semantic_criteria"]).classes("xo-prose")
-                            if r["reply_mode"] == "ai_write":
-                                ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
-                                    "text-xs " + ("text-gray-500" if r["ai_brief"] else "text-red-500"))
+                            preview_text(r["semantic_criteria"])
+                            with ui.expansion("规则详情 · 条件 / 查询 / 创作要求", icon="tune").classes("xo-detail w-full"):
+                                with ui.row().classes("gap-2 items-center"):
+                                    tag(langs_label(rule_langs(r)), "metric", "只要这些语言的推文")
+                                    tag(f"达标分 ≥{r['min_llm_score']}", "metric", "AI 相关性打分达到这个分才进下一步")
+                                    tag(f"每次 {r['max_results_per_run']} 条", "metric", "每次运行最多抓这么多条")
+                                    tag(f"首次回溯 {r['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
+                                    if r["min_views"] or r["max_views"]:
+                                        tag(f"观看 {views_range_text(r['min_views'], r['max_views'])}", "metric",
+                                            "观看量区间，抓取端就过滤，区间外的不入库")
+                                    if r["read_media"]:
+                                        tag("🖼 读附图打分", "metric", "附图 / 视频封面会一起送给打分 AI（token 消耗更高，需要多模态模型）")
+                                    if r["reply_mode"] == "ai_write" and media.parse_files(r["media_files"]):
+                                        n = len(media.parse_files(r["media_files"]))
+                                        tag(f"📎 {'素材池 ' if r['media_mode'] == 'pool' else ''}{n} 个附件", "metric",
+                                            "AI 写的回复会带的配图 / 视频" + ("（每条随机挑 1 个）" if r["media_mode"] == "pool" else ""))
+                                    if r["auto_approve"] and r["reply_mode"] != "manual":
+                                        tag(f"免审核 ≥ {float(r['auto_approve_min_confidence'] or 0.7):.2f}", "attn",
+                                            "置信度达到阈值的回复不经人工审核直接进待发送")
+                                    tag("回复方式：" + REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),
+                                        "ai" if r["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
+                                    tag("回复账号：" + reply_account_summary(r, acc_opts), "account", "用哪个账号回")
+                                ui.label(f"上次运行 {fmt_time(r['last_run_at']) if r['last_run_at'] else '未运行'}"
+                                         f" · 游标 {r['newest_id_cursor'] or '无（下次按首次回溯抓）'}").classes("text-xs text-gray-400")
+                                if is_feed_rule(r):
+                                    ui.label("来源：" + SOURCE_KIND_LABEL[rule_source_kind(r)] + "，读取 "
+                                             + (acc_opts.get(r["feed_account_id"], "（账号已删→自动）") if r["feed_account_id"] else "自动（账号池挑的号）")
+                                             + " 的时间线，不用关键词").classes("text-xs text-gray-600")
+                                else:
+                                    ui.label("关键词：" + r["keyword_query"]).classes("text-xs text-gray-600")
+                                    ui.label("实际查询（Cookie）：" + effective_query(r, access_type="unofficial")).classes("xo-query text-xs font-mono")
+                                    ui.label("Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。").classes("text-xs text-gray-400")
+                                    if config.get_bool("read_official_enabled", False):
+                                        ui.label("实际查询（官方 API）：" + effective_query(r, access_type="official")).classes("xo-query text-xs font-mono")
+                                if r["reply_mode"] == "ai_write":
+                                    ui.label("创作要求：" + (r["ai_brief"] or "（未填！AI 无法创作）")).classes(
+                                        "text-xs " + ("text-gray-500" if r["ai_brief"] else "text-red-500"))
                             if total:
                                 ui.label(f"累计抓取 {total} 条：进任务队列 {c.get('queued', 0)} · 达标但未生成回复 {c.get('no_match', 0)}"
                                          f" · 未达标/被过滤 {c.get('filtered', 0)} · 待匹配 {c.get('new', 0)} · 已过期 {c.get('expired', 0)}"
@@ -203,8 +212,11 @@ def register(jobs) -> None:
                                               result_link=("查看这条规则的结果", f"/targets?source=search&rule={rid}"),
                                               task_key=f"search-rule:{rid}")
                                           ).props("flat dense").tooltip("只跑这一条规则（停用状态也能跑）；结果进抓取记录、推进游标，和正式运行一样")
-                                ui.button("重置游标", on_click=lambda rid=r["id"]: (_reset_cursor(rid), ui.notify("已重置，下次搜索按「首次回溯」小时数重新抓", type="info"), render())).props("flat dense")
-                                ui.button("删除", icon="delete", on_click=lambda rr=r: delete(rr)).props("flat dense color=negative")
+                                with ui.button("更多", icon="more_horiz").props("flat dense"):
+                                    with ui.menu():
+                                        ui.menu_item("重置游标", on_click=lambda rid=r["id"]: (_reset_cursor(rid), ui.notify("已重置，下次搜索按「首次回溯」小时数重新抓", type="info"), render()))
+                                        ui.menu_item("删除规则", on_click=lambda rr=r: delete(rr)).classes("text-negative")
+
 
             render()
 

@@ -13,6 +13,7 @@ from ..core import media, textlimit
 from ..core.compliance import SKIP_REASON_LABEL
 from ..core.langdetect import lang_name
 from ..db.database import get_conn, utcnow_iso
+from .layout import page_title, detail_text, preview_text
 from .layout import (QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, hint, llm_wait, notify_long, run_job,
                      shell, source_label, tag, tag_legend, tweet_link)
 from .media_widget import MediaField, media_badge, media_strip
@@ -268,9 +269,9 @@ def register(jobs) -> None:
                 status = "pending"
             if account not in _account_filter_options(status):
                 account = ALL_ACCOUNTS
-            with ui.row().classes("items-center justify-between w-full"):
-                ui.label("任务队列").classes("text-2xl font-bold")
-                with ui.row().classes("items-center gap-2"):
+            with ui.row().classes("xo-page-heading w-full"):
+                page_title("任务队列", "审核文案，安排每一次发布")
+                with ui.row().classes("xo-toolbar w-full items-center gap-2"):
                     status_sel = ui.select(_status_options(account), value=status).props("dense outlined")
                     acc_filter = ui.select(_account_filter_options(status), value=account, label="发送账号") \
                         .props("dense outlined").classes("min-w-40") \
@@ -287,8 +288,8 @@ def register(jobs) -> None:
 
             hint("流程：待审核 → 批准 → 待发送 → 分发器按账号活跃时段/间隔自动发出（或点「触发发送」立即尝试）→ 已发送（自动回查 X 上是否真的存在）。"
                      , after_row=True)
-            tag_legend(["account", "reply", "post", "source", "ai", "warn", "media", "metric"])
-            with ui.expansion("卡片上的标签是什么意思？", icon="help_outline").classes("w-full text-sm"):
+            with ui.expansion("审核与标签说明", icon="help_outline").classes("xo-help w-full text-sm"):
+                tag_legend(["account", "reply", "post", "source", "ai", "warn", "media", "metric"])
                 ui.markdown(
                     "- **回复 / 发帖**：回复 = 回在别人推文下面；发帖 = 自己账号发主贴（来自定时发帖计划）。\n"
                     "- **来源**：AI 匹配素材 / 手动选素材 / AI 撰写 / 定时发帖计划——这条文案是怎么来的。\n"
@@ -621,7 +622,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
             ui.button(icon="delete", on_click=lambda: delete_cb(it)).props("flat dense round color=negative").tooltip("删除此条目")
 
         if it["action_type"] == "reply" and it["tgt_text"]:
-            with ui.card().classes("bg-slate-50 w-full"):
+            with ui.column().classes("xo-source-quote w-full"):
                 with ui.row().classes("items-center gap-2 w-full"):
                     ui.label(f"@{it['author_handle']} 的推文").classes("text-xs text-gray-500")
                     # 与「抓取记录」页的卡片保持同一套小标签：相关性 / 语言 / 观看量 / 发推时间
@@ -636,9 +637,9 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                         tag(f"👁 {fmt_views(it['tgt_views'])}", "metric", "抓取时的观看量")
                     if it["tgt_created_at"]:
                         ui.label(f"发推于 {fmt_time(it['tgt_created_at'])}").classes("text-xs text-gray-400")
-                ui.label(it["tgt_text"]).classes("text-sm whitespace-pre-wrap")
+                preview_text(it["tgt_text"])
                 if it["text_zh"]:
-                    ui.label("中文：" + it["text_zh"]).classes("text-xs text-gray-500")
+                    detail_text("中文翻译", it["text_zh"])
                 tweet_link(it["author_handle"], it["tgt_tweet_id"])
 
         if it["llm_reason"]:
@@ -647,7 +648,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                 ui.label(it["llm_reason"])
 
         editable = it["status"] == "pending"
-        ta = ui.textarea(value=it["final_text"]).classes("w-full").props("outlined autogrow" + ("" if editable else " readonly"))
+        ta = ui.textarea(label="待发布文案" if editable else "发布文案", value=it["final_text"]).classes("w-full").props("outlined autogrow" + ("" if editable else " readonly"))
         wl_label = ui.label("").classes("text-xs")
 
         def update_len():
@@ -695,9 +696,10 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                 ui.button("强制放回待审核", icon="lock_open", on_click=lambda: force_cb(it)).props("outline dense color=orange") \
                     .tooltip("人工放行：不管跳过原因直接放回待审核，发送时也不再按冷却 / 黑名单 / 时效拦（已回复过的除外）")
             elif it["status"] == "failed":
-                ui.label("发送失败" + (f" · {it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-red-600")
-                ui.button("捞回待审核", icon="restore", on_click=lambda: restore_failed_cb(it)).props("outline dense color=orange") \
-                    .tooltip("放回待审核、重试次数清零，批准后按正常流程重新发；失败原因会留在条目上供参考")
+                with ui.column().classes("w-full items-start gap-3"):
+                    ui.label("发送失败" + (f" · {it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-red-600 break-words w-full")
+                    ui.button("捞回待审核", icon="restore", on_click=lambda: restore_failed_cb(it)).props("outline dense color=orange") \
+                        .tooltip("放回待审核、重试次数清零，批准后按正常流程重新发；失败原因会留在条目上供参考")
             else:
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
                          + (f" · {it['skip_reason']}" if it["skip_reason"] else "")

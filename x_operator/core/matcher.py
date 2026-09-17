@@ -183,14 +183,19 @@ class MatchEngine:
         return picked, f"配图从素材池（{len(files)} 个）里随机挑了 1 个"
 
     def _match_material(self, target: sqlite3.Row, account: sqlite3.Row, allow_polish: bool,
-                        acc_note: str = "", auto_threshold: float | None = None) -> MatchOutcome:
+                        acc_note: str = "", auto_threshold: float | None = None,
+                        keep_original: bool = False) -> MatchOutcome:
         """「宽进」：只要素材库里有启用的回复素材，就一定给出一条草稿进待审核——AI 择优；AI 拒绝/出错/说跳过/信心太低时
         退回到规则挑选（同语言里用得最少的一条），理由里写明，让审核的人知道这条是兜底出来的。"""
         lang = target["lang"] or "ja"
+        if keep_original:
+            allow_polish = False
         tags = _infer_tags(target["text"])
         candidates, lang_note = self.pick_candidates(lang, tags)
+        if keep_original:
+            lang_note = lang_note.replace("——规则里打开「允许 AI 轻微润色」可以让 AI 顺手转成推文的字形", "")
         if not candidates:
-            reason = "素材库里没有任何状态为「启用」的回复素材。到素材库添加（或用「AI 生成素材」）后再点「自动匹配」，也可在这里「AI 撰写」"
+            reason = "素材库里没有任何状态为「启用」的回复素材。到素材库添加或启用回复素材后再点「素材库匹配」，也可在这里「AI 撰写」"
             self._mark_no_match(target["id"], reason)
             return MatchOutcome("no_match", None, reason)
 
@@ -226,7 +231,14 @@ class MatchEngine:
                 "（已按规则允许轻微润色）" if allow_polish else "（素材原文）") + "：" + str(decision.get("reason") or "") + lang_note
         if acc_note:
             reason += f"｜{acc_note}"
-        reply_text, len_note = textlimit.fit(reply_text, account, self.llm, extract_must_include(reply_text), lang)
+        if keep_original:
+            # 显式选择素材库时只取已有文案，不因原规则或长度限制再次触发生成。
+            reply_text = chosen["text"]
+            reason = "素材库匹配（保留素材原文和附件）｜" + reason
+            len_note = (textlimit.over_message(reply_text, account) + "，请在待审核中手动删减或更换素材"
+                        if textlimit.over_by(reply_text, account) else "")
+        else:
+            reply_text, len_note = textlimit.fit(reply_text, account, self.llm, extract_must_include(reply_text), lang)
         if len_note:
             reason += f"｜{len_note}"
         qid = self._enqueue(account["id"], target["id"], chosen["id"], reply_text, reason, confidence, origin="ai_match", auto_threshold=auto_threshold,
@@ -281,7 +293,8 @@ class MatchEngine:
                             media_files=media_files, auto_threshold=auto_threshold)
         return MatchOutcome("queued", qid, reason)
 
-    def rematch(self, target_id: int, *, expected_status: str | None = None) -> MatchOutcome:
+    def rematch(self, target_id: int, *, expected_status: str | None = None,
+                material_only: bool = False) -> MatchOutcome:
         """同一记录的批量/单条自动匹配互斥，避免重复生成。"""
         with self._rematch_lock:
             if target_id in self._rematching:
@@ -293,7 +306,7 @@ class MatchEngine:
                     row = conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (target_id,)).fetchone()
                 if row is None or row["process_status"] != expected_status:
                     return MatchOutcome("skipped", None, "记录已删除或状态已改变")
-            return self._rematch(target_id, expected_status=expected_status)
+            return self._rematch(target_id, expected_status=expected_status, material_only=material_only)
         except Exception as e:
             # 不让中途异常遗留为「待匹配」，也不覆盖并发操作已入队的结果。
             with get_conn() as conn:
@@ -305,16 +318,18 @@ class MatchEngine:
             with self._rematch_lock:
                 self._rematching.discard(target_id)
 
-    def rematch_many(self, target_ids: list[int], progress, *, expected_status: str = "filtered") -> BatchMatchResult:
+    def rematch_many(self, target_ids: list[int], progress, *, expected_status: str = "filtered",
+                     material_only: bool = False) -> BatchMatchResult:
         """只处理用户勾选时的记录快照；复用手动匹配，始终生成待审核草稿。"""
         if expected_status not in ("filtered", "no_match"):
             raise ValueError("批量自动匹配只支持已过滤/未达标或达标但未生成回复的记录")
         ids = list(dict.fromkeys(target_ids))
         result = BatchMatchResult(total=len(ids))
+        label = "素材库匹配" if material_only else "按来源规则自动匹配"
         for index, tid in enumerate(ids):
-            progress(index / len(ids), f"正在匹配第 {index + 1}/{len(ids)} 条（记录 #{tid}）\n{result.as_msg().splitlines()[0]}")
+            progress(index / len(ids), f"{label}：第 {index + 1}/{len(ids)} 条（记录 #{tid}）\n{result.as_msg().splitlines()[0]}")
             try:
-                outcome = self.rematch(tid, expected_status=expected_status)
+                outcome = self.rematch(tid, expected_status=expected_status, material_only=material_only)
                 if outcome.status == "queued":
                     result.queued += 1
                 elif outcome.status == "skipped":
@@ -329,8 +344,9 @@ class MatchEngine:
             progress((index + 1) / len(ids), result.as_msg().splitlines()[0])
         return result
 
-    def _rematch(self, target_id: int, *, expected_status: str | None = None) -> MatchOutcome:
-        """「抓取记录」页的重新匹配：按来源规则的回复方式再跑一次。"""
+    def _rematch(self, target_id: int, *, expected_status: str | None = None,
+                 material_only: bool = False) -> MatchOutcome:
+        """默认沿用来源规则；material_only 只覆盖本次回复方式，账号配置仍沿用原规则。"""
         target, account, err, acc_note = self._prepare(target_id, None)
         if err:
             return MatchOutcome("no_match", None, err)
@@ -342,6 +358,8 @@ class MatchEngine:
             conn.commit()
         if not changed:
             return MatchOutcome("skipped", None, "记录已删除、状态已改变或已经进入任务队列")
+        if material_only:
+            return self._match_material(target, account, False, acc_note=acc_note, keep_original=True)
         cfg = load_source_cfg(target)
         if _cfg_get(cfg, "reply_mode", "material") == "manual":
             # 手动模式下点「重新匹配」= 用素材库自动配一次

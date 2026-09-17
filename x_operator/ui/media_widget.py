@@ -5,10 +5,26 @@ from pathlib import Path
 
 from nicegui import ui
 
-from ..core import media
+from ..core import media, thumbnails
 from .layout import TAG
 
-_THUMB = {"sm": "w-14 h-14", "md": "w-24 h-24"}
+_THUMB = {"sm": "xo-media-sm", "md": "xo-media-md"}
+
+
+def _preview_video(rel: str) -> None:
+    with ui.dialog() as dialog, ui.card().classes("xo-video-dialog"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("视频预览").classes("text-lg font-semibold")
+            ui.button(icon="close", on_click=dialog.close).props('flat round aria-label="关闭视频预览"')
+        player = ui.video(media.url_for(rel)).classes("w-full xo-video-player").props('preload=metadata playsinline')
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label(Path(rel).name).classes("text-xs text-gray-500 break-all")
+            ui.link("打开原视频", media.url_for(rel), new_tab=True).classes("text-sm")
+    def close_preview():
+        player.pause()
+        dialog.delete()
+    dialog.on("hide", close_preview)
+    dialog.open()
 
 
 def media_strip(files: list[str], size: str = "sm", on_remove=None) -> None:
@@ -23,20 +39,31 @@ def media_strip(files: list[str], size: str = "sm", on_remove=None) -> None:
             exists = media.abs_path(rel).is_file()
             with ui.element("div").classes("relative"):
                 if not exists:
-                    with ui.element("div").classes(f"{box} rounded bg-red-100 flex items-center justify-center"):
+                    with ui.element("div").classes(f"xo-media-thumb {box} rounded bg-red-100 flex items-center justify-center"):
                         ui.icon("broken_image", color="red").classes("text-2xl")
                     tip = "文件已丢失，发送会失败，请删掉重新上传"
                 elif kind == "video":
-                    with ui.element("div").classes(f"{box} rounded bg-slate-800 flex items-center justify-center"):
-                        ui.icon("movie", color="white").classes("text-2xl")
-                    tip = "视频：" + Path(rel).name
+                    with ui.element("button").classes(f"xo-media-thumb xo-video-thumb {box}") \
+                            .props('type=button aria-label="预览视频"').on("click", lambda r=rel: _preview_video(r)):
+                        fallback = ui.label("加载预览…").classes("xo-video-fallback")
+                        image = ui.image(thumbnails.thumbnail_url(rel)).classes("xo-video-poster") \
+                            .props('fit=contain loading=lazy no-spinner no-transition alt="视频画面缩略图"')
+                        def failed_preview(_, img=image, label=fallback):
+                            img.set_visibility(False)
+                            label.set_text("预览不可用")
+                        image.on("error", failed_preview)
+                        image.on("load", lambda _, label=fallback: label.set_visibility(False))
+                        with ui.element("span").classes("xo-video-play"):
+                            ui.icon("play_arrow")
+                        ui.label("视频").classes("xo-video-badge")
+                    tip = "点击预览视频：" + Path(rel).name
                 else:
-                    ui.image(media.url_for(rel)).classes(f"{box} rounded object-cover border")
+                    ui.image(media.url_for(rel)).classes(f"xo-media-thumb {box} rounded object-cover border")
                     tip = ("GIF：" if kind == "gif" else "图片：") + Path(rel).name
                 ui.tooltip(tip)
                 if on_remove is not None:
                     ui.button(icon="close", on_click=lambda r=rel: on_remove(r)) \
-                        .props("round dense size=xs color=negative").classes("absolute -top-2 -right-2")
+                        .props('round dense size=xs color=negative aria-label="移除附件"').classes("absolute -top-2 -right-2")
 
 
 def media_badge(files: list[str]) -> None:
@@ -58,7 +85,7 @@ class MediaField:
         self.files: list[str] = list(initial or [])
         self._initial = set(self.files)
         self.max_items = max_items
-        with ui.column().classes("w-full gap-1"):
+        with ui.column().classes("xo-media-field w-full gap-2"):
             self.title = ui.label(label).classes("text-sm font-semibold")
             self.strip = ui.row().classes("gap-2 items-center flex-wrap min-h-4")
             self.upload = ui.upload(auto_upload=True, multiple=True, on_upload=self._on_upload,
@@ -66,7 +93,7 @@ class MediaField:
                                     max_file_size=media.VIDEO_MAX_BYTES,
                                     label="点这里选文件，或把图片 / 视频拖进来（上传完自动出现在上面）") \
                 .props(f'accept="{media.ACCEPT}" flat bordered').classes("w-full")
-            self.note = ui.label().classes("text-xs text-gray-400")
+            self.note = ui.label().classes("xo-hint-short text-xs text-gray-400")
         self.set_limit(max_items, note)
         self.render()
 

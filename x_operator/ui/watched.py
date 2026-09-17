@@ -15,6 +15,7 @@ from ..core.monitor import VIEWS_WAIT_MAX, views_setting
 from ..core.search import views_range_text
 from ..core.readpool import ReadPool
 from ..db.database import get_conn, utcnow_iso
+from .layout import page_title, detail_text
 from .layout import confirm, fmt_time, run_job_with_progress, shell, tag
 from .pickers import auto_approve_values, hint, media_values, reply_mode_fields, reply_mode_invalid
 
@@ -58,7 +59,7 @@ def register(jobs) -> None:
     def watched_page():
         with shell("/watched"):
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label("监控推主").classes("text-2xl font-bold")
+                page_title("监控推主", "关注指定账号，持续收集新内容")
                 ui.button("运行一次监控", icon="play_arrow",
                           on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
                                                                  result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
@@ -128,8 +129,7 @@ def register(jobs) -> None:
                                              + f" · 添加于 {fmt_time(u['created_at'])}"
                                              + (f" · {u['note']}" if u['note'] else "")).classes("text-xs text-gray-400")
                                     if u["reply_mode"] == "ai_write":
-                                        ui.label("创作要求：" + (u["ai_brief"] or "（未填！AI 无法创作）")).classes(
-                                            "text-xs " + ("text-gray-500" if u["ai_brief"] else "text-red-500"))
+                                        detail_text("创作要求", u["ai_brief"] or "未填写创作要求，AI 无法创作", warning=not bool(u["ai_brief"]))
                                 with ui.row().classes("items-center gap-1"):
                                     sw = ui.switch("启用", value=bool(u["enabled"]))
                                     sw.on("update:model-value", lambda e, uid=u["id"]: _toggle(uid, e.args))

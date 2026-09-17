@@ -4,13 +4,15 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
 import tomllib
 from nicegui import app, ui
+from fastapi.responses import FileResponse, Response
 
-from .core import media
+from .core import media, thumbnails
 from .core.scheduler import Jobs, build_scheduler, run_startup_recovery
 from .db.database import init_db
 from .ui import (dashboard, materials, queue, rules, schedule, settings_page,
@@ -20,6 +22,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("x_operator")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_thumbnail_slots = asyncio.Semaphore(2)
+
+
+@app.get("/media-thumbnail/{rel:path}", include_in_schema=False)
+async def media_thumbnail(rel: str):
+    # 截帧在线程中完成，不占用 NiceGUI 页面和其他操作的事件循环。
+    async with _thumbnail_slots:
+        try:
+            path = await asyncio.to_thread(thumbnails.video_thumbnail, rel)
+        except OSError:
+            log.warning("视频缩略图文件无法访问：%s", rel, exc_info=True)
+            path = None
+    if path is None:
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 def load_toml() -> dict:

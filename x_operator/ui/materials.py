@@ -12,6 +12,7 @@ from nicegui import run, ui
 from ..core import langdetect, media
 from ..core.langdetect import LANG_LABEL
 from ..db.database import get_conn, utcnow_iso
+from .layout import page_title, preview_text
 from .layout import TAG, confirm, fmt_time, hint, llm_wait, shell
 from .media_widget import MediaField, media_badge, media_strip
 
@@ -129,9 +130,9 @@ def register(jobs) -> None:
     def materials_page():
         with shell("/materials"):
             state = {"trash": False}
-            with ui.row().classes("items-center justify-between w-full"):
-                title = ui.label("素材库").classes("text-2xl font-bold")
-                with ui.row().classes("items-center gap-2"):
+            with ui.row().classes("xo-page-heading w-full"):
+                title = page_title("素材库", "整理可复用的文字、图片和视频")
+                with ui.row().classes("xo-toolbar w-full items-center gap-2"):
                     kind_f = ui.select({"all": "全部类型", "reply": "回复", "post": "发帖"}, value="all").props("dense outlined")
                     status_f = ui.select({"all": "全部状态", "active": "启用", "draft": "草稿", "archived": "归档"},
                                          value="all").props("dense outlined")
@@ -140,16 +141,17 @@ def register(jobs) -> None:
                     new_btn = ui.button("新建素材", icon="add", on_click=lambda: _edit_dialog(None, render)).props("color=primary")
 
             count_hint = ui.label("").classes("text-xs text-gray-400")
-            with ui.row().classes("items-center gap-2 flex-wrap") as legend:
-                ui.label("标签说明：").classes("text-xs text-gray-500")
-                for _k, (_t, _c, _tip) in KIND_BADGE.items():
-                    ui.badge(_t, color=None).classes(_c).tooltip(_tip)
-                ui.label("= 用途").classes("text-xs text-gray-400 mr-2")
-                for _k, (_t, _c, _tip) in STATUS_BADGE.items():
-                    ui.badge(_t, color=None).classes(_c).tooltip(_tip)
-                ui.label("= 状态").classes("text-xs text-gray-400 mr-2")
-                ui.badge("AI", color=None).classes(TAG["ai"]); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
-                ui.badge("📎 附件", color=None).classes(TAG["media"]); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
+            with ui.expansion("素材用途与标签说明", icon="info_outline").classes("xo-help w-full") as legend:
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    ui.label("标签说明：").classes("text-xs text-gray-500")
+                    for _k, (_t, _c, _tip) in KIND_BADGE.items():
+                        ui.badge(_t, color=None).classes(_c).tooltip(_tip)
+                    ui.label("= 用途").classes("text-xs text-gray-400 mr-2")
+                    for _k, (_t, _c, _tip) in STATUS_BADGE.items():
+                        ui.badge(_t, color=None).classes(_c).tooltip(_tip)
+                    ui.label("= 状态").classes("text-xs text-gray-400 mr-2")
+                    ui.badge("AI", color=None).classes(TAG["ai"]); ui.label("= AI 生成").classes("text-xs text-gray-400 mr-2")
+                    ui.badge("📎 附件", color=None).classes(TAG["media"]); ui.label("= 带配图/视频").classes("text-xs text-gray-400")
             body = ui.column().classes("w-full gap-2")
 
             def toggle_trash():
@@ -199,7 +201,7 @@ def register(jobs) -> None:
                         ui.label("回收站是空的" if trash else "暂无素材").classes("text-gray-400")
                         return
                     for m in rows:
-                        with ui.card().classes("w-full" + (" bg-red-50" if trash else "")):
+                        with ui.card().classes("xo-material-card w-full" + (" bg-red-50" if trash else "")):
                             files = media.parse_files(m["media_files"])
                             with ui.row().classes("items-center gap-2"):
                                 kt, kc, ktip = KIND_BADGE.get(m["kind"], (m["kind"], "bg-slate-500", ""))
@@ -217,9 +219,9 @@ def register(jobs) -> None:
                                     ui.label("场景：" + m["scenario_tags"].replace(",", ", ")).classes("text-xs text-gray-400").tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
                                 if trash:
                                     ui.label(f"删除于 {fmt_time(m['deleted_at'])}").classes("text-xs text-red-400")
-                            ui.label(m["text"]).classes("text-sm whitespace-pre-wrap")
+                            preview_text(m["text"])
                             media_strip(files)
-                            with ui.row().classes("gap-2"):
+                            with ui.row().classes("xo-actions gap-2"):
                                 if trash:
                                     ui.button("恢复", icon="restore", on_click=lambda mm=m: (_restore(mm["id"]), ui.notify("已恢复", type="positive"), render())).props("flat")
                                     ui.button("彻底删除", icon="delete_forever", on_click=lambda mm=m: hard_delete(mm["id"])).props("flat color=negative")

@@ -16,6 +16,7 @@ from ..core.readpool import official_enabled
 from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (DEFAULT_TIMEOUT_SEC, SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           TIMEOUT_MAX_SEC, TIMEOUT_MIN_SEC, LLMClient, timeout_seconds)
+from .layout import page_title
 from .layout import confirm, hint, llm_wait, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
@@ -26,7 +27,7 @@ def register(jobs) -> None:
     @ui.page("/settings")
     def settings_page():
         with shell("/settings"):
-            ui.label("设置").classes("text-2xl font-bold")
+            page_title("设置", "账号、模型与运行偏好")
 
             with ui.tabs().classes("w-full") as tabs:
                 t_acc = ui.tab("账号")
@@ -319,8 +320,9 @@ def _numeric_panel(fields):
     """fields：(key, 标签, 说明, 类型 int/float, 最小, 最大)。保存前逐项校验，填错哪个就提示哪个，全部合格才写库。"""
     inputs = {}
     for key, label, text, _kind, lo, hi in fields:
-        inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
-        hint(text + f"（允许范围 {lo:g}~{hi:g}）")
+        with ui.column().classes("xo-setting-field w-full gap-2"):
+            inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
+            hint(text + f"（允许范围 {lo:g}~{hi:g}）")
 
     def save():
         parsed = {}

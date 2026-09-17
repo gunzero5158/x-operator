@@ -14,6 +14,7 @@ from ..adapters.base import MEDIA_KIND_LABEL
 from ..core.langdetect import lang_name
 from ..core.matcher import BatchMatchResult, load_source_cfg
 from ..db.database import get_conn, utcnow_iso
+from .layout import page_title, detail_text, preview_text
 from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, tag, tag_legend,
                      run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
@@ -104,9 +105,9 @@ def register(jobs) -> None:
         if rule:
             source = "search"
         with shell("/targets"):
-            with ui.row().classes("items-center justify-between w-full"):
-                ui.label("抓取记录").classes("text-2xl font-bold")
-                with ui.row().classes("items-center gap-2"):
+            with ui.row().classes("xo-page-heading w-full"):
+                page_title("抓取记录", "浏览发现的内容，处理未生成的回复")
+                with ui.row().classes("xo-toolbar w-full items-center gap-2"):
                     status_f = ui.select(_status_options(source, rule), value=status).props("dense outlined")
                     source_f = ui.select({"all": "全部来源", "monitor": "监控推主", "search": "语义搜索"}, value=source).props("dense outlined")
                     rule_f = ui.select(_rule_options(), value=rule if rule in _rule_options() else 0).props("dense outlined")
@@ -119,19 +120,20 @@ def register(jobs) -> None:
                             ui.menu_item("清理已过滤 / 未匹配 / 已过期", on_click=lambda: clear(["filtered", "no_match", "expired"]))
                             ui.menu_item("清理全部抓取记录", on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
 
-            tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
-            with ui.expansion("各状态是什么意思？为什么会被过滤？", icon="help_outline").classes("w-full text-sm"):
+            with ui.expansion("状态与处理说明", icon="help_outline").classes("xo-help w-full text-sm"):
+                tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
                 ui.markdown(
                     "- **已进任务队列**：达标且配到了素材，回复草稿已生成，去「任务队列」批准即可发送。\n"
-                    "- **达标但没配到素材**：相关性够了，但素材库里没有合适语言/场景的「回复」素材（或 AI 认为都不合适）。"
-                    "补充素材后点「重新匹配」。\n"
+                    "- **达标但未生成回复**：相关性够了，但素材不足、AI 撰写失败或账号不可用等原因导致没有生成草稿。"
+                    "「自动匹配」沿用来源规则；「素材库匹配」直接从已有回复素材中选择，保留素材原文和附件。\n"
                     "- **未达标 / 被过滤**：下面几种情况之一，每条卡片上都写了具体原因——\n"
                     "  ① 相关性打分低于规则的达标分（没配 LLM 时只是关键词粗估，普遍偏低）；\n"
                     "  ② 推文语言不在规则选的语言内；\n"
                     "  ③ 预检拦下：转推 / 自己账号的推文 / 早于规则或推主的「首次回溯」时间窗 / 作者在黑名单 / "
                     "该推文已回复过 / 作者在冷却期（设置 → 合规参数「作者冷却天数」）。\n"
                     "- **待匹配**：抓到了还没来得及匹配（一般几秒内会变）。\n"
-                    "- **已过期**：待审核超时（设置 → 合规参数「回复条目时效」）。"
+                    "- **已过期**：待审核超时（设置 → 合规参数「回复条目时效」）。\n"
+                    "- **手动处理**：只生成待审核草稿。发送前仍检查黑名单、重复回复、作者冷却和时效。"
                 ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-2")
             selected: set[int] = set()
@@ -147,27 +149,32 @@ def register(jobs) -> None:
                     ui.notify(f"已删除 {done} 条" + (f"，{kept} 条因在任务队列中而保留" if kept else ""), type="positive")
                     render()
 
-            async def rematch(tid: int):
+            async def rematch(tid: int, *, material_only: bool = False):
+                label = "素材库匹配" if material_only else "自动匹配"
                 def work(progress):
-                    progress(0, "正在按来源规则自动匹配…")
-                    outcome = jobs.match.rematch(tid)
+                    progress(0, "正在从素材库选择已有回复…" if material_only else "正在按来源规则自动匹配…")
+                    outcome = jobs.match.rematch(tid, material_only=material_only)
                     result = BatchMatchResult(total=1)
                     setattr(result, outcome.status, 1)
                     result.details.append(outcome.reason)
                     return result
-                await run_job_with_progress(work, f"自动匹配 #{tid}", render,
+                await run_job_with_progress(work, f"{label} #{tid}", render,
                                             ("查看待审核", "/queue?status=pending"))
 
-            async def rematch_selected():
+            async def rematch_selected(*, material_only: bool = False):
                 ids = [tid for tid in visible_ids if tid in selected]
                 if not ids:
                     ui.notify("请先勾选要自动匹配的记录", type="info")
                     return
                 expected_status = status_f.value
+                label = "批量素材库匹配" if material_only else "批量自动匹配"
+                scope_label = TARGET_STATUS_LABEL[expected_status]
+                # 两个状态列表可并行；同一列表的两种匹配方式仍互斥。
+                task_key = f"batch-rematch:{expected_status}"
                 await run_job_with_progress(lambda progress: jobs.match.rematch_many(
-                                                ids, progress, expected_status=expected_status),
-                                            f"批量自动匹配（{len(ids)} 条）", render,
-                                            ("查看待审核", "/queue?status=pending"), task_key="batch-rematch")
+                                                ids, progress, expected_status=expected_status, material_only=material_only),
+                                            f"{scope_label} · {label}（{len(ids)} 条）", render,
+                                            ("查看待审核", "/queue?status=pending"), task_key=task_key)
 
             def delete_one(tid: int):
                 err = _delete(tid)
@@ -227,7 +234,7 @@ def register(jobs) -> None:
                     if status_f.value in ("filtered", "no_match"):
                         visible_ids.extend(t["id"] for t in rows)
                         checkboxes = {}
-                        with ui.row().classes("w-full items-center gap-2 bg-sky-50 p-3 rounded-lg"):
+                        with ui.row().classes("xo-batch-bar w-full items-center gap-2"):
                             def set_all(value):
                                 for cb in checkboxes.values():
                                     cb.set_value(value)
@@ -235,10 +242,15 @@ def register(jobs) -> None:
                             ui.button("全选当前列表", on_click=lambda: set_all(True)).props("flat dense")
                             ui.button("取消全选", on_click=lambda: set_all(False)).props("flat dense")
                             count_label = ui.label("已选 0 条").classes("text-sm text-slate-600")
-                            batch_btn = ui.button("批量自动匹配", icon="autorenew", on_click=rematch_selected).props("color=primary")
+                            batch_btn = ui.button("批量自动匹配", icon="autorenew", on_click=rematch_selected).props("outline color=primary")
+                            batch_btn.tooltip("按各条记录的原规则处理；AI 创作规则仍会重新撰写")
                             batch_btn.disable()
-                        ui.label("按各自来源规则重新匹配，跳过打分和预检，成功后进入待审核。"
-                                 f"全选只包含当前显示的 {len(rows)} 条；运行中可以继续使用其他功能。").classes("text-xs text-slate-500")
+                            material_btn = ui.button("批量素材库匹配", icon="inventory_2",
+                                                     on_click=lambda: rematch_selected(material_only=True)).props("outline color=primary")
+                            material_btn.tooltip("从启用的回复素材中自动选择，使用素材原文和附件，不调用 AI 撰写或润色")
+                            material_btn.disable()
+                        detail_text("批量处理说明", "「自动匹配」沿用原规则；「素材库匹配」只选已有回复素材，保留原文和附件。两者均跳过打分和预检，成功后进入待审核。"
+                                    f"全选只包含当前显示的 {len(rows)} 条；运行中可以继续使用其他功能。")
 
                         def selection_box(tid):
                             def change(e):
@@ -248,6 +260,7 @@ def register(jobs) -> None:
                                     selected.discard(tid)
                                 count_label.set_text(f"已选 {len(selected)} 条")
                                 batch_btn.set_enabled(bool(selected))
+                                material_btn.set_enabled(bool(selected))
                             checkboxes[tid] = ui.checkbox("选择", on_change=change).props("dense")
 
                     for t in rows:
@@ -292,8 +305,8 @@ def media_tags(media_json: str | None) -> list[tuple[str, str]]:
 
 
 def _card(t, rematch, delete_one, blacklist, pick, write, selection_box=None):
-    with ui.card().classes("w-full"):
-        with ui.row().classes("items-center gap-2 w-full"):
+    with ui.card().classes("xo-target-card w-full"):
+        with ui.row().classes("xo-record-meta items-center gap-2 w-full"):
             if selection_box is not None:
                 selection_box(t["id"])
             tag(source_label(t["source"], t["rule_name"], t["rule_kind"], t["watched_handle"]), "source",
@@ -318,30 +331,28 @@ def _card(t, rematch, delete_one, blacklist, pick, write, selection_box=None):
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_one(t["id"])).props("flat dense round color=negative").tooltip("删除此记录")
         ui.label(f"@{t['author_handle'] or t['author_id']}").classes("text-xs text-gray-500")
-        ui.label(t["text"]).classes("xo-prose whitespace-pre-wrap")
+        preview_text(t["text"])
         if t["text_zh"]:
-            ui.label("中文：" + t["text_zh"]).classes("text-xs text-gray-500")
+            detail_text("中文翻译", t["text_zh"])
         if t["llm_relevance_reason"]:
             if t["process_status"] in ("filtered", "no_match", "expired"):
-                with ui.row().classes("items-start gap-1 no-wrap"):
-                    ui.icon("filter_alt").classes("text-orange-500 text-base mt-0.5")
-                    ui.label("为什么没进队列：" + t["llm_relevance_reason"]).classes("text-xs text-orange-700 whitespace-pre-wrap")
+                detail_text("未进队列", t["llm_relevance_reason"], warning=True)
             else:
-                ui.label("打分理由：" + t["llm_relevance_reason"]).classes("text-xs text-gray-500")
+                detail_text("打分理由", t["llm_relevance_reason"])
         tweet_link(t["author_handle"], t["tweet_id"])
         with ui.row().classes("xo-actions gap-2 items-center flex-wrap"):
             if t["process_status"] == "queued" and t["queue_id"]:
                 ui.link(f"查看任务队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
             elif t["process_status"] in ("no_match", "filtered", "expired", "new"):
-                ui.button("选素材", icon="checklist", on_click=lambda: pick(t)).props("dense outline color=primary") \
-                    .tooltip("从素材库里手动挑一条（可改文案），进待审核")
-                ui.button("AI 撰写", icon="auto_awesome", on_click=lambda: write(t)).props("dense outline color=purple") \
-                    .tooltip("按你写的创作要求让 AI 现写一条回复，进待审核（需 LLM）")
-                ui.button("自动匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("flat dense") \
+                ui.button("自动匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("dense outline color=primary") \
                     .tooltip("跳过打分和预检，按来源规则的回复方式自动生成一次草稿，进待审核")
-            if t["author_id"]:
-                ui.button("拉黑作者", on_click=lambda: blacklist(t["author_id"], t["author_handle"])).props("flat dense color=negative")
-        if t["process_status"] in ("no_match", "filtered", "expired", "new"):
-            ui.label("这三个按钮只负责生成草稿、进待审核，不代表发得出去：发送前还会再查一遍黑名单 / 是否已回复过 / 作者冷却 / 条目时效，"
-                     "还在冷却期内的会被拦下标「已跳过」。确实要发，就在任务队列里对它用「强制放回待审核」人工放行。"
-                     ).classes("text-xs text-gray-400")
+                ui.button("素材库匹配", icon="inventory_2", on_click=lambda: rematch(t["id"], material_only=True)) \
+                    .props("dense outline color=primary") \
+                    .tooltip("从启用的回复素材中自动选择，保留原文和附件，不再 AI 撰写或润色；成功后进入待审核")
+            with ui.button("更多操作", icon="more_horiz").props("flat dense"):
+                with ui.menu():
+                    if t["process_status"] in ("no_match", "filtered", "expired", "new"):
+                        ui.menu_item("手动选素材", on_click=lambda: pick(t))
+                        ui.menu_item("AI 撰写", on_click=lambda: write(t))
+                    if t["author_id"]:
+                        ui.menu_item("拉黑作者", on_click=lambda: blacklist(t["author_id"], t["author_handle"])).classes("text-negative")

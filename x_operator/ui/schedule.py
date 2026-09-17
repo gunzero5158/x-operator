@@ -14,6 +14,7 @@ from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
 from ..core.langdetect import LANG_LABEL, lang_name
 from ..db.database import get_conn, to_iso, utcnow_iso
+from .layout import page_title, detail_text
 from .layout import confirm, fmt_time, llm_wait, shell, tag
 from .media_widget import MediaField, media_badge
 from .pickers import hint, template_controls
@@ -69,7 +70,7 @@ def register(jobs) -> None:
     def schedule_page():
         with shell("/schedule"):
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label("定时发帖").classes("text-2xl font-bold")
+                page_title("定时发帖", "管理发布计划与内容来源")
                 ui.button("新建发帖计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
             hint("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），"
                      "再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。"
@@ -143,7 +144,7 @@ def register(jobs) -> None:
                             else:
                                 ui.label("主题要求：" + (sp["ai_brief"] or "（未填！）")[:140]).classes("text-sm " + ("" if sp["ai_brief"] else "text-red-500"))
                             if sp["last_error"]:
-                                ui.label("上次生成失败：" + sp["last_error"]).classes("text-xs text-red-600 whitespace-pre-wrap")
+                                detail_text("上次生成失败", sp["last_error"], warning=True)
                             with ui.row().classes("gap-2"):
                                 ui.button("编辑", on_click=lambda s=sp: _edit(s, render)).props("flat dense")
                                 if sp["status"] == "active":
