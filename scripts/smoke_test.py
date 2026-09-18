@@ -1242,7 +1242,7 @@ client.post = orig_post
 lc.httpx.Client = orig_httpx_client; config.set_value("llm_base_url", ""); config.set_value("llm_api_key", "")
 print("[6f16] 推文长度：计数单位 / 免费账号超限 AI 缩写 / 会员不限 / 发送前拦截 OK")
 
-# [6f17] 任务队列「已跳过」重新判断：作者冷却期内 → 仍跳过；冷却过了 → 放回待审核并重算时效；黑名单 → 仍跳过且原因更新；批量统计
+# [6f17] 已跳过重新判断：冷却与过期同时展示；过期独立归类；未过期且限制解除才恢复，时效不变
 from datetime import timedelta as _td
 from x_operator.core.compliance import ComplianceGuard as _CG
 _g = _CG()
@@ -1266,17 +1266,27 @@ with get_conn() as conn:
                  (acc_row["id"], utcnow_iso()))
     conn.execute("INSERT INTO blacklist(x_user_id,handle,reason,created_at) VALUES ('rc_black','rc_black','t',?)", (utcnow_iso(),))
     conn.commit()
-ok, why = _g.recheck_skipped(rq_rc); assert not ok and "冷却" in why, (ok, why)
+ok, why = _g.recheck_skipped(rq_rc)
+assert not ok and "已移到「已过期」" in why and "冷却" in why and "冷却结束" in why, (ok, why)
+with get_conn() as conn:
+    row = conn.execute("SELECT status,skip_reason FROM review_queue WHERE id=?", (rq_rc,)).fetchone()
+    assert tuple(row) == ("expired", "target_expired"), tuple(row)
+    # 另一种场景：时效未过，作者仍在冷却中。
+    conn.execute("UPDATE review_queue SET status='skipped',expires_at=? WHERE id=?",
+                 (to_iso(datetime.now(timezone.utc) + _td(days=1)), rq_rc)); conn.commit()
 res = _g.recheck_all_skipped(); assert res["still"] >= 2 and any("冷却" in k for k in res["reasons"]) and any("黑名单" in k for k in res["reasons"]), res
 with get_conn() as conn:
     sts = {r["id"]: (r["status"], r["skip_reason"]) for r in conn.execute("SELECT id, status, skip_reason FROM review_queue WHERE id IN (?,?)", (rq_rc, rq_bl))}
     assert sts[rq_rc] == ("skipped", "author_in_cooldown") and sts[rq_bl] == ("skipped", "blacklisted"), sts   # 手动跳过 → 现在的原因是黑名单
     conn.execute("UPDATE interactions SET sent_at=? WHERE tweet_id='rc_other'", (to_iso(datetime.now(timezone.utc) - _td(days=8)),)); conn.commit()
-# 冷却过了，但条目时效也过了 → 仍跳过，原因更新成「过时效」（重新判断不动时效规则）
+# 冷却过了，但时效也过了 → 移到已过期，原 expires_at 不延长。
+with get_conn() as conn:
+    conn.execute("UPDATE review_queue SET expires_at=? WHERE id=?", (old_exp, rq_rc)); conn.commit()
 ok, why = _g.recheck_skipped(rq_rc); assert not ok and "时效" in why, (ok, why)
 with get_conn() as conn:
     assert conn.execute("SELECT skip_reason FROM review_queue WHERE id=?", (rq_rc,)).fetchone()["skip_reason"] == "target_expired"
-    conn.execute("UPDATE review_queue SET expires_at=? WHERE id=?", (to_iso(datetime.now(timezone.utc) + _td(days=1)), rq_rc)); conn.commit()
+    assert conn.execute("SELECT status FROM review_queue WHERE id=?", (rq_rc,)).fetchone()["status"] == "expired"
+    conn.execute("UPDATE review_queue SET status='skipped', expires_at=? WHERE id=?", (to_iso(datetime.now(timezone.utc) + _td(days=1)), rq_rc)); conn.commit()
 # 冷却过 + 时效没过 → 放回待审核，时效原样保留
 ok, why = _g.recheck_skipped(rq_rc); assert ok, (ok, why)
 with get_conn() as conn:
@@ -1299,7 +1309,7 @@ with get_conn() as conn:
     conn.execute("UPDATE review_queue SET status='skipped', skip_reason='manual_skip' WHERE id=?", (rq_rc,)); conn.commit()
 ok, why = _g.force_restore(rq_rc); assert not ok and "已回复过" in why, (ok, why)
 ok, why = _g.recheck_skipped(rq_rc); assert not ok and "已回复过" in why, (ok, why)
-print("[6f17] 已跳过重新判断：冷却中仍跳过 / 过时效仍跳过 / 都不成立放回待审核且时效不动 / 人工放行绕过黑名单冷却时效 / 已回复过谁也放不了 OK")
+print("[6f17] 已跳过重新判断：冷却中仍跳过 / 过时效移到已过期 / 都不成立放回待审核且时效不动 / 人工放行绕过黑名单冷却时效 / 已回复过谁也放不了 OK")
 
 # [6f18] 附件元信息：mock 推文带图 / 视频 → 入库 media 列；规则 read_media 默认关（纯文本消息）、开了才拼多模态消息（每条最多 2 张、低清）；
 #        打分失败时给出「模型可能不支持图片」的提示；抓取记录页标签

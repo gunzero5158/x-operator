@@ -10,7 +10,7 @@ from __future__ import annotations
 from nicegui import run, ui
 
 from ..core import media, textlimit
-from ..core.compliance import SKIP_REASON_LABEL
+from ..core.compliance import ComplianceGuard, SKIP_REASON_LABEL
 from ..core.langdetect import lang_name
 from ..db.database import get_conn, utcnow_iso
 from .layout import page_title, detail_text, preview_text
@@ -66,7 +66,10 @@ def _load(status: str, account_id: int = ALL_ACCOUNTS):
             "tt.text_zh, tt.tweet_id AS tgt_tweet_id, tt.lang AS tgt_lang, tt.view_count AS tgt_views, "
             "tt.llm_relevance_score AS tgt_score, tt.tweet_created_at AS tgt_created_at, tt.source AS tgt_source, "
             "tt.source_rule_id AS tgt_rule_id, sr.min_llm_score AS rule_min, sr.name AS rule_name, sr.source_kind AS rule_kind, "
-            "wu.handle AS watched_handle "
+            "wu.handle AS watched_handle, "
+            "(SELECT other.id FROM review_queue other WHERE other.target_tweet_id=rq.target_tweet_id AND other.id<>rq.id "
+            "AND other.status IN ('pending','approved','sending','sent') "
+            "ORDER BY CASE WHEN other.status='sent' THEN 1 ELSE 0 END, other.id DESC LIMIT 1) AS related_queue_id "
             "FROM review_queue rq JOIN accounts a ON a.id=rq.account_id "
             "LEFT JOIN target_tweets tt ON tt.id=rq.target_tweet_id "
             "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
@@ -243,22 +246,29 @@ def _set_media(item_id: int, files: list[str]) -> bool:
     return cur.rowcount > 0
 
 
-def _delete(item_id: int) -> None:
+def _delete(item_id: int, expected_status: str | tuple[str, ...] | None = None) -> bool:
     with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT target_tweet_id, status FROM review_queue WHERE id=?", (item_id,)).fetchone()
+        allowed = (expected_status,) if isinstance(expected_status, str) else expected_status
+        if row is None or row["status"] == "sending" or (allowed and row["status"] not in allowed):
+            conn.rollback()
+            return False
         conn.execute("DELETE FROM review_queue WHERE id=?", (item_id,))
         if row and row["target_tweet_id"] and row["status"] not in ("sent",):
             conn.execute("UPDATE target_tweets SET process_status='no_match', "
-                         "llm_relevance_reason='任务队列条目已被手动删除，可重新选素材 / AI 撰写' WHERE id=? AND process_status='queued'",
+                         "llm_relevance_reason='任务队列条目已被手动删除，可重新选素材 / AI 撰写' "
+                         "WHERE id=? AND process_status IN ('queued','expired') "
+                         "AND NOT EXISTS (SELECT 1 FROM review_queue q WHERE q.target_tweet_id=target_tweets.id "
+                         "AND q.status IN ('pending','approved','sending','sent'))",
                          (row["target_tweet_id"],))
         conn.commit()
+    return True
 
 
 def _delete_all(status: str, account_id: int = ALL_ACCOUNTS) -> int:
     ids = _matching_ids(status, account_id)
-    for i in ids:
-        _delete(i)
-    return len(ids)
+    return sum(_delete(i, status if status != UNSENT else UNSENT_STATUSES) for i in ids)
 
 
 def register(jobs) -> None:
@@ -291,18 +301,21 @@ def register(jobs) -> None:
             with ui.expansion("审核与标签说明", icon="help_outline").classes("xo-help w-full text-sm"):
                 tag_legend(["account", "reply", "post", "source", "ai", "warn", "media", "metric"])
                 ui.markdown(
+                    "- **统计口径**：这里按发布任务计数（回复和主帖），抓取记录按原推文计数。同一推文重新生成草稿时，旧任务仍保留，数量可能不同。\n"
+                    "- **已过期**：这条回复草稿已超时，不代表原推文失效；即使已有新草稿或已发送任务，旧的过期任务也会保留在这里。\n"
                     "- **回复 / 发帖**：回复 = 回在别人推文下面；发帖 = 自己账号发主贴（来自定时发帖计划）。\n"
                     "- **来源**：AI 匹配素材 / 手动选素材 / AI 撰写 / 定时发帖计划——这条文案是怎么来的。\n"
                     "- **📎 附件**：发送时会随正文一起上传的配图 / 视频。\n"
                     "- **含链接**：正文里有 http 链接。只是提醒，不是这条的实际扣费：官方 API 通道发含链接的推文按 X 的定价约 $0.20/条"
                     "（小号 Cookie 通道免费）；而且在别人帖子下带外链容易被折叠或限流，回复类建议只 @ 不带链接。\n"
                     "- **自动翻译，请重点检查**：文案是机器翻译过来的，发之前多看一眼。\n"
-                    "- **时效至**：待审核条目过了这个时间会自动标「已过期」（设置 → 合规参数「回复条目时效」）。"
+                    "- **时效至**：待审核、待发送和已跳过的回复超过这个时间会自动标「已过期」（设置 → 合规参数「回复条目时效」）。\n"
+                    "- **过期后处理**：勾选条目可批量删除或突破规则放回待审核；单条可确认原文和附件后突破规则立即发送。"
                 ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-3")
             # dirty：正在改文案的条目 id；busy：有弹窗开着。两者任一非空时自动刷新只更新计数、不重绘卡片，
             # 免得把用户改到一半的文案或开着的弹窗冲掉
-            state = {"sig": None, "dirty": set(), "busy": 0}
+            state = {"sig": None, "dirty": set(), "busy": 0, "selected": set()}
             paused_hint = ui.label("").classes("text-xs text-orange-500")
 
             def signature(items) -> tuple:
@@ -327,14 +340,43 @@ def register(jobs) -> None:
                 acc_filter.set_options(_account_filter_options(status_sel.value), value=acc_id())
                 sync_toolbar()
                 body.clear()
+                state["selected"].intersection_update(it["id"] for it in items if it["status"] == "expired")
                 with body:
                     if not items:
                         ui.label("此状态下暂无条目 🎉" if not acc_id() else "这个账号在此状态下没有条目").classes("text-gray-400")
                         return
                     if len(items) >= _LIMIT:
                         ui.label(f"只显示最新的 {_LIMIT} 条，处理掉一些后会显示更多").classes("text-xs text-gray-400")
+                    select_cb = None
+                    if status_sel.value == "expired":
+                        visible_ids = {it["id"] for it in items}
+
+                        def select_all(value):
+                            state["selected"] = set(visible_ids) if value else set()
+                            render()
+
+                        with ui.row().classes("xo-batch-bar w-full items-center gap-3"):
+                            ui.button("全选当前列表", on_click=lambda: select_all(True)).props("flat dense")
+                            ui.button("取消全选", on_click=lambda: select_all(False)).props("flat dense")
+                            selected_label = ui.label(f"已选 {len(state['selected'])} 条").classes("text-sm")
+                            batch_restore = ui.button("批量突破规则", icon="lock_open", on_click=batch_force_expired).props("outline color=orange")
+                            batch_delete = ui.button("批量删除", icon="delete_sweep", on_click=batch_delete_expired).props("outline color=negative")
+
+                        def select_cb(item_id, checked):
+                            if checked:
+                                state["selected"].add(item_id)
+                            else:
+                                state["selected"].discard(item_id)
+                            selected_label.text = f"已选 {len(state['selected'])} 条"
+                            batch_restore.set_enabled(bool(state["selected"]))
+                            batch_delete.set_enabled(bool(state["selected"]))
+
+                        batch_restore.set_enabled(bool(state["selected"]))
+                        batch_delete.set_enabled(bool(state["selected"]))
+                        hint(f"全选仅包含当前显示的 {len(items)} 条；突破规则后放回待审核，批准后进入正常待发送队列。", after_row=True)
                     for it in items:
-                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb, restore_failed_cb)
+                        _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb, restore_failed_cb,
+                              force_send_cb, select_cb, it["id"] in state["selected"])
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -346,8 +388,8 @@ def register(jobs) -> None:
                         state["busy"] -= 1
                     if not ok:
                         return
-                _delete(it["id"])
-                ui.notify("已删除", type="positive")
+                deleted = _delete(it["id"], it["status"])
+                ui.notify("已删除" if deleted else "条目状态已改变，未删除，请刷新", type="positive" if deleted else "warning")
                 render()
 
             async def swap_cb(it):
@@ -400,7 +442,7 @@ def register(jobs) -> None:
 
             def recheck_cb(it):
                 ok, detail = jobs.guard.recheck_skipped(it["id"])
-                ui.notify(("已放回待审核，可在「待审核」里批准" if ok else f"仍不通过：{detail}"),
+                ui.notify(("已放回待审核，可在「待审核」里批准" if ok else detail),
                           type="positive" if ok else "warning", multi_line=True)
                 render()
 
@@ -415,15 +457,94 @@ def register(jobs) -> None:
                 state["busy"] += 1
                 try:
                     ok = await confirm("强制放回待审核？",
-                                       f"当前跳过原因：{reason}。放行后这条会绕过作者冷却 / 黑名单 / 时效检查，批准即发；"
+                                       f"当前拦截原因：{reason}。放行后这条会绕过作者冷却 / 黑名单 / 时效检查；批准后仍受账号状态、发送时段、发送间隔和日上限约束。"
                                        "请确认你清楚为什么要这么做。", ok_label="放行", color="warning")
                 finally:
                     state["busy"] -= 1
                 if not ok:
                     return
-                done, detail = jobs.guard.force_restore(it["id"])
+                done, detail = jobs.guard.force_restore(it["id"], expected_status=it["status"])
                 ui.notify(detail, type="positive" if done else "negative", multi_line=True)
                 render()
+
+            async def batch_expired(restore: bool):
+                ids = sorted(state["selected"])
+                if not ids:
+                    ui.notify("请先勾选已过期条目", type="info")
+                    return
+                state["busy"] += 1
+                try:
+                    ok = await confirm(
+                        f"{'突破规则并放回待审核' if restore else '删除'}选中的 {len(ids)} 条已过期记录？",
+                        ("保留原文案、附件和发送账号，绕过作者冷却、黑名单与草稿时效，不再自动过期。"
+                         "仍需逐条审核批准；发送时保留去重、账号状态、日上限、时段和间隔限制。已有其他待处理任务的推文不会重复入队。"
+                         if restore else "仅删除本次勾选的过期记录，不删除素材或发送账本。没有其他待处理或已发送任务的抓取记录将退回「达标但未生成回复」。"),
+                        ok_label="放回待审核" if restore else "删除选中", color="warning" if restore else "negative")
+                    if not ok:
+                        return
+
+                    def work():
+                        done, reasons = 0, {}
+                        for item_id in ids:
+                            try:
+                                if restore:
+                                    success, detail = jobs.guard.force_restore(item_id, expected_status="expired")
+                                else:
+                                    success = _delete(item_id, "expired")
+                                    detail = "条目已改变状态或不存在"
+                            except Exception as exc:
+                                success, detail = False, f"处理失败：{exc}"
+                            done += int(success)
+                            if not success:
+                                reasons[detail] = reasons.get(detail, 0) + 1
+                        return done, reasons
+
+                    done, reasons = await run.io_bound(work)
+                    state["selected"].difference_update(ids)
+                    text = f"已{'放回待审核' if restore else '删除'} {done} 条，未处理 {len(ids) - done} 条"
+                    if reasons:
+                        text += "；" + "；".join(f"{reason}（{n} 条）" for reason, n in list(reasons.items())[:5])
+                        if len(reasons) > 5:
+                            text += "；其余未处理记录保留在已过期列表"
+                    notify_long(text, ok=not reasons, kind="warning" if reasons else None)
+                finally:
+                    state["busy"] -= 1
+                    render()
+
+            async def batch_force_expired():
+                await batch_expired(True)
+
+            async def batch_delete_expired():
+                await batch_expired(False)
+
+            async def force_send_cb(it):
+                state["busy"] += 1
+                try:
+                    with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[90vh] overflow-auto"):
+                        ui.label("突破规则并立即发送？").classes("text-lg font-bold")
+                        ui.label(f"任务 #{it['id']} · 发送账号 @{it['acc_handle']}")
+                        if it["tgt_tweet_id"]:
+                            tweet_link(it["author_handle"], it["tgt_tweet_id"])
+                        ui.label(it["final_text"] or "（文案为空）").classes("whitespace-pre-wrap break-words w-full")
+                        media_strip(media.parse_files(it["final_media_files"]))
+                        hint("确认即视为批准，将按以上原文案和附件发送。绕过作者冷却、黑名单、草稿时效、发送时段和间隔；"
+                             "同一推文去重、账号状态、日上限、长度与附件检查仍保留。暂不能发送会留在待发送，发送失败进入正常失败流程。",
+                             after_row=True)
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("取消", on_click=lambda: dlg.submit(False)).props("flat")
+                            ui.button("确认并发送", icon="send", on_click=lambda: dlg.submit(True)).props("color=orange")
+                    dlg.open()
+                    if not await dlg:
+                        return
+                    ui.notify("正在发送，可继续使用其他功能…", type="info")
+                    ok, detail = await run.io_bound(jobs.dispatcher.send_now, it["id"], force_expired=True,
+                                                    expected_account_id=it["account_id"])
+                    notify_long(detail, ok=ok, kind=None if ok else "warning")
+                except Exception as exc:
+                    notify_long(f"发送处理异常：{exc}。请检查条目当前状态，勿重复提交。", ok=False)
+                finally:
+                    state["busy"] -= 1
+                    render()
 
             async def send_now_cb(it):
                 ui.notify("正在发送…", type="info")
@@ -436,7 +557,7 @@ def register(jobs) -> None:
                 if not n:
                     ui.notify("没有已跳过的条目", type="info"); return
                 res = jobs.guard.recheck_all_skipped()
-                parts = [f"放回待审核 {res['restored']} 条", f"仍跳过 {res['still']} 条"]
+                parts = [f"放回待审核 {res['restored']} 条", f"已过期 {res['expired']} 条", f"仍跳过 {res['still']} 条"]
                 if res["reasons"]:
                     parts.append("；".join(f"{k} {v} 条" for k, v in res["reasons"].items()))
                 notify_long("重新判断完成：" + "，".join(parts), ok=res["restored"] > 0, kind=None if res["restored"] else "info")
@@ -452,6 +573,7 @@ def register(jobs) -> None:
             def sync_toolbar():
                 st, aid = status_sel.value, acc_id()
                 recheck_btn.set_visibility(st == "skipped" and not aid)
+                clear_btn.set_visibility(st not in ("expired", "sending"))
                 transfer_btn.set_visibility(bool(aid) and st not in ("sent", "sending") and not _account_deleted(aid))
                 acc_hint.text = ""
                 if aid:
@@ -507,6 +629,7 @@ def register(jobs) -> None:
             transfer_btn.on_click(transfer_all)
 
             def on_filter_change():
+                state["selected"].clear()
                 render()
             status_sel.on("update:model-value", lambda e: on_filter_change())
             acc_filter.on("update:model-value", lambda e: on_filter_change())
@@ -577,12 +700,14 @@ async def _attach_dialog(initial: list[str]):
 
 
 def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None, force_cb=None, send_now_cb=None,
-          restore_failed_cb=None):
+          restore_failed_cb=None, force_send_cb=None, select_cb=None, selected=False):
     files = media.parse_files(it["final_media_files"])
     limits = _account_limits()
     cur_acc = {"id": it["account_id"]}
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
+            if it["status"] == "expired" and select_cb:
+                ui.checkbox("选择", value=selected, on_change=lambda e: select_cb(it["id"], bool(e.value)))
             if it["status"] == "pending" and it["error_msg"]:
                 ui.label(f"上次发送失败：{it['error_msg']}（已捞回，批准前请确认问题已解决）").classes("text-xs text-red-600 w-full")
             if it["status"] == "pending":
@@ -611,12 +736,12 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
             if it["is_auto_translated"]:
                 tag("自动翻译", "warn", "文案是机器翻译过来的，发之前重点检查")
             if it["force_send"]:
-                tag("人工放行", "warn", "从「已跳过」强制放回来的：发送时不按作者冷却 / 黑名单 / 时效拦，也不会自动过期")
+                tag("人工放行", "warn", "从「已跳过」或「已过期」人工放行：发送时不按作者冷却 / 黑名单 / 时效拦，也不会自动过期")
             media_badge(files)
             if "http://" in (it["final_text"] or "") or "https://" in (it["final_text"] or ""):
                 tag("含链接", "metric").tooltip("正文里有外链。官方 API 通道发含链接推文约 $0.20/条（小号通道免费）；回复里带外链易被折叠。详见页顶「标签是什么意思」")
             ui.label(f"#{it['id']} · {fmt_time(it['created_at'])}").classes("text-xs text-gray-400")
-            if it["expires_at"] and it["status"] == "pending":
+            if it["expires_at"] and it["status"] in ("pending", "approved", "skipped", "expired"):
                 ui.label(f"时效至 {fmt_time(it['expires_at'])}").classes("text-xs text-orange-400")
             ui.space()
             ui.button(icon="delete", on_click=lambda: delete_cb(it)).props("flat dense round color=negative").tooltip("删除此条目")
@@ -668,6 +793,17 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
         ta.on("update:model-value", lambda e: update_len())
         shorten_btn = None
         media_strip(files)
+        if it["status"] == "expired" and it["related_queue_id"]:
+            ui.label(f"这是历史过期草稿；同一原推文另有任务 #{it['related_queue_id']} 待处理或已发送。"
+                     "请处理已有任务，这条旧草稿不能重复放行，可删除。").classes("text-sm text-orange-600")
+        if it["status"] in ("skipped", "expired"):
+            current = ComplianceGuard().check_hard(it)
+            detail = current.detail
+            if current.ok:
+                detail = ("当前黑名单、去重、作者冷却和草稿时效检查均通过。点击「重新判断」可放回待审核；"
+                          "账号状态、发送时段和日上限会在发送时另行检查。" if it["status"] == "skipped" else
+                          "当前硬性检查通过，但已过期记录不会自动恢复；可人工放回待审核或确认后立即发送。")
+            detail_text("当前检查结果", detail, warning=not current.ok)
 
         with ui.row().classes("gap-2 items-center flex-wrap"):
             if it["status"] == "pending":
@@ -695,6 +831,10 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                     .tooltip("按现在的情况把跳过规则再查一遍（黑名单 / 是否已回复过 / 作者冷却 / 时效）；都不成立就放回待审核")
                 ui.button("强制放回待审核", icon="lock_open", on_click=lambda: force_cb(it)).props("outline dense color=orange") \
                     .tooltip("人工放行：不管跳过原因直接放回待审核，发送时也不再按冷却 / 黑名单 / 时效拦（已回复过的除外）")
+            elif it["status"] == "expired":
+                ui.label("已过期").classes("text-sm text-gray-500")
+                ui.button("突破规则并放回待审核", icon="lock_open", on_click=lambda: force_cb(it)).props("outline dense color=orange")
+                ui.button("突破规则并发送", icon="send", on_click=lambda: force_send_cb(it)).props("outline dense color=orange")
             elif it["status"] == "failed":
                 with ui.column().classes("w-full items-start gap-3"):
                     ui.label("发送失败" + (f" · {it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-red-600 break-words w-full")
@@ -702,7 +842,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                         .tooltip("放回待审核、重试次数清零，批准后按正常流程重新发；失败原因会留在条目上供参考")
             else:
                 ui.label(f"状态：{QUEUE_STATUS_LABEL.get(it['status'], it['status'])}"
-                         + (f" · {it['skip_reason']}" if it["skip_reason"] else "")
+                         + (f" · {SKIP_REASON_LABEL.get(it['skip_reason'], it['skip_reason'])}" if it["skip_reason"] else "")
                          + (f" · 错误：{it['error_msg']}" if it["error_msg"] else "")).classes("text-sm text-gray-500")
         update_len()
         if it["status"] == "sent" and it["sent_tweet_id"]:

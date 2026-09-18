@@ -15,7 +15,7 @@ from ..core.langdetect import lang_name
 from ..core.matcher import BatchMatchResult, load_source_cfg
 from ..db.database import get_conn, utcnow_iso
 from .layout import page_title, detail_text, preview_text
-from .layout import (TARGET_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, tag, tag_legend,
+from .layout import (TARGET_STATUS_LABEL, QUEUE_STATUS_LABEL, confirm, fmt_time, fmt_views, notify_long, tag, tag_legend,
                      run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
@@ -24,9 +24,12 @@ _LIMIT = 150
 
 def _load(status: str, source: str, rule_id: int = 0):
     q = ("SELECT tt.*, sr.name AS rule_name, sr.min_llm_score AS rule_min, sr.source_kind AS rule_kind, wu.handle AS watched_handle, "
-         "(SELECT rq.id FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_id, "
-         "(SELECT rq.status FROM review_queue rq WHERE rq.target_tweet_id=tt.id ORDER BY rq.id DESC LIMIT 1) AS queue_status "
+         "linked.id AS queue_id, linked.status AS queue_status, "
+         "(SELECT COUNT(*) FROM review_queue rq WHERE rq.target_tweet_id=tt.id AND rq.status='expired') AS expired_queue_count "
          "FROM target_tweets tt "
+         "LEFT JOIN review_queue linked ON linked.id=(SELECT rq.id FROM review_queue rq WHERE rq.target_tweet_id=tt.id "
+         "ORDER BY CASE WHEN rq.status IN ('pending','approved','sending') THEN 0 WHEN rq.status='sent' THEN 1 "
+         "WHEN rq.status IN ('failed','skipped') THEN 2 ELSE 3 END, rq.id DESC LIMIT 1) "
          "LEFT JOIN search_rules sr ON sr.id=tt.source_rule_id AND tt.source='search' "
          "LEFT JOIN watched_users wu ON wu.id=tt.source_rule_id AND tt.source='monitor' WHERE 1=1")
     args: list = []
@@ -111,6 +114,7 @@ def register(jobs) -> None:
                     status_f = ui.select(_status_options(source, rule), value=status).props("dense outlined")
                     source_f = ui.select({"all": "全部来源", "monitor": "监控推主", "search": "语义搜索"}, value=source).props("dense outlined")
                     rule_f = ui.select(_rule_options(), value=rule if rule in _rule_options() else 0).props("dense outlined")
+                    ui.button(icon="refresh", on_click=lambda: render()).props("outline dense").tooltip("刷新列表与数量；在任务队列处理后可点此同步显示")
                     ui.button("运行监控", icon="visibility",
                               on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render)).props("outline dense")
                     ui.button("运行所有搜索规则", icon="manage_search",
@@ -123,7 +127,8 @@ def register(jobs) -> None:
             with ui.expansion("状态与处理说明", icon="help_outline").classes("xo-help w-full text-sm"):
                 tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
                 ui.markdown(
-                    "- **已进任务队列**：达标且配到了素材，回复草稿已生成，去「任务队列」批准即可发送。\n"
+                    "- **统计口径**：这里按抓取到的原推文计数，同一推文只记一次；任务队列按发布任务计数，同一推文可有多条历史草稿，还包含定时主帖。两边数量不要求相等。\n"
+                    "- **已进任务队列**：已生成回复任务，可能待审核、待发送、发送失败、已跳过或已经发送；不代表还在等审核。卡片上的关联任务显示具体状态。\n"
                     "- **达标但未生成回复**：相关性够了，但素材不足、AI 撰写失败或账号不可用等原因导致没有生成草稿。"
                     "「自动匹配」沿用来源规则；「素材库匹配」直接从已有回复素材中选择，保留素材原文和附件。\n"
                     "- **未达标 / 被过滤**：下面几种情况之一，每条卡片上都写了具体原因——\n"
@@ -132,7 +137,9 @@ def register(jobs) -> None:
                     "  ③ 预检拦下：转推 / 自己账号的推文 / 早于规则或推主的「首次回溯」时间窗 / 作者在黑名单 / "
                     "该推文已回复过 / 作者在冷却期（设置 → 合规参数「作者冷却天数」）。\n"
                     "- **待匹配**：抓到了还没来得及匹配（一般几秒内会变）。\n"
-                    "- **已过期**：待审核超时（设置 → 合规参数「回复条目时效」）。\n"
+                    "- **回复草稿已过期**：关联回复草稿超时，且没有其他待审核、待发送、发送中或已发送任务。原推文本身并未失效。"
+                    "重新生成草稿后，这条原推文回到「已进任务队列」，旧草稿仍保留在任务队列的「已过期」中。\n"
+                    "- **筛选与刷新**：这里按来源和规则筛选，任务队列按发送账号筛选。在队列处理后，点刷新可更新这里的状态与数量。\n"
                     "- **手动处理**：只生成待审核草稿。发送前仍检查黑名单、重复回复、作者冷却和时效。"
                 ).classes("text-xs text-gray-600")
             body = ui.column().classes("w-full gap-2")
@@ -336,14 +343,17 @@ def _card(t, rematch, delete_one, blacklist, pick, write, selection_box=None):
             detail_text("中文翻译", t["text_zh"])
         if t["llm_relevance_reason"]:
             if t["process_status"] in ("filtered", "no_match", "expired"):
-                detail_text("未进队列", t["llm_relevance_reason"], warning=True)
+                detail_text("草稿过期说明" if t["process_status"] == "expired" else "未进队列", t["llm_relevance_reason"], warning=True)
             else:
                 detail_text("打分理由", t["llm_relevance_reason"])
         tweet_link(t["author_handle"], t["tweet_id"])
         with ui.row().classes("xo-actions gap-2 items-center flex-wrap"):
-            if t["process_status"] == "queued" and t["queue_id"]:
-                ui.link(f"查看任务队列条目 #{t['queue_id']}（{t['queue_status']}）→", "/queue").classes("text-xs")
-            elif t["process_status"] in ("no_match", "filtered", "expired", "new"):
+            if t["queue_id"]:
+                label = QUEUE_STATUS_LABEL.get(t["queue_status"], t["queue_status"])
+                ui.link(f"关联任务 #{t['queue_id']} · {label} →", f"/queue?status={t['queue_status']}").classes("text-xs")
+                if t["expired_queue_count"] and t["queue_status"] != "expired":
+                    ui.label(f"另有 {t['expired_queue_count']} 条历史过期草稿").classes("text-xs text-gray-500")
+            if t["process_status"] in ("no_match", "filtered", "expired", "new"):
                 ui.button("自动匹配", icon="autorenew", on_click=lambda: rematch(t["id"])).props("dense outline color=primary") \
                     .tooltip("跳过打分和预检，按来源规则的回复方式自动生成一次草稿，进待审核")
                 ui.button("素材库匹配", icon="inventory_2", on_click=lambda: rematch(t["id"], material_only=True)) \

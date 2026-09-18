@@ -3,7 +3,7 @@
 后台 job（monitor / search / scheduled_check / dispatcher_tick），均整体 try/except 隔离。
 自动搜索/自动监控受总开关 auto_jobs_enabled（默认关）+ 各自的单独开关控制，节奏可选「每隔 N 分钟」或
 「每天固定时间点」（AUTO_JOBS / build_trigger）；发送分发有自己的开关（默认开）；定时发帖计划检查始终运行。
-scheduled_check 顺带做「过期清扫」：待审核超时的条目标过期，对应抓取记录也标过期。
+scheduled_check 顺带做「过期清扫」：未发送且到期的回复标过期，对应抓取记录也标过期。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from .. import config
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import media, textlimit
-from .compliance import ComplianceGuard
+from .compliance import ComplianceGuard, expire_queue_items
 from .dispatcher import Dispatcher
 from .matcher import MatchEngine, extract_must_include
 from .monitor import MonitorJob
@@ -234,21 +234,11 @@ class Jobs:
 
 
 def expire_stale() -> int:
-    """待审核超过时效的条目 → 过期；它们的抓取记录也从「已进任务队列」改成「已过期」。返回过期条数。"""
-    now = utcnow_iso()
+    """统一清理待审核 / 待发送 / 已跳过的到期回复，跳过人工放行和正在发送的条目。"""
     with get_conn() as conn:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM review_queue WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<?", (now,))]
-        if not ids:
-            return 0
-        marks = ",".join("?" * len(ids))
-        conn.execute(f"UPDATE review_queue SET status='expired', decided_at=? WHERE id IN ({marks})", [now, *ids])
-        conn.execute(
-            "UPDATE target_tweets SET process_status='expired', "
-            "llm_relevance_reason='待审核超时未处理，已过期（可点「选素材」「AI 撰写」重新生成）' "
-            f"WHERE process_status='queued' AND id IN (SELECT target_tweet_id FROM review_queue WHERE id IN ({marks}))", ids)
+        count = expire_queue_items(conn, datetime.now(timezone.utc))
         conn.commit()
-    return len(ids)
+    return count
 
 
 def _safe(fn):
@@ -270,7 +260,7 @@ AUTO_JOBS = {
 }
 ALWAYS_JOBS = {
     "dispatcher": ("发送分发", "每隔 N 秒（可设，默认 60）检查一次「待发送」条目，按各账号的间隔/日上限/活跃时段发出。关掉后只能手动点「触发发送」", "dispatch_auto_enabled"),
-    "scheduled_check": ("定时发帖计划 + 过期清扫 + 监控续跑", "每分钟检查到点的定时发帖计划，生成到任务队列；顺带把超时的待审核条目标过期；监控因限流暂停的到点接着跑。始终开启", None),
+    "scheduled_check": ("定时发帖计划 + 过期清扫 + 监控续跑", "每分钟检查到点的定时发帖计划，生成到任务队列；顺带把到期的待审核 / 待发送 / 已跳过回复标过期；监控因限流暂停的到点接着跑。始终开启", None),
 }
 
 
@@ -373,7 +363,7 @@ def build_scheduler(jobs: Jobs) -> BackgroundScheduler:
     def scheduled_check():
         n = expire_stale()
         if n:
-            log.info("过期清扫：%d 条待审核条目已过期", n)
+            log.info("过期清扫：%d 条未发送回复已过期", n)
         jobs.run_scheduled_posts()
         # 监控上次因 429 / 账号都到限额停下的，到点接着跑（不看自动监控开关：那是用户已经发起的一次运行）
         st = jobs.monitor.resume_if_due()
@@ -403,7 +393,7 @@ def run_startup_recovery(jobs: Jobs) -> list[str]:
     now_dt = datetime.now(timezone.utc)
     n = expire_stale()
     if n:
-        msgs.append(f"过期清理：{n} 条待审条目已标记过期")
+        msgs.append(f"过期清理：{n} 条未发送回复已标记过期")
     with get_conn() as conn:
         # 残留 sending（上次异常退出）：已经拿到 X 的 id 的 → 其实发出去了，标 sent；
         # 没拿到 id 的不能重发（不知道有没有发出去），标失败并提示人工到 X 上确认

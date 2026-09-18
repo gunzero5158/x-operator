@@ -26,7 +26,7 @@ from .. import config
 from ..adapters import factory
 from ..adapters.base import RateLimited, TweetData, XClientError
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
-from .compliance import is_blacklisted
+from .compliance import author_cooldown, is_blacklisted
 from .matcher import MatchEngine
 from .readpool import ReadPool, resume_delay
 
@@ -112,10 +112,7 @@ def precheck(t: TweetData, account_handle: str, max_age_h: int | None = None) ->
             return "blacklisted"
         if conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?", (t.tweet_id,)).fetchone():
             return "already_replied"
-        cooldown_days = config.get_int("cooldown_days", 7)
-        cutoff = to_iso(datetime.now(timezone.utc) - timedelta(days=cooldown_days))
-        if conn.execute("SELECT 1 FROM interactions WHERE author_id=? AND sent_at>=? LIMIT 1",
-                        (t.author_id, cutoff)).fetchone():
+        if author_cooldown(conn, t.author_id):
             return "author_cooldown"
     return None
 

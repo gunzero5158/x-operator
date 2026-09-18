@@ -22,7 +22,7 @@ from ..adapters.base import (AuthExpired, DuplicateContent, MediaError, NetworkE
                              PostResult, RateLimited, TargetNotFound, XClientError)
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from . import media, textlimit
-from .compliance import ComplianceGuard, next_allowed_key
+from .compliance import ComplianceGuard, GuardCode, expire_queue_items, next_allowed_key
 
 log = logging.getLogger("x_operator.dispatcher")
 
@@ -136,7 +136,7 @@ class Dispatcher:
         if not gr.ok:
             if gr.hard:
                 self._set_status(item["id"], "skipped", skip_reason=gr.code.value if gr.code else "guard")
-                return False, f"条目 #{item['id']} 被合规拦截并跳过：{gr.detail}"
+                return False, f"条目 #{item['id']} {'已过期' if gr.code == GuardCode.TARGET_EXPIRED else '已跳过'}：{gr.detail}"
             self._set_status(item["id"], "approved")  # 软违规回置，下轮再试
             return False, gr.detail
 
@@ -152,34 +152,52 @@ class Dispatcher:
             return False, f"条目 #{item['id']} 未发出、已回置待发：{row['error_msg'] or '稍后重试'}"
         return False, f"条目 #{item['id']} 发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
 
-    def send_now(self, item_id: int) -> tuple[bool, str]:
+    def send_now(self, item_id: int, *, force_expired: bool = False,
+                 expected_account_id: int | None = None) -> tuple[bool, str]:
         """「立即发送」：人工指定一条「待发送」条目马上发，不等活跃时段和发送间隔（账号状态、日上限、硬违规照查）。
+        force_expired 用于用户确认过期草稿后直接批准并发送，原子认领，不经过可被后台取走的 approved 中间状态。
         走和自动分发同一把账号锁、同一套发送 / 记账 / 回查逻辑，发完照常推进 next_allowed_at。"""
         with get_conn() as conn:
             item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
             if item is None:
                 return False, "条目不存在"
-            if item["status"] != "approved":
-                return False, "只有「待发送」（已批准）的条目能立即发送"
+            expected_status = "expired" if force_expired else "approved"
+            if item["status"] != expected_status:
+                return False, "条目状态已改变，请刷新后重新确认"
+            if expected_account_id is not None and item["account_id"] != expected_account_id:
+                return False, "发送账号已改变，请刷新后重新确认"
             account = conn.execute("SELECT * FROM accounts WHERE id=?", (item["account_id"],)).fetchone()
+        if account is None:
+            return False, "发送账号不存在，请先放回待审核并更换账号"
         lock = self._account_lock(account["id"])
         if not lock.acquire(blocking=False):
             return False, "该账号正有另一次发送在进行中，稍后再试"
         try:
             now = datetime.now(timezone.utc)
+            if force_expired:
+                if not (item["final_text"] or "").strip():
+                    return False, "文案为空，请先放回待审核并填写文案"
+                if textlimit.over_by(item["final_text"], account):
+                    return False, textlimit.over_message(item["final_text"], account) + "。请先放回待审核修改"
+                claimed, detail = self.guard.claim_expired(item_id, account["id"])
+                if not claimed:
+                    return False, detail
             with get_conn() as conn:
-                cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved'", (item_id,))
-                conn.commit()
-                if cur.rowcount == 0:
-                    return False, "条目状态刚变了（可能已被自动分发拿走），请刷新"
+                if not force_expired:
+                    cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved' AND account_id=?",
+                                       (item_id, account["id"]))
+                    conn.commit()
+                    if cur.rowcount == 0:
+                        return False, "条目状态或账号刚变了（可能已被自动分发拿走），请刷新"
                 item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
+                account = conn.execute("SELECT * FROM accounts WHERE id=?", (item["account_id"],)).fetchone()
             gr = self.guard.check(account, item, now, skip_timing=True)
             if not gr.ok:
                 if gr.hard:
                     self._set_status(item_id, "skipped", skip_reason=gr.code.value if gr.code else "guard")
-                    return False, f"被合规拦截并跳过：{gr.detail}"
+                    return False, f"{'已过期' if gr.code == GuardCode.TARGET_EXPIRED else '已跳过'}：{gr.detail}"
                 self._set_status(item_id, "approved")
-                return False, f"暂不能发：{gr.detail}"
+                return False, f"暂不能发，已回到待发送：{gr.detail}"
             if self.send_item(account, item):
                 with get_conn() as conn:
                     vs = conn.execute("SELECT verify_status FROM review_queue WHERE id=?", (item_id,)).fetchone()["verify_status"]
@@ -372,6 +390,8 @@ class Dispatcher:
                 "UPDATE review_queue SET status=?, skip_reason=COALESCE(?,skip_reason), "
                 "error_msg=COALESCE(?,error_msg), decided_at=? WHERE id=?",
                 (status, skip_reason, error_msg, utcnow_iso(), item_id))
+            if status == "skipped" and skip_reason == GuardCode.TARGET_EXPIRED.value:
+                expire_queue_items(conn, datetime.now(timezone.utc), item_id=item_id)
             conn.commit()
 
     def _retry_or_fail(self, item: sqlite3.Row, err: str) -> None:

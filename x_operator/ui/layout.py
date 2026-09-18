@@ -185,7 +185,7 @@ TARGET_STATUS_LABEL = {
     "queued": "已进任务队列",
     "no_match": "达标但未生成回复",
     "filtered": "已过滤/未达标",
-    "expired": "已过期",
+    "expired": "回复草稿已过期",
 }
 
 QUEUE_STATUS_LABEL = {
