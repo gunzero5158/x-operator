@@ -17,6 +17,7 @@ from ..db.database import get_conn, utcnow_iso
 from ..llm.client import (DEFAULT_TIMEOUT_SEC, SCENE_TIERS, TIER_DEFAULT_MODEL, TIER_LABEL, TIER_SETTING_KEY,
                           TIMEOUT_MAX_SEC, TIMEOUT_MIN_SEC, LLMClient, timeout_seconds)
 from .layout import page_title
+from . import browser_login
 from .layout import confirm, hint, llm_wait, shell, DEFAULT_DISPLAY_TZ, display_tz, display_tz_name, refresh_display_tz
 
 _TZ_OPTIONS = ["Asia/Tokyo", "Asia/Shanghai", "Asia/Taipei", "Asia/Singapore", "UTC",
@@ -360,7 +361,7 @@ _COOKIE_FIELDS = [
     ("ct0", "ct0（32 或 160 位）", True),
 ]
 _PASSWORD_FIELDS = [
-    ("username", "用户名 @handle（不带 @）或登录邮箱", False),
+    ("username", "用户名（留空使用上方 handle；也可填登录邮箱）", False),
     ("password", "登录密码", True),
     ("totp_secret", "两步验证 TOTP 密钥（开了 2FA 必填）", True),
     ("email", "邮箱（选填：X 要求二次确认身份时用）", False),
@@ -387,19 +388,20 @@ _COOKIE_GUIDE = """
 
 注意：
 - **不要在浏览器里点「退出登录」**，一退出 auth_token 就作废；直接关掉标签页即可。
-- Cookie 一般能用几个月；失效时「测试连接」会提示，重新复制一次即可。如果同时填了方式二，会自动重新登录。
+- Cookie 有效期由 X 决定；失效时重新复制，或主动点击「浏览器登录」更新。
 - 用 Firefox 的话：F12 → **存储（Storage）** 标签 → Cookie → https://x.com，其余相同。
 
-**方式二：用户名 + 密码 + 两步验证密钥（自动登录，Cookie 失效时也能自己续）**
+**方式二：用户名 + 密码 + 两步验证密钥（可选浏览器辅助登录）**
 
 - 「用户名」填 @handle（不带 @）或登录邮箱；「密码」填登录密码。
 - 账号开了两步验证（2FA）的，「TOTP 密钥」**必填**：就是当初在 X「设置 → 安全性 → 两步验证 → 身份验证应用」
   绑定验证器时给你的那串 **16~32 位字母数字密钥**（扫码页面上一般有「无法扫码？手动输入密钥」）。
   不是验证器 App 里每 30 秒变化的 6 位数字。
-- 如果 X 登录时额外弹「请输入邮箱/手机号确认身份」，把「邮箱」也填上就能自动过。
-- 本工具**不支持邮箱验证码**：如果 X 坚持要邮箱验证码，会弹出明确提示——先在浏览器登录一次该账号完成验证，
-  之后再试，或改用方式一。
+- 点「保存并登录」，首次使用时提示下载专用 Chromium；Cookie 登录不需要下载。
+- 浏览器窗口打开在运行服务的电脑上。正常步骤自动填写；遇到人机验证、邮箱验证码或未知步骤时，
+  自动操作暂停，请在窗口中完成登录，也可以在「登录任务」跳过当前账号。
 - 登录成功后会自动把 Cookie 存到方式一的两个框里，之后都走 Cookie，不会反复登录。
+- Cookie 失效时请主动点击「浏览器登录」；后台任务不会突然打开浏览器。批量导入也使用同一套流程。
 
 **代理**：留空时自动使用电脑当前的系统代理（Windows「设置 → 网络和 Internet → 代理」里开着的那个，
 或环境变量 HTTP_PROXY）。想指定就填 `http://127.0.0.1:7890` 这种；填 `direct` 表示强制直连。
@@ -425,7 +427,7 @@ _OFFICIAL_GUIDE = """
 def _accounts_panel():
     ui.label("发帖 / 回复账号管理").classes("font-semibold")
     hint("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
-             "弹窗里有手把手的获取步骤。填好后务必点「测试连接」。", after_row=True)
+             "密码登录可按需下载专用浏览器；登录成功后点「测试连接」验证工具的接口连接。", after_row=True)
     hint("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
              "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可改成只用指定的一个或几个账号、或排除某些账号，任务队列里每条也能临时改。"
              "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
@@ -433,9 +435,10 @@ def _accounts_panel():
     sys_proxy = detect_system_proxy()
     hint("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
              "。账号里代理留空时自动使用它。", after_row=True)
+    login_toolbar = ui.column().classes("w-full")
     body = ui.column().classes("w-full gap-2")
 
-    def save_account(data: dict, creds: dict, existing_id: int | None = None) -> bool:
+    def save_account(data: dict, creds: dict, existing_id: int | None = None) -> int | None:
         handle = data["handle"].lstrip("@").strip()
         if not handle:
             ui.notify("请填写 handle", type="negative"); return False
@@ -463,7 +466,7 @@ def _accounts_panel():
                          data["min_interval_sec"], data["max_interval_sec"], data["active_start"], data["active_end"],
                          data["timezone"], data["note"], existing_id))
                 else:
-                    conn.execute(
+                    inserted = conn.execute(
                         "INSERT INTO accounts(handle, display_name, access_type, is_primary, is_premium, credentials, "
                         "daily_post_limit, daily_reply_limit, min_interval_sec, max_interval_sec, "
                         "active_hours_start, active_hours_end, timezone, note, created_at) "
@@ -472,12 +475,15 @@ def _accounts_panel():
                          creds_json, data["daily_post_limit"], data["daily_reply_limit"],
                          data["min_interval_sec"], data["max_interval_sec"], data["active_start"], data["active_end"],
                          data["timezone"], data["note"], utcnow_iso()))
+                    existing_id = inserted.lastrowid
+                if data["access_type"] == "unofficial" and not (creds.get("auth_token") and creds.get("ct0")):
+                    conn.execute("UPDATE accounts SET status='auth_error' WHERE id=? AND status='active'", (existing_id,))
                 conn.commit()
         except sqlite3.IntegrityError as e:
             ui.notify(f"保存失败：handle 可能重复或违反约束（{e}）", type="negative"); return False
         factory.invalidate()
         ui.notify("这个账号之前删除过，已恢复并接上原来的发送记录" if revived else "已保存", type="positive")
-        return True
+        return existing_id
 
     def open_dialog(existing: sqlite3.Row | None = None):
         creds = parse_credentials(existing["credentials"]) if existing else {}
@@ -489,7 +495,7 @@ def _accounts_panel():
                 dname = ui.input("显示名", value=existing["display_name"] if existing else "") \
                     .classes("flex-1").props("outlined dense")
             atype = ui.select({"official": "官方 API（可作主号，读写按量计费）", "unofficial": "非官方 twifork（仅小号，Cookie 登录）"},
-                              value=existing["access_type"] if existing else "official", label="通道类型") \
+                              value=existing["access_type"] if existing else "unofficial", label="通道类型") \
                 .classes("w-full").props("outlined dense")
             primary = ui.switch("设为主号", value=bool(existing["is_primary"]) if existing else False)
             premium = ui.switch("已订阅 X Premium（会员）", value=bool(existing["is_premium"]) if existing else False)
@@ -499,7 +505,7 @@ def _accounts_panel():
 
             # ---- 凭据区：按通道类型显示不同字段 ----
             ui.separator()
-            ui.label("凭据（保存在本机数据库 data/x_operator.db，不会上传）").classes("font-semibold text-sm")
+            ui.label("凭据（保存在本机；登录及请求时发送给 X）").classes("font-semibold text-sm")
             cred_inputs: dict[str, ui.input] = {}
             official_box = ui.column().classes("w-full gap-1")
             with official_box:
@@ -529,7 +535,7 @@ def _accounts_panel():
                 pw_box = ui.card().classes("w-full gap-1 border-2 border-amber-500 bg-amber-50/40")
                 with pw_box:
                     ui.label("方式二：账号密码 + 两步验证密钥").classes("font-semibold text-amber-700")
-                    ui.label("程序自己去登录，Cookie 失效时也能自动续。开了两步验证的账号必须填 TOTP 密钥；X 要邮箱验证码的话这条路走不通，改用方式一。"
+                    ui.label("按需下载专用 Chromium，打开窗口辅助登录并保存 Cookie。两步验证填 TOTP 密钥；遇到额外验证时可在浏览器里接手。"
                              ).classes("text-xs text-gray-600")
                     for k, label, secret in _PASSWORD_FIELDS:
                         cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
@@ -540,7 +546,7 @@ def _accounts_panel():
                     cookie_box.set_visibility(method.value == "cookie")
                     pw_box.set_visibility(method.value != "cookie")
                     if method.value == "cookie" and has_pw:
-                        other_note.text = "（方式二的账号密码也已保存：Cookie 失效时会自动用它重新登录）"
+                        other_note.text = "（账号密码已保存，Cookie 失效时可主动点击「浏览器登录」更新）"
                     elif method.value != "cookie" and has_cookie:
                         other_note.text = "（方式一的 Cookie 也已保存，会优先用 Cookie；登录成功后 Cookie 会自动更新）"
                     else:
@@ -604,13 +610,18 @@ def _accounts_panel():
 
             def collect_creds():
                 keys = [k for k, _, _ in (_OFFICIAL_FIELDS if atype.value == "official" else _UNOFFICIAL_FIELDS)]
-                return {k: (cred_inputs[k].value or "").strip() for k in keys}
+                values = {k: (cred_inputs[k].value or "") if k == "password" else (cred_inputs[k].value or "").strip() for k in keys}
+                if atype.value == "unofficial" and method.value == "password" and not values.get("username"):
+                    values["username"] = (handle.value or "").strip().lstrip("@")
+                return values
 
-            def do_save():
+            def do_save(login=False):
                 for hhmm in (a_start.value, a_end.value):
                     if not _valid_hhmm(hhmm):
                         ui.notify("活跃时段格式应为 HH:MM", type="negative"); return
                 creds_now = collect_creds()
+                if login and (atype.value != "unofficial" or not creds_now.get("username") or not creds_now.get("password")):
+                    ui.notify("请填写用户名和密码；启用两步验证的账号还需填写 TOTP 密钥", type="warning"); return
                 if atype.value != "official":
                     problem = validate_unofficial_credentials(creds_now)
                     if problem:
@@ -621,13 +632,18 @@ def _accounts_panel():
                     if method.value == "cookie" and not creds_now.get("auth_token") and not creds_now.get("username"):
                         ui.notify("方式一要把 auth_token 和 ct0 两个都粘进来（或切到方式二填账号密码）。现在先保存也行，之后再补",
                                   type="warning", multi_line=True)
-                ok = save_account(collect(), creds_now, existing["id"] if existing else None)
-                if ok:
+                aid = save_account(collect(), creds_now, existing["id"] if existing else None)
+                if aid:
                     dlg.close(); render()
+                    if login:
+                        browser_login.login_accounts([aid], render)
 
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=dlg.close).props("flat")
-                ui.button("保存", on_click=do_save).props("color=primary")
+                ui.button("保存", on_click=lambda: do_save()).props("outline")
+                login_button = ui.button("保存并登录", icon="login", on_click=lambda: do_save(True))
+                login_button.bind_visibility_from(method, "value", backward=lambda value: value == "password")
+                login_button.bind_enabled_from(atype, "value", backward=lambda value: value == "unofficial")
         dlg.open()
 
     def set_primary(aid: int):
@@ -665,7 +681,12 @@ def _accounts_panel():
         if not ok:
             ui.notify(f"未填凭据（{why}）。点「编辑 / 填凭据」补上。", type="warning", multi_line=True, close_button=True)
             return
-        ui.notify("正在连接 X…（密码登录可能要 10~30 秒）", type="info")
+        if a["access_type"] == "unofficial":
+            creds = parse_credentials(a["credentials"])
+            if not (creds.get("auth_token") and creds.get("ct0")):
+                browser_login.login_accounts([a["id"]], render)
+                return
+        ui.notify("正在使用已保存的凭据连接 X…", type="info")
 
         def _probe():
             client = factory.get_real_client(a)
@@ -702,6 +723,9 @@ def _accounts_panel():
                          "重新添加同名账号会接上原来的记录。").classes("text-xs text-gray-400")
             for a in rows:
                 cred_ok, cred_why = factory.credential_status(a)
+                acc_creds = parse_credentials(a["credentials"])
+                needs_login = a["access_type"] == "unofficial" and bool(acc_creds.get("password")) and not (
+                    acc_creds.get("auth_token") and acc_creds.get("ct0"))
                 with ui.card().classes("w-full"):
                     with ui.row().classes("items-center gap-2"):
                         ui.label(f"@{a['handle']}").classes("font-semibold")
@@ -712,7 +736,7 @@ def _accounts_panel():
                             ui.badge("主号 ★", color=None).classes("bg-amber-500")
                         ui.badge("Premium 会员" if a["is_premium"] else "免费账号 · 280 单位", color=None).classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
                             .tooltip("会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写")
-                        ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "凭据失效"}.get(a["status"], a["status"]), color=None) \
+                        ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "等待登录" if needs_login else "凭据失效"}.get(a["status"], a["status"]), color=None) \
                             .classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
                         ui.badge("凭据已填" if cred_ok else "未填凭据", color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
                     ui.label(f"日发帖 {a['daily_post_limit']} / 日回复 {a['daily_reply_limit']} · "
@@ -722,6 +746,15 @@ def _accounts_panel():
                     with ui.row().classes("gap-1 flex-wrap"):
                         ui.button("测试连接", icon="wifi_tethering", on_click=lambda aa=a: test_conn(aa)).props("flat dense")
                         ui.button("编辑 / 填凭据", icon="edit", on_click=lambda aa=a: open_dialog(aa)).props("flat dense")
+                        if a["access_type"] == "unofficial":
+                            def browser_relogin(aa=a):
+                                creds = parse_credentials(aa["credentials"])
+                                if not (creds.get("username") and creds.get("password")):
+                                    open_dialog(aa)
+                                    ui.notify("请切换到账号密码方式，填写后点击「保存并登录」", type="info")
+                                    return
+                                browser_login.login_accounts([aa["id"]], render)
+                            ui.button("浏览器登录", icon="login", on_click=browser_relogin).props("flat dense")
                         if not a["is_primary"] and a["access_type"] == "official":
                             ui.button("设为主号", on_click=lambda aid=a["id"]: set_primary(aid)).props("flat dense")
                         if a["status"] == "active":
@@ -734,6 +767,8 @@ def _accounts_panel():
                                 .props("flat dense" + ("" if a["status"] == "active" else " color=orange")) \
                                 .tooltip("打开任务队列、只看这个账号的待审核 / 待发送 / 失败条目，可批量转给其他账号或删除")
                         ui.button("删除", icon="delete", on_click=lambda aa=a: del_account(aa)).props("flat dense color=negative")
+    with login_toolbar:
+        browser_login.toolbar(render)
     render()
 
 

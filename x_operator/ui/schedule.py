@@ -242,6 +242,8 @@ def register(jobs) -> None:
             hint(HINTS["auto"])
 
             def do_save():
+                if not mf.ready():
+                    return
                 m = mode.value
                 if m == "fixed" and not mat.value:
                     ui.notify("固定素材模式要选一条发帖素材", type="negative"); return

@@ -2,10 +2,10 @@
 
 按 account.access_type 返回真实适配器，凭据来自 accounts.credentials（JSON）：
 - official   → OfficialXClient（tweepy，X API v2）
-- unofficial → UnofficialXClient（twifork/twikit，Cookie 或 密码+TOTP 登录）
+- unofficial → UnofficialXClient（twifork/twikit，使用手填或浏览器辅助登录取得的 Cookie）
 
-get_client() 带缓存（同一账号复用连接/登录态），同一账号的首次创建加锁——密码登录要十几秒，
-UI 线程和调度线程同时来的话不会各登一次；get_real_client() 不走缓存，给「测试连接」用。
+get_client() 带缓存（同一账号复用连接/登录态），同一账号的首次创建加锁，避免 UI 线程和调度线程
+同时创建重复客户端；get_real_client() 不走缓存，给「测试连接」用。
 主号禁 unofficial 的三重保险之一在此：is_primary 且 unofficial 直接 ValueError。
 
 仅供自动化测试：环境变量 X_OPERATOR_MOCK=1 时返回 MockXClient（UI 里没有任何开关）。

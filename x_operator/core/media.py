@@ -12,6 +12,7 @@ import hashlib
 import json
 import random
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ ALL_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
 
 MAX_ITEMS = 4
 POOL_MAX_ITEMS = 30   # 定时发帖「附件素材池」最多放多少个文件（每次发帖只随机挑 1 个）
+_UPLOAD_LOCK = threading.Lock()
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 GIF_MAX_BYTES = 15 * 1024 * 1024
 VIDEO_MAX_BYTES = 512 * 1024 * 1024
@@ -177,15 +179,17 @@ def find_same_content(path: Path) -> str | None:
 def commit_upload(tmp: Path, original_name: str) -> tuple[str, bool]:
     """把临时上传文件转正：内容和已有附件相同 → 删掉临时文件、返回已有的相对路径 (rel, True)；
     否则移到正式位置 YYYYMM/uuid.ext，返回 (rel, False)。"""
-    existing = find_same_content(tmp)
-    if existing:
-        tmp.unlink(missing_ok=True)
-        return existing, True
-    rel = new_rel_path(original_name)
-    dst = abs_path(rel)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp.replace(dst)
-    return rel, False
+    # 上传查重在工作线程执行；跨编辑窗口也不能同时写入相同内容的两份文件。
+    with _UPLOAD_LOCK:
+        existing = find_same_content(tmp)
+        if existing:
+            tmp.unlink(missing_ok=True)
+            return existing, True
+        rel = new_rel_path(original_name)
+        dst = abs_path(rel)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp.replace(dst)
+        return rel, False
 
 
 def describe(files: list[str]) -> str:

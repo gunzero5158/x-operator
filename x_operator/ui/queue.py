@@ -688,6 +688,8 @@ async def _attach_dialog(initial: list[str]):
         mf = MediaField(initial, note="发送时用这条的发送账号上传。")
 
         def ok():
+            if not mf.ready():
+                return
             err = media.check_set(mf.files)
             if err:
                 ui.notify(err, type="negative"); return

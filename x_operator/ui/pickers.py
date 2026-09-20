@@ -230,6 +230,8 @@ def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
 
 def reply_mode_invalid(mode, brief, media_mode=None, mf=None, acc: ReplyAccountField | None = None) -> str:
     """保存前校验，返回中文错误（空串 = 没问题）。"""
+    if mf is not None and mf.is_uploading:
+        return "附件还在上传或保存，请等上传完成后再保存"
     if acc is not None and acc.invalid():
         return acc.invalid()
     if mode.value == "ai_write" and not (brief.value or "").strip():
@@ -326,9 +328,12 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
             must_lbl.text = ("将强制包含：" + "、".join(m)) if m else "（没检测到链接或 @账号，正文里不会带任何链接/@）"
         brief.on("update:model-value", lambda e: upd()); upd()
         mf = MediaField([], label="随这条回复一起发的配图 / 视频（选填）", note="AI 只写文字，附件原样带上。")
+        def generate():
+            if mf.ready():
+                dlg.submit((brief.value or "", list(mf.files)))
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
-            ui.button("生成并进待审核", icon="auto_awesome", on_click=lambda: dlg.submit((brief.value or "", list(mf.files)))).props("color=primary")
+            ui.button("生成并进待审核", icon="auto_awesome", on_click=generate).props("color=primary")
     dlg.open()
     res = await dlg
     if res is None:

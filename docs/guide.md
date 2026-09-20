@@ -37,10 +37,12 @@ uv run python -m x_operator.main
 - **非官方通道**（仅小号），弹窗里用「方式一 / 方式二」切换按钮**二选一**填（绿框 = Cookie，黄框 = 密码登录，不用两种都填）：
   - 方式一 **Cookie**：Chrome/Edge 登录小号 → F12 → Application（应用）→ Cookies → https://x.com →
     复制 `auth_token`（40 位）和 `ct0`（32 或 160 位）的 **Value** 值。保存时会做格式体检，复制错列会直接提示。
-  - 方式二 **用户名 + 密码 + 两步验证 TOTP 密钥**：程序自己走登录流程（自研，不用 twikit 自带的、会卡在
-    键盘输入上的那套），登录成功后自动把 Cookie 存回账号；Cookie 失效时自动重新登录。
-    支持：密码、TOTP 两步验证、X 要求补邮箱确认身份（填了「邮箱」就自动过）。
-    **不支持邮箱验证码**——遇到会弹出明确提示，先在浏览器登录一次完成验证再试，或改用方式一。
+  - 方式二 **用户名 + 密码 + 两步验证 TOTP 密钥**：点击「保存并登录」，通过可选的专用 Chromium 完成网页登录，
+    核对登录账号与 handle 一致后保存 Cookie。首次使用会提示下载浏览器，只有点击下载才安装；Cookie 登录不下载浏览器。
+    TOTP 填绑定验证器时的完整密钥，不是六位动态验证码。遇到人机验证、邮箱验证码或未知步骤时会暂停自动输入，
+    请在弹出的浏览器窗口中手动完成；也可跳过此账号，让下一账号继续。每个账号最多等待 10 分钟。
+    窗口打开在**运行服务的电脑**上，需有桌面环境；不使用日常 Chrome 个人资料，每次登录使用隔离会话。
+    Cookie 失效后请主动点击账号卡片的「浏览器登录」或重新粘贴 Cookie，后台不会自动弹浏览器。
 - **代理**：留空自动使用系统当前代理（Windows 设置里的代理 / HTTP(S)_PROXY 环境变量），填 `direct` 强制直连，
   也可填 `http://127.0.0.1:7890` 指定。「测试连接」成功时会告诉你走的是哪个代理。
 - 账号、LLM key、规则、素材正文、模板和抓取记录存在本机 `data/x_operator.db`，附件在 `data/media/`；`data/` 已在 .gitignore。
@@ -50,6 +52,23 @@ uv run python -m x_operator.main
   **主贴和回复各自一套冷却**（`accounts.next_allowed_post_at` / `next_allowed_at`）：发了一条回复不会让主贴等，反之亦然；
   同一账号主贴和回复都到点时先发主贴（定时发帖才能大致准点）。
 - **「已订阅 X Premium（会员）」开关**：决定这个账号的推文长度上限（见下面「推文长度」）。请如实勾选。
+
+### 批量导入与浏览器登录任务
+
+设置 → 账号 → **批量导入**，粘贴每行一个账号的列表，先「检查并预览」，再「导入并登录」。
+格式为 `用户名,密码,TOTP密钥,邮箱,代理`，前两列必填，后三列可留空；支持 CSV、制表符和 `----` 分隔。
+CSV 可带 `username,password,totp_secret,email,proxy` 表头；密码含逗号时用 CSV 双引号包住。
+首列必须为账号 handle，每批最多 200 个。格式错误或本批内重复时整批不导入；数据库中已存在的同名账号（含已删除账号）跳过，不覆盖凭据。
+
+导入后的账号先处于待登录状态，成功取得 Cookie 后启用。单账号和批量使用同一登录队列，一次一个浏览器窗口。
+在 **登录任务** 查看各账号状态，可跳过当前账号、取消整批或重试未完成账号；关闭面板、切换页面不会中断任务。
+如在下载前关闭提示，或服务重启，使用 **批量登录待处理账号** 重新选择尚未完成登录的账号。
+登录任务及进度记录仅保留在当前服务进程，重启不会自动重试；已保存的账号和 Cookie 不丢失。
+
+**浏览器组件** 入口可查看安装状态、下载进度和重新下载。组件下载使用系统代理，登录使用各账号配置的代理。
+Chromium 安装在数据目录下的 `browser-login/chromium/`；升级项目后如果控制库需要新的浏览器版本，会再次提示下载。
+下载耗时受网络影响，超过 20 分钟会停止，可重试。Linux 还需要桌面环境和 Chromium 的系统运行库。
+网页登录成功只证明该账号完成了网页登录；请再点 **测试连接** 核对工具的 X 接口连接，接口权限及发帖能力仍以实际请求为准。
 
 ## 界面与免责声明
 
@@ -239,6 +258,8 @@ uv run python -m x_operator.main
 
 视频附件在素材库、附件编辑区和任务队列中显示画面缩略图，点击可打开视频预览。已有视频无需重新上传：首次显示时在后台生成，后续读取本地缓存。缩略图保存在 `data/thumbnails/`，不修改原视频；不能解码时显示「预览不可用」，仍可尝试打开原视频。首次安装或更新会自动安装截帧依赖，无需另装 FFmpeg。
 
+上传支持一次选择多个文件。文件传输完成后会逐个保存、查重并加入附件，界面显示已添加数量与上限；超限或保存失败会提示文件名和原因，不会取消同批其他文件。附件仍在上传或保存时不能提交表单，以免保存到不完整的列表。超过 4 个文件应先选择「素材池」模式（总数最多 30 个），等全部附件出现后再保存。
+
 - **在哪加**：素材库「新建 / 编辑素材」（附件跟着素材走：自动匹配、手动选素材、素材池轮流、固定素材都会带上）；
   抓取记录「AI 撰写」弹窗（AI 只写文字，附件原样带上）；
   **搜索规则 / 监控推主选了「AI 按要求创作」时**——弹窗「回复方式」区里的「配图 / 视频怎么带」，
@@ -389,7 +410,7 @@ uv run python -m x_operator.main
 以下脚本供开发时按需使用，离线模拟、页面检查或样例截图都不能证明真实 X / LLM 接口可用。真实调用需要可用账号、网络与网关，并以实际返回和队列记录为准。
 
 ```bash
-uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录流程分支、代理、校验
+uv run python scripts/smoke_test.py   # 离线冒烟：迁移、全链路、多语言搜索、登录入口、代理、校验（不代表真实 X 验证）
 bash scripts/serve_check.sh           # 起服务检查所有页面 200 且无异常日志
 # 弹窗冒烟（NiceGUI User 模拟器，临时装 pytest、不改项目依赖）：素材语言自动判断（含简繁中文）、附件区与素材池切换、队列附件、显示时区、账号方式一二切换、规则读图开关、抓取账号池面板与仪表盘、规则 AI 创作附件、规则回复账号名单、任务队列按账号筛选与批量转移、删除账号（拦截 / 软删除 / 同名接回）、监控推主观看量区间
 uv run --with pytest --with pytest-asyncio pytest scripts/ui_dialog_check.py -q -o asyncio_mode=auto -o main_file= -p no:cacheprovider
@@ -403,7 +424,7 @@ uv run --with playwright python scripts/shot_pages.py /tmp/shots
 ```
 x_operator/
   db/         schema.py(DDL v24) database.py(连接/自动迁移) seed.py(默认设置 + 旧演示数据清理)
-  adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork 非官方 + 自研登录 + 系统代理) factory.py mock.py(仅测试)
+  adapters/   base.py(异常/数据类/抽象基类) real.py(tweepy 官方 + twifork Cookie 通道 + 系统代理) factory.py mock.py(仅测试)
   llm/        prompts.py client.py(网关调用+启发式兜底)
   core/       compliance.py matcher.py monitor.py search.py dispatcher.py scheduler.py schedule_calc.py budget.py readpool.py(抓取账号池/限额/429 暂停) accounts.py(回复账号轮流/删除账号) media.py(附件规则/存储/内容去重/素材池挑选/发送前上传) langdetect.py(语言自动判断/简繁中文区分) textlimit.py(X 计数单位/超限 AI 缩写)
   ui/         layout.py(公共页面框架/显示时区) theme.py + theme.css(统一样式) disclaimer.py(页脚声明)

@@ -13,6 +13,9 @@ dependencies = [
     "tweepy>=4.14,<5",
     "twifork>=2.4.0",
     "imageio-ffmpeg>=0.6,<0.7",
+    # 仅安装控制库；Chromium 由用户在账号页按需下载。
+    "playwright>=1.56,<2",
+    "pyotp>=2.9,<3",
 ]
 
 [build-system]

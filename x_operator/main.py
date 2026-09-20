@@ -12,7 +12,7 @@ import tomllib
 from nicegui import app, ui
 from fastapi.responses import FileResponse, Response
 
-from .core import media, thumbnails
+from .core import browser_login, media, thumbnails
 from .core.scheduler import Jobs, build_scheduler, run_startup_recovery
 from .db.database import init_db
 from .ui import (dashboard, materials, queue, rules, schedule, settings_page,
@@ -61,6 +61,7 @@ def main() -> None:
     db_path = data_dir / "x_operator.db"
     init_db(db_path, setting_overrides=conf.get("defaults") or {})
     log.info("数据库就绪：%s", db_path)
+    log.info("浏览器辅助登录模块已加载；Chromium 仅在账号页按需下载")
     # 附件（配图/视频）存在 data/media/，页面里预览用
     app.add_static_files("/media", str(media.media_dir()))
 
@@ -83,6 +84,7 @@ def main() -> None:
     scheduler = build_scheduler(jobs)
     scheduler.start()
     app.on_shutdown(lambda: scheduler.shutdown(wait=False))
+    app.on_shutdown(browser_login.shutdown)
 
     if host not in ("127.0.0.1", "localhost", "::1"):
         log.warning("正在监听 %s：页面没有登录保护，同一网络里的任何人都能看到账号凭据并操作发送！", host)

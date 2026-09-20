@@ -1,7 +1,7 @@
 """离线冒烟测试（不联网）：uv run python scripts/smoke_test.py
 
 覆盖：v2 旧库升级清演示数据 / 新库干净 / 全链路（X_OPERATOR_MOCK=1 走测试用 Mock 适配器）/
-搜索多语言与过滤原因 / 密码+TOTP 登录流程各分支模拟 / 系统代理与凭据格式校验。
+搜索多语言与过滤原因 / Cookie 登录入口校验（真实浏览器登录需另行验证） / 系统代理与凭据格式校验。
 """
 import asyncio  # noqa: F401
 import json
@@ -219,93 +219,19 @@ with get_conn() as conn:
 m3 = jobs.monitor.run_once(); assert m3.tweets_fetched == 3, m3.as_msg()  # Mock 推文都在几分钟内，1 小时窗内全保留
 print("[3m] 监控首次回溯时间窗 OK")
 
-# ---------- 4. 登录流程离线模拟 ----------
+# ---------- 4. 登录入口（不模拟已退役的 LoginFlow） ----------
 from x_operator.adapters.real import (UnofficialXClient, validate_unofficial_credentials,  # noqa: E402
                                       resolve_proxy, detect_system_proxy, OfficialXClient)
 from x_operator.adapters.base import AuthExpired  # noqa: E402
-import pyotp  # noqa: E402
 
-
-class FakeV11:
-    def __init__(self, script): self.script = script; self.submitted = []
-
-    async def onboarding_task(self, guest_token, token, subtask_inputs, **kw):
-        sid = subtask_inputs[0]["subtask_id"] if subtask_inputs else "init"
-        self.submitted.append(subtask_inputs[0] if subtask_inputs else {"subtask_id": "init"})
-        nxt = self.script.get(sid)
-        if nxt is None:
-            return ({"flow_token": "t", "subtasks": []}, None)
-        sub = nxt if isinstance(nxt, dict) else {"subtask_id": nxt}
-        return ({"flow_token": "t", "subtasks": [sub]}, None)
-
-    async def sso_init(self, p, g): pass
-
-
-class FakeHttp:
-    def __init__(self): self.cookies = {}
-
-
-class FakeClient:
-    def __init__(self, script, cookies):
-        self.v11 = FakeV11(script); self.http = FakeHttp(); self._c = cookies; self._user_id = None
-
-    async def _get_guest_token(self): return "g"
-
-    async def _ui_metrics(self): raise RuntimeError("no js")
-
-    def get_cookies(self): return self._c
-
-
-BASE = {"init": "LoginJsInstrumentationSubtask", "LoginJsInstrumentationSubtask": "LoginEnterUserIdentifierSSO",
-        "LoginEnterUserIdentifierSSO": "LoginEnterPassword"}
-saved = {}
-
-
-def mk(script, cookies, creds):
-    cli = UnofficialXClient(credentials=dict(creds), on_cookies_refreshed=lambda ck: saved.update(ck))
-    cli._client = FakeClient(script, cookies)
-    return cli
-
-
-CREDS = {"username": "u1", "password": "pw", "totp_secret": "jbsw y3dp ehpk 3pxp"}
-cli = mk({**BASE, "LoginEnterPassword": "LoginTwoFactorAuthChallenge", "LoginTwoFactorAuthChallenge": "AccountDuplicationCheck",
-          "AccountDuplicationCheck": "LoginSuccessSubtask"}, {"auth_token": "c" * 40, "ct0": "d" * 32}, CREDS)
-cli._password_login()
-sub = {s["subtask_id"]: s for s in cli._client.v11.submitted}
-code = sub["LoginTwoFactorAuthChallenge"]["enter_text"]["text"]
-assert code == pyotp.TOTP("JBSWY3DPEHPK3PXP").now() and len(code) == 6, code
-assert cli._logged_in and cli.creds["auth_token"] == "c" * 40 and saved.get("ct0") == "d" * 32
-print("[4a] 密码+TOTP 登录模拟 OK：TOTP 码正确、Cookie 回写", code)
-cli = mk({**BASE, "LoginEnterUserIdentifierSSO": "LoginEnterAlternateIdentifierSubtask", "LoginEnterAlternateIdentifierSubtask": "LoginEnterPassword",
-          "LoginEnterPassword": "LoginSuccessSubtask"}, {"auth_token": "c" * 40, "ct0": "d" * 32}, {**CREDS, "email": "me@x.com"})
-cli._password_login(); assert cli._logged_in
-sub = {s["subtask_id"]: s for s in cli._client.v11.submitted}; assert sub["LoginEnterAlternateIdentifierSubtask"]["enter_text"]["text"] == "me@x.com"
-print("[4b] 邮箱二次确认自动应答 OK")
-cli = mk({**BASE, "LoginEnterUserIdentifierSSO": "LoginEnterAlternateIdentifierSubtask"}, {}, CREDS)
+# 密码凭据不能让后台任务静默打开浏览器或回退到旧 HTTP 登录流程。
+cli = UnofficialXClient(credentials={"username": "u1", "password": "pw"})
 try:
-    cli._password_login(); raise SystemExit("应报错")
+    cli._ensure_login()
+    raise AssertionError("没有 Cookie 时应要求用户主动登录")
 except AuthExpired as e:
-    assert "邮箱" in str(e); print("[4c] 缺邮箱提示 OK:", str(e)[:40])
-cli = mk({**BASE, "LoginEnterPassword": {"subtask_id": "LoginAcid", "enter_text": {"secondary_text": {"text": "Check your email"}}}}, {}, CREDS)
-try:
-    cli._password_login(); raise SystemExit("应报错")
-except AuthExpired as e:
-    assert "验证码" in str(e) and "Check your email" in str(e); print("[4d] 邮箱验证码明确提示 OK:", str(e)[:50])
-cli = mk({**BASE, "LoginEnterPassword": {"subtask_id": "DenyLoginSubtask", "cta": {"secondary_text": {"text": "Suspicious login"}}}}, {}, CREDS)
-try:
-    cli._password_login(); raise SystemExit("应报错")
-except AuthExpired as e:
-    assert "Suspicious login" in str(e); print("[4e] 拒绝登录提示 OK")
-cli = mk({**BASE, "LoginEnterPassword": "LoginTwoFactorAuthChallenge"}, {}, {"username": "u1", "password": "pw"})
-try:
-    cli._password_login(); raise SystemExit("应报错")
-except AuthExpired as e:
-    assert "TOTP" in str(e); print("[4f] 缺 TOTP 密钥提示 OK")
-cli = mk({**BASE, "LoginEnterPassword": "LoginSuccessSubtask"}, {}, CREDS)
-try:
-    cli._password_login(); raise SystemExit("应报错")
-except AuthExpired as e:
-    assert "Cookie" in str(e); print("[4g] 无 Cookie 下发提示 OK")
+    assert "浏览器登录" in str(e)
+print("[4] 缺少 Cookie 时提示主动浏览器登录；此检查不证明真实 X 登录成功")
 
 # ---------- 5. 代理与格式校验 ----------
 os.environ["HTTPS_PROXY"] = "127.0.0.1:7890"; os.environ.pop("HTTP_PROXY", None); os.environ.pop("ALL_PROXY", None)

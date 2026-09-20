@@ -27,8 +27,8 @@ class RateLimited(XClientError):
 
 
 class AuthExpired(XClientError):
-    """401/凭据失效/cookies 过期。非官方通道填了账号密码时适配器内部会重新登录一次；
-    仍失败才抛出，捕获方将账号置 auth_error，不再重试。"""
+    """401/凭据失效/cookies 过期。捕获方将账号置 auth_error，不再重试。
+    用户主动通过浏览器辅助登录或更新 Cookie 恢复，后台不自动启动浏览器。"""
 
 
 class DuplicateContent(XClientError):

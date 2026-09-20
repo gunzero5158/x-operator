@@ -261,6 +261,8 @@ def register(jobs) -> None:
                             note="这条素材被用来回复或发帖时，附件会一起发出去。")
 
             def do_save():
+                if not mf.ready():
+                    return
                 if not text.value.strip():
                     ui.notify("正文不能为空", type="negative"); return
                 final_lang = resolve_lang(lang.value, text.value)
