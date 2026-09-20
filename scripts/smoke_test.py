@@ -368,7 +368,7 @@ with get_conn() as conn:
     row = conn.execute("SELECT status, sent_tweet_id FROM review_queue WHERE id=?", (qid3,)).fetchone()
     na = conn.execute("SELECT next_allowed_at FROM accounts WHERE id=?", (acc["id"],)).fetchone()["next_allowed_at"]
 assert row["status"] == "sent" and row["sent_tweet_id"] and na, (dict(row), na)   # 测试账号间隔为 0，next_allowed_at = 发送时刻
-ok, msg = jobs.dispatcher.send_now(qid3); assert not ok and "待发送" in msg, (ok, msg)
+ok, msg = jobs.dispatcher.send_now(qid3); assert not ok and "状态已改变" in msg, (ok, msg)
 with get_conn() as conn:
     conn.execute("UPDATE accounts SET next_allowed_at=NULL, active_hours_start='00:00', active_hours_end='00:00' WHERE id=?", (acc["id"],)); conn.commit()
 print("[6d2] 立即发送突破时段 / 间隔 OK")
