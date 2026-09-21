@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 
+from .i18n import Labels, t as _tr
+
 from nicegui import run, ui
 
 from ..core import media
-from ..core.langdetect import lang_name, material_lang_tiers
+from ..core.langdetect import lang_name as source_lang_name, material_lang_tiers
 from ..db.database import get_conn, utcnow_iso
 from ..core.accounts import REPLY_ACCOUNT_MODE_LABEL, account_options, reply_account_setting
 from ..core.matcher import REPLY_MODE_LABEL, extract_must_include
@@ -47,12 +49,12 @@ def _bump_template(tid: int) -> None:
 def template_controls(brief) -> None:
     """在创作要求文本框下面画一行：从模板选 / 存为模板 / 删除模板。brief 是那个 textarea。"""
     def options() -> dict:
-        return {t["id"]: f"{t['name']}（用过 {t['usage_count']} 次）" for t in load_templates()}
+        return {t["id"]: _tr('{p0}（用过 {p1} 次）', p0=t['name'], p1=t['usage_count']) for t in load_templates()}
 
     with ui.row().classes("w-full items-center gap-2 no-wrap"):
-        sel = ui.select(options(), label="从模板选（填入上面的创作要求）", with_input=False).classes("flex-1").props("outlined dense clearable")
-        save_btn = ui.button("存为模板", icon="bookmark_add").props("outline dense")
-        del_btn = ui.button(icon="delete").props("flat dense color=negative").tooltip("删除当前选中的模板")
+        sel = ui.select(options(), label=_tr('从模板选（填入上面的创作要求）'), with_input=False).classes("flex-1").props("outlined dense clearable")
+        save_btn = ui.button(_tr('存为模板'), icon="bookmark_add").props("outline dense")
+        del_btn = ui.button(icon="delete").props("flat dense color=negative").tooltip(_tr('删除当前选中的模板'))
 
     def on_pick(e):
         tid = sel.value
@@ -63,38 +65,38 @@ def template_controls(brief) -> None:
             return
         brief.value = row["text"]
         _bump_template(tid)
-        ui.notify(f"已填入模板「{row['name']}」，可以在上面继续改", type="info")
+        ui.notify(_tr('已填入模板「{p0}」，可以在上面继续改', p0=row['name']), type="info")
     sel.on("update:model-value", on_pick)
 
     async def on_save():
         text = (brief.value or "").strip()
         if not text:
-            ui.notify("上面的创作要求是空的，先写点内容再存", type="warning"); return
+            ui.notify(_tr('上面的创作要求是空的，先写点内容再存'), type="warning"); return
         current = next((t for t in load_templates() if t["id"] == sel.value), None)
         with ui.dialog() as dlg, ui.card().classes("min-w-96"):
-            ui.label("存为模板").classes("text-lg font-bold")
-            name_in = ui.input("模板名（同名会覆盖）", value=current["name"] if current else text[:20]).classes("w-full").props("outlined dense")
-            ui.label("起个一看就知道用在什么场景的名字，比如「日本独立开发者·抱怨太贵」").classes("text-xs text-gray-400")
+            ui.label(_tr('存为模板')).classes("text-lg font-bold")
+            name_in = ui.input(_tr('模板名（同名会覆盖）'), value=current["name"] if current else text[:20]).classes("w-full").props("outlined dense")
+            ui.label(_tr('起个一看就知道用在什么场景的名字，比如「日本独立开发者·抱怨太贵」')).classes("text-xs text-gray-400")
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
-                ui.button("保存", on_click=lambda: dlg.submit((name_in.value or "").strip())).props("color=primary")
+                ui.button(_tr('取消'), on_click=lambda: dlg.submit(None)).props("flat")
+                ui.button(_tr('保存'), on_click=lambda: dlg.submit((name_in.value or "").strip())).props("color=primary")
         dlg.open()
         name = await dlg
         if not name:
             return
         save_template(name, text)
         sel.set_options(options())
-        ui.notify(f"模板「{name}」已保存，下次在这里直接选", type="positive")
+        ui.notify(_tr('模板「{p0}」已保存，下次在这里直接选', p0=name), type="positive")
     save_btn.on_click(on_save)
 
     async def on_delete():
         current = next((t for t in load_templates() if t["id"] == sel.value), None)
         if current is None:
-            ui.notify("先在下拉里选中一个模板", type="warning"); return
-        if await confirm(f"删除模板「{current['name']}」？", "不影响已经填进规则/推主里的创作要求。"):
+            ui.notify(_tr('先在下拉里选中一个模板'), type="warning"); return
+        if await confirm(_tr('删除模板「{p0}」？', p0=current['name']), _tr('不影响已经填进规则/推主里的创作要求。')):
             delete_template(current["id"])
             sel.set_options(options(), value=None)
-            ui.notify("已删除", type="positive")
+            ui.notify(_tr('已删除'), type="positive")
     del_btn.on_click(on_delete)
 
 
@@ -133,9 +135,9 @@ class ReplyAccountField:
     def __init__(self, cfg=None):
         mode_value, ids_value = reply_account_setting(cfg)
         opts = account_options(with_auto=False)
-        self.mode = ui.select(REPLY_ACCOUNT_MODE_LABEL, value=mode_value, label="回复账号").classes("w-full").props("outlined")
+        self.mode = ui.select(REPLY_ACCOUNT_MODE_LABEL, value=mode_value, label=_tr('回复账号')).classes("w-full").props("outlined")
         self.ids = ui.select(opts, value=[i for i in ids_value if i in opts], multiple=True,
-                             label=self.LIST_LABEL.get(mode_value, "账号")).classes("w-full").props("outlined use-chips")
+                             label=self.LIST_LABEL.get(mode_value, _tr('账号'))).classes("w-full").props("outlined use-chips")
         self.mode.on("update:model-value", lambda e: self._sync()); self._sync()
 
     def _sync(self):
@@ -153,9 +155,9 @@ class ReplyAccountField:
 
     def invalid(self) -> str:
         if self.mode.value == "include" and not self.ids.value:
-            return "回复账号选了「只用指定的账号」，但名单里一个账号都没选"
+            return _tr('回复账号选了「只用指定的账号」，但名单里一个账号都没选')
         if self.mode.value == "exclude" and not self.ids.value:
-            return "回复账号选了「排除某些账号」，但没选要排除哪些（不排除就选「自动轮流」）"
+            return _tr('回复账号选了「排除某些账号」，但没选要排除哪些（不排除就选「自动轮流」）')
         return ""
 
 
@@ -166,13 +168,13 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     account_cfg：规则 / 推主那一行（新建时 None），用来读回复账号的设法。
     返回 (mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf)，acc 是 ReplyAccountField。"""
     ui.separator()
-    ui.label("回复方式").classes("font-semibold text-sm")
+    ui.label(_tr('回复方式')).classes("font-semibold text-sm")
     mode = ui.select(REPLY_MODE_LABEL, value=mode_value if mode_value in REPLY_MODE_LABEL else "material",
                      label=mode_label).classes("w-full").props("outlined")
     hint(REPLY_HINTS["reply_mode"])
     acc = ReplyAccountField(account_cfg)
     hint(REPLY_HINTS["reply_account"])
-    brief = ui.textarea("AI 创作要求", value=brief_value or "").classes("w-full").props("outlined autogrow")
+    brief = ui.textarea(_tr('AI 创作要求'), value=brief_value or "").classes("w-full").props("outlined autogrow")
     brief_hint = hint(REPLY_HINTS["ai_brief"])
     tpl_box = ui.column().classes("w-full gap-0")
     with tpl_box:
@@ -180,7 +182,7 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
     media_box = ui.column().classes("w-full gap-4")
     with media_box:
         media_mode = ui.select(MEDIA_MODE_LABEL, value=media_mode_value if media_mode_value in MEDIA_MODE_LABEL else "fixed",
-                               label="配图 / 视频怎么带").classes("w-full").props("outlined")
+                               label=_tr('配图 / 视频怎么带')).classes("w-full").props("outlined")
         hint(REPLY_HINTS["media_mode"], after_row=True)
         mf = MediaField(media.parse_files(media_files_value or "[]"), label=MEDIA_FIELD_LABEL["fixed"])
 
@@ -188,20 +190,20 @@ def reply_mode_fields(mode_value: str, brief_value: str, polish_value: bool, mod
             pool = media_mode.value == "pool"
             mf.set_limit(media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS, "", label=MEDIA_FIELD_LABEL[media_mode.value])
         media_mode.on("update:model-value", lambda e: sync_media_mode()); sync_media_mode()
-    polish = ui.switch("允许 AI 轻微润色素材", value=bool(polish_value))
+    polish = ui.switch(_tr('允许 AI 轻微润色素材'), value=bool(polish_value))
     polish_hint = hint(REPLY_HINTS["polish"])
 
     auto_box = ui.column().classes("w-full gap-4")
     with auto_box:
         with ui.row().classes("w-full items-center gap-3 no-wrap"):
-            auto_sw = ui.switch("免审核：置信度达标直接进待发送", value=bool(auto_approve_value))
-            auto_thr = ui.number("置信度阈值（0~1）", value=auto_threshold_value if auto_threshold_value is not None else 0.7,
+            auto_sw = ui.switch(_tr('免审核：置信度达标直接进待发送'), value=bool(auto_approve_value))
+            auto_thr = ui.number(_tr('置信度阈值（0~1）'), value=auto_threshold_value if auto_threshold_value is not None else 0.7,
                                  min=0, max=1, step=0.05).props("outlined dense").classes("w-44")
         hint(REPLY_HINTS["auto_approve"], after_row=True)
 
     def warn_auto(e):
         if e.args:
-            ui.notify("已打开免审核：这条规则 / 推主生成的回复只要置信度达到阈值，就会不经人看直接进待发送", type="warning", multi_line=True, timeout=8000)
+            ui.notify(_tr('已打开免审核：这条规则 / 推主生成的回复只要置信度达到阈值，就会不经人看直接进待发送'), type="warning", multi_line=True, timeout=8000)
     auto_sw.on("update:model-value", warn_auto)
 
     def sync():
@@ -231,16 +233,16 @@ def auto_approve_values(auto_sw, auto_thr) -> tuple[int, float]:
 def reply_mode_invalid(mode, brief, media_mode=None, mf=None, acc: ReplyAccountField | None = None) -> str:
     """保存前校验，返回中文错误（空串 = 没问题）。"""
     if mf is not None and mf.is_uploading:
-        return "附件还在上传或保存，请等上传完成后再保存"
+        return _tr('附件还在上传或保存，请等上传完成后再保存')
     if acc is not None and acc.invalid():
         return acc.invalid()
     if mode.value == "ai_write" and not (brief.value or "").strip():
-        return "选了「AI 按要求创作」就必须填创作要求"
+        return _tr('选了「AI 按要求创作」就必须填创作要求')
     if mode.value == "ai_write" and mf is not None and mf.files:
         pool = media_mode is not None and media_mode.value == "pool"
         problem = media.check_set(mf.files, media.POOL_MAX_ITEMS if pool else media.MAX_ITEMS)
         if problem:
-            return problem + ("" if pool else "（想放更多请把「配图 / 视频怎么带」改成素材池）")
+            return problem + ("" if pool else _tr('（想放更多请把「配图 / 视频怎么带」改成素材池）'))
     return ""
 
 
@@ -255,27 +257,27 @@ def _load_materials(lang: str | None, all_langs: bool):
         return conn.execute(q, args).fetchall()
 
 
-async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: str = "手动选素材"):
+async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: str = _tr('手动选素材')):
     """弹出素材选择框。返回 (material_id, final_text) 或 None（取消）。"""
     lang = tweet_lang or None
     with ui.dialog() as dlg, ui.card().classes("w-[760px] max-w-[95vw] max-h-[92vh] overflow-auto"):
         ui.label(title).classes("text-lg font-bold")
         with ui.card().classes("bg-slate-50 w-full"):
-            ui.label("目标推文").classes("text-xs text-gray-500")
+            ui.label(_tr('目标推文')).classes("text-xs text-gray-500")
             ui.label(tweet_text).classes("text-sm whitespace-pre-wrap")
         with ui.row().classes("items-center gap-3"):
-            all_sw = ui.switch(f"显示所有语言的素材（默认只显示与推文相同的「{lang_name(lang or 'und')}」）", value=not lang)
+            all_sw = ui.switch(_tr('显示所有语言的素材（默认只显示与推文相同的「{p0}」）', p0=lang_name(lang or 'und')), value=not lang)
         state = {"mid": None}
         listbox = ui.column().classes("w-full gap-1")
-        ui.label("选中一条后可在下面改文案，改完的内容会进任务队列（不会改素材库原文）。").classes("text-xs text-gray-400")
-        ta = ui.textarea("最终文案", value="").classes("w-full").props("outlined autogrow")
+        ui.label(_tr('选中一条后可在下面改文案，改完的内容会进任务队列（不会改素材库原文）。')).classes("text-xs text-gray-400")
+        ta = ui.textarea(_tr('最终文案'), value="").classes("w-full").props("outlined autogrow")
 
         def render():
             listbox.clear()
             rows = _load_materials(lang, bool(all_sw.value))
             with listbox:
                 if not rows:
-                    ui.label("没有可用的回复素材（要求：类型=回复、状态=启用、不在回收站）。去「素材库」添加或用「AI 生成素材」。").classes("text-sm text-orange-600")
+                    ui.label(_tr('没有可用的回复素材（要求：类型=回复、状态=启用、不在回收站）。去「素材库」添加或用「AI 生成素材」。')).classes("text-sm text-orange-600")
                     return
                 for m in rows:
                     def choose(mm=m):
@@ -286,8 +288,8 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
                         with ui.row().classes("items-center gap-2"):
                             ui.badge(lang_name(m["lang"]), color=None).classes("bg-slate-500")
                             if m["scenario_tags"]:
-                                hint("场景：" + m["scenario_tags"].replace(",", ", "), after_row=True).tooltip("场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里")
-                            ui.label(f"用过 {m['usage_count']} 次").classes("text-xs text-gray-400")
+                                hint(_tr('场景：') + m["scenario_tags"].replace(",", ", "), after_row=True).tooltip(_tr('场景标签只用于内部筛选（自动匹配 / 素材池），不会出现在推文里'))
+                            ui.label(_tr('用过 {p0} 次', p0=m['usage_count'])).classes("text-xs text-gray-400")
                             if m["created_by"] == "ai":
                                 ui.badge("AI", color=None).classes("bg-purple-600")
                             media_badge(media.parse_files(m["media_files"]))
@@ -297,13 +299,13 @@ async def pick_material_dialog(tweet_text: str, tweet_lang: str | None, title: s
 
         def ok():
             if not state["mid"]:
-                ui.notify("先点选一条素材", type="warning"); return
+                ui.notify(_tr('先点选一条素材'), type="warning"); return
             if not (ta.value or "").strip():
-                ui.notify("文案不能为空", type="negative"); return
+                ui.notify(_tr('文案不能为空'), type="negative"); return
             dlg.submit((state["mid"], ta.value.strip()))
         with ui.row().classes("w-full justify-end gap-2"):
-            ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
-            ui.button("生成待审核条目", icon="playlist_add", on_click=ok).props("color=primary")
+            ui.button(_tr('取消'), on_click=lambda: dlg.submit(None)).props("flat")
+            ui.button(_tr('生成待审核条目'), icon="playlist_add", on_click=ok).props("color=primary")
     dlg.open()
     return await dlg
 
@@ -312,45 +314,56 @@ async def ai_write_dialog(jobs, target_id: int, tweet_text: str, default_brief: 
     """弹出「AI 撰写」框：填创作要求 → 调 LLM 生成 → 直接进待审核。返回 MatchOutcome 或 None。"""
     client = ui.context.client
     with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-        ui.label("AI 按要求撰写回复").classes("text-lg font-bold")
+        ui.label(_tr('AI 按要求撰写回复')).classes("text-lg font-bold")
         with ui.card().classes("bg-slate-50 w-full"):
-            ui.label("目标推文").classes("text-xs text-gray-500")
+            ui.label(_tr('目标推文')).classes("text-xs text-gray-500")
             ui.label(tweet_text).classes("text-sm whitespace-pre-wrap")
-        brief = ui.textarea("创作要求", value=default_brief).classes("w-full").props("outlined autogrow")
-        hint("写清楚：① 主题/立场（比如：推荐我们的 XX 产品）；② 必须带的东西——直接把链接或 @账号写在要求里，"
-                 "AI 会原样放进正文，少了会自动重写；③ 语气（比如：像同行随口聊，不像客服）。"
-                 "AI 会先回应对方说的内容，再自然带出你的主题。", after_row=True)
+        brief = ui.textarea(_tr('创作要求'), value=default_brief).classes("w-full").props("outlined autogrow")
+        hint(_tr('写清楚：① 主题/立场（比如：推荐我们的 XX 产品）；② 必须带的东西——直接把链接或 @账号写在要求里，AI 会原样放进正文，少了会自动重写；③ 语气（比如：像同行随口聊，不像客服）。AI 会先回应对方说的内容，再自然带出你的主题。'), after_row=True)
         template_controls(brief)
         must_lbl = ui.label("").classes("text-xs text-sky-700")
 
         def upd():
             m = extract_must_include(brief.value or "")
-            must_lbl.text = ("将强制包含：" + "、".join(m)) if m else "（没检测到链接或 @账号，正文里不会带任何链接/@）"
+            must_lbl.text = (_tr('将强制包含：') + "、".join(m)) if m else _tr('（没检测到链接或 @账号，正文里不会带任何链接/@）')
         brief.on("update:model-value", lambda e: upd()); upd()
-        mf = MediaField([], label="随这条回复一起发的配图 / 视频（选填）", note="AI 只写文字，附件原样带上。")
+        mf = MediaField([], label=_tr('随这条回复一起发的配图 / 视频（选填）'), note=_tr('AI 只写文字，附件原样带上。'))
         def generate():
             if mf.ready():
                 dlg.submit((brief.value or "", list(mf.files)))
         with ui.row().classes("w-full justify-end gap-2"):
-            ui.button("取消", on_click=lambda: dlg.submit(None)).props("flat")
-            ui.button("生成并进待审核", icon="auto_awesome", on_click=generate).props("color=primary")
+            ui.button(_tr('取消'), on_click=lambda: dlg.submit(None)).props("flat")
+            ui.button(_tr('生成并进待审核'), icon="auto_awesome", on_click=generate).props("color=primary")
     dlg.open()
     res = await dlg
     if res is None:
         return None
     text, files = res
     try:
-        async with llm_wait("AI 撰写回复", scene="write", result_link=("查看待审核", "/queue?status=pending")) as task:
+        async with llm_wait(_tr('AI 撰写回复'), scene="write", result_link=(_tr('查看待审核'), "/queue?status=pending")) as task:
             outcome = await run.io_bound(jobs.match.ai_write, target_id, text, None, "ai_write", "", files)
-            task.finish(("已进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
+            task.finish((_tr('已进入待审核：') if outcome.status == "queued" else _tr('没能生成：')) + outcome.reason,
                         ok=outcome.status == "queued")
     except Exception as e:
         if not client.is_deleted:
             with client.content:
-                notify_long(f"AI 撰写出错：{e}", ok=False, kind="negative")
+                notify_long(_tr('AI 撰写出错：{p0}', p0=e), ok=False, kind="negative")
         return None
     if not client.is_deleted:
         with client.content:
-            notify_long(("已生成并进入待审核：" if outcome.status == "queued" else "没能生成：") + outcome.reason,
+            notify_long((_tr('已生成并进入待审核：') if outcome.status == "queued" else _tr('没能生成：')) + outcome.reason,
                         ok=outcome.status == "queued")
     return outcome
+
+
+# Resolve display labels per client; keep core dictionaries and stored values unchanged.
+REPLY_ACCOUNT_MODE_LABEL = Labels(REPLY_ACCOUNT_MODE_LABEL)
+REPLY_MODE_LABEL = Labels(REPLY_MODE_LABEL)
+REPLY_HINTS = Labels(REPLY_HINTS)
+MEDIA_MODE_LABEL = Labels(MEDIA_MODE_LABEL)
+MEDIA_FIELD_LABEL = Labels(MEDIA_FIELD_LABEL)
+ReplyAccountField.LIST_LABEL = Labels(ReplyAccountField.LIST_LABEL)
+
+
+def lang_name(code):
+    return _tr(source_lang_name(code))

@@ -7,3 +7,5 @@ data/
 __pycache__/
 .venv/
 .uv/
+.nicegui/
+LOCAL_DEVELOPMENT.md

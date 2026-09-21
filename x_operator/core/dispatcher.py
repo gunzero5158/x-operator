@@ -103,26 +103,29 @@ class Dispatcher:
         if not self.guard.is_in_active_hours(account, now):
             return False, (f"不在活跃时段（{account['active_hours_start']}-{account['active_hours_end']} "
                            f"{account['timezone']}），{waiting} 条待发到时段内自动发送")
-        # 主贴和回复各自一个冷却：挑「自己那套冷却已到」的最早条目；主贴优先（定时发帖才能大致准点）
-        ready: dict[str, bool] = {}
+        # 先筛除冷却未到或日限额耗尽的类型，再按主贴优先选择。
+        # 不能先认领主贴、到最终校验才发现日限额已到，否则它会一直堵住回复。
         waits: list[str] = []
-        for kind, label in (("post", "发帖"), ("reply", "回复")):
-            na = parse_iso(account[next_allowed_key(kind)])
-            ready[kind] = not (na and now < na)
-            if not ready[kind]:
-                waits.append(f"{label}还要等约 {int((na - now).total_seconds())} 秒")
         with get_conn() as conn:
             item = None
-            for kind in ("post", "reply"):
-                if not ready[kind]:
-                    continue
-                item = conn.execute(
+            for kind, label in (("post", "发帖"), ("reply", "回复")):
+                candidate = conn.execute(
                     "SELECT * FROM review_queue WHERE status='approved' AND account_id=? AND action_type=? "
                     "ORDER BY created_at ASC LIMIT 1", (account["id"], kind)).fetchone()
-                if item is not None:
-                    break
+                if candidate is None:
+                    continue
+                na = parse_iso(account[next_allowed_key(kind)])
+                if na and now < na:
+                    waits.append(f"{label}还要等约 {int((na - now).total_seconds())} 秒")
+                    continue
+                daily = self.guard.check_daily_limit(account, kind, now)
+                if not daily.ok:
+                    waits.append(daily.detail)
+                    continue
+                item = candidate
+                break
             if item is None:
-                return False, (f"距下次可发时间：{'；'.join(waits)}（{waiting} 条待发）" if waits else "")
+                return False, (f"暂不能发送：{'；'.join(waits)}（{waiting} 条待发）" if waits else "")
             # 乐观锁
             cur = conn.execute("UPDATE review_queue SET status='sending' WHERE id=? AND status='approved'",
                                (item["id"],))

@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from .i18n import describe_schedule, Labels, t as _tr
+
 from nicegui import run, ui
 
 from .. import config
@@ -28,17 +30,17 @@ def register(jobs) -> None:
     @ui.page("/settings")
     def settings_page():
         with shell("/settings"):
-            page_title("设置", "账号、模型与运行偏好")
+            page_title(_tr('设置'), _tr('账号、模型与运行偏好'))
 
             with ui.tabs().classes("w-full") as tabs:
-                t_acc = ui.tab("账号")
-                t_run = ui.tab("自动运行")
-                t_fetch = ui.tab("抓取")
+                t_acc = ui.tab(_tr('账号'))
+                t_run = ui.tab(_tr('自动运行'))
+                t_fetch = ui.tab(_tr('抓取'))
                 t_llm = ui.tab("LLM")
-                t_comp = ui.tab("合规参数")
-                t_budget = ui.tab("预算")
-                t_bl = ui.tab("黑名单")
-                t_data = ui.tab("数据")
+                t_comp = ui.tab(_tr('合规参数'))
+                t_budget = ui.tab(_tr('预算'))
+                t_bl = ui.tab(_tr('黑名单'))
+                t_data = ui.tab(_tr('数据'))
 
             with ui.tab_panels(tabs, value=t_acc).classes("w-full"):
                 with ui.tab_panel(t_acc):
@@ -48,36 +50,32 @@ def register(jobs) -> None:
                 with ui.tab_panel(t_llm):
                     _llm_panel()
                 with ui.tab_panel(t_comp):
-                    hint("这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。", after_row=True)
+                    hint(_tr('这些是所有规则/推主共用的安全阀。抓取时间窗已经放到每条搜索规则、每个监控推主自己的设置里（「首次回溯」）。'), after_row=True)
                     _numeric_panel([
-                        ("cooldown_days", "作者冷却天数",
-                         "从所有自有账号最近一次成功回复该作者起算，至少间隔这些天；换发送账号不会重置。与草稿的 48 小时有效期分别计算。0 = 关闭作者冷却。推荐 7；养号期小号 14。", int, 0, 365),
-                        ("reply_ttl_hours", "回复条目时效（小时）",
-                         "从回复草稿入队起算，待审核、待发送和已跳过条目到期后归入已过期；不是作者冷却时间。修改只影响新草稿，旧草稿按入队时保存的到期时间判断。推荐 48；热点类 24。", int, 1, 720),
-                        ("match_confidence_threshold", "素材匹配置信度阈值（0-1）",
-                         "AI 匹配素材时的信心低于此值，就不用 AI 选的那条，改为按规则给一条用得最少的素材（理由里会写明，照样进待审核，不会空手）。"
-                         "推荐 0.4；想让 AI 的选择更多被采纳就填 0.3。", float, 0, 1),
-                        ("grace_period_hours", "定时补发宽限（小时）",
-                         "程序没开着导致定时发帖计划错过了，重启后如果错过还不到这么多小时就照常补发；超过就标为「错过」不补（周期计划跳到下一次）。推荐 2。", int, 0, 168),
-                        ("nurture_days", "养号期天数",
-                         "新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。", int, 0, 365),
+                        ("cooldown_days", _tr('作者冷却天数'),
+                         _tr('从所有自有账号最近一次成功回复该作者起算，至少间隔这些天；换发送账号不会重置。与草稿的 48 小时有效期分别计算。0 = 关闭作者冷却。推荐 7；养号期小号 14。'), int, 0, 365),
+                        ("reply_ttl_hours", _tr('回复条目时效（小时）'),
+                         _tr('从回复草稿入队起算，待审核、待发送和已跳过条目到期后归入已过期；不是作者冷却时间。修改只影响新草稿，旧草稿按入队时保存的到期时间判断。推荐 48；热点类 24。'), int, 1, 720),
+                        ("match_confidence_threshold", _tr('素材匹配置信度阈值（0-1）'),
+                         _tr('AI 匹配素材时的信心低于此值，就不用 AI 选的那条，改为按规则给一条用得最少的素材（理由里会写明，照样进待审核，不会空手）。推荐 0.4；想让 AI 的选择更多被采纳就填 0.3。'), float, 0, 1),
+                        ("grace_period_hours", _tr('定时补发宽限（小时）'),
+                         _tr('程序没开着导致定时发帖计划错过了，重启后如果错过还不到这么多小时就照常补发；超过就标为「错过」不补（周期计划跳到下一次）。推荐 2。'), int, 0, 168),
+                        ("nurture_days", _tr('养号期天数'),
+                         _tr('新添加的小号在这么多天内日限额自动减半。推荐 14；老号可填 0。'), int, 0, 365),
                     ])
                 with ui.tab_panel(t_fetch):
                     _read_channel_panel()
                 with ui.tab_panel(t_budget):
-                    hint("读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。"
-                             "怎么数：每次抓取按 X 返回的推文条数记（被过滤掉的也算，开了观看量门槛时按扫描条数记），发送后回查算 1 条，发送本身不占读额度。"
-                             "真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。"
-                             "这是程序自己的估算，不是 X 的账单；实际费用以开发者后台为准。", after_row=True)
+                    hint(_tr('读额度只统计官方 API 通道的读取（X 只对它按条计费；小号 Cookie 通道免费、不占额度）。怎么数：每次抓取按 X 返回的推文条数记（被过滤掉的也算，开了观看量门槛时按扫描条数记），发送后回查算 1 条，发送本身不占读额度。真的会拦：自动轮询在「剩余 ≤ 熔断保留」时停跑；手动运行在额度用完时拒绝。每天 0 点（UTC）重置。这是程序自己的估算，不是 X 的账单；实际费用以开发者后台为准。'), after_row=True)
                     _numeric_panel([
-                        ("daily_read_budget", "每日读额度（条）",
-                         "每天最多从官方 API 读多少条推文（监控+搜索+回查合计），防止账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。填 0 = 不限。", int, 0, 1000000),
-                        ("budget_reserve_reads", "熔断保留读额度",
-                         "读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。", int, 0, 100000),
-                        ("monthly_budget_usd", "月预算（USD）",
-                         "仪表盘按本月读取量估算官方 API 读费用并与它对照（约 $0.005/条；发推另计）。", float, 0, 1000000),
+                        ("daily_read_budget", _tr('每日读额度（条）'),
+                         _tr('每天最多从官方 API 读多少条推文（监控+搜索+回查合计），防止账单失控。按量计费约 $0.005/条：330 条 ≈ $1.6/天。填 0 = 不限。'), int, 0, 1000000),
+                        ("budget_reserve_reads", _tr('熔断保留读额度'),
+                         _tr('读额度只剩这么多时停止自动轮询，留给手动操作。推荐 20。'), int, 0, 100000),
+                        ("monthly_budget_usd", _tr('月预算（USD）'),
+                         _tr('仪表盘按本月读取量估算官方 API 读费用并与它对照（约 $0.005/条；发推另计）。'), float, 0, 1000000),
                     ])
-                    ui.label("自动搜索/自动监控的节奏在「自动运行」标签页里设。").classes("text-xs text-gray-400")
+                    ui.label(_tr('自动搜索/自动监控的节奏在「自动运行」标签页里设。')).classes("text-xs text-gray-400")
                 with ui.tab_panel(t_bl):
                     _blacklist_panel()
                 with ui.tab_panel(t_data):
@@ -85,26 +83,23 @@ def register(jobs) -> None:
 
 
 def _read_channel_panel():
-    ui.label("抓取账号池（监控 / 搜索用哪个账号去读、限额与 429 冷却）").classes("font-semibold")
-    hint("每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；"
-             "小号都到上限时才轮到官方号（且要打开下面的开关）。撞到 429 的账号会暂停一段时间，本次运行停下并记住进度，到点自动续跑。"
-             "仪表盘能看到每个账号当前窗口的用量。")
-    sw = ui.switch("官方 API 也参与抓取（按条计费，默认关）", value=official_enabled())
-    hint("关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，"
-             "受「预算」标签页里的读额度限制。只有一个官方号、没有小号的用户要打开这个。")
+    ui.label(_tr('抓取账号池（监控 / 搜索用哪个账号去读、限额与 429 冷却）')).classes("font-semibold")
+    hint(_tr('每次请求前从启用中的小号里挑「最近 15 分钟请求次数最少」的那个，多个小号自动分摊、都不撞 X 的限额；小号都到上限时才轮到官方号（且要打开下面的开关）。撞到 429 的账号会暂停一段时间，本次运行停下并记住进度，到点自动续跑。仪表盘能看到每个账号当前窗口的用量。'))
+    sw = ui.switch(_tr('官方 API 也参与抓取（按条计费，默认关）'), value=official_enabled())
+    hint(_tr('关着：只用小号抓取，没有小号就不抓（运行结果会提示）。开着：小号都到窗口上限、或一个小号都没有时用官方号抓，受「预算」标签页里的读额度限制。只有一个官方号、没有小号的用户要打开这个。'))
     sw.on("update:model-value", lambda e: (config.set_value("read_official_enabled", 1 if e.args else 0),
-                                           ui.notify("官方 API " + ("已参与抓取（计费）" if e.args else "不再参与抓取"), type="positive")))
+                                           ui.notify(_tr('官方 API ') + (_tr('已参与抓取（计费）') if e.args else _tr('不再参与抓取')), type="positive")))
     _numeric_panel([
-        ("read_cap_unofficial", "每个小号每 15 分钟最多请求次数",
-         "X 对 Cookie 通道的推主时间线 / 搜索接口大约 50 次 / 15 分钟，默认 40 留余量。到了上限这个号就先不用，换别的号或等窗口过去。", int, 1, 500),
-        ("read_cap_official", "每个官方号每 15 分钟最多请求次数",
-         "官方 API Basic 档的推主时间线接口只有 5 次 / 15 分钟（Pro 档 900）。按你的套餐填。", int, 1, 5000),
-        ("rate_limit_pause_minutes", "遇到限额后停多少分钟再继续",
-         "撞到 429 的账号暂停这么久；账号都到上限时本次运行也停这么久再自动从停下的推主继续。X 的窗口是 15 分钟，默认 15。", int, 1, 1440),
-        ("read_gap_min_seconds", "请求之间随机间隔（秒）下限",
-         "两次读请求之间随机停几秒，像真人刷一样，降低小号风控风险。默认 2。", int, 0, 300),
-        ("read_gap_max_seconds", "请求之间随机间隔（秒）上限",
-         "默认 6；填 0 = 不停。间隔只影响耗时，不影响限额计数。", int, 0, 300),
+        ("read_cap_unofficial", _tr('每个小号每 15 分钟最多请求次数'),
+         _tr('X 对 Cookie 通道的推主时间线 / 搜索接口大约 50 次 / 15 分钟，默认 40 留余量。到了上限这个号就先不用，换别的号或等窗口过去。'), int, 1, 500),
+        ("read_cap_official", _tr('每个官方号每 15 分钟最多请求次数'),
+         _tr('官方 API Basic 档的推主时间线接口只有 5 次 / 15 分钟（Pro 档 900）。按你的套餐填。'), int, 1, 5000),
+        ("rate_limit_pause_minutes", _tr('遇到限额后停多少分钟再继续'),
+         _tr('撞到 429 的账号暂停这么久；账号都到上限时本次运行也停这么久再自动从停下的推主继续。X 的窗口是 15 分钟，默认 15。'), int, 1, 1440),
+        ("read_gap_min_seconds", _tr('请求之间随机间隔（秒）下限'),
+         _tr('两次读请求之间随机停几秒，像真人刷一样，降低小号风控风险。默认 2。'), int, 0, 300),
+        ("read_gap_max_seconds", _tr('请求之间随机间隔（秒）上限'),
+         _tr('默认 6；填 0 = 不停。间隔只影响耗时，不影响限额计数。'), int, 0, 300),
     ])
 
 
@@ -113,17 +108,16 @@ _TZ_CHOICES = ["Asia/Shanghai", "Asia/Tokyo", "Asia/Taipei", "Asia/Singapore", "
 
 
 def _run_panel(jobs):
-    from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, DISPATCH_INTERVAL_MAX, DISPATCH_INTERVAL_MIN, describe_schedule,
+    from ..core.scheduler import (ALWAYS_JOBS, AUTO_JOBS, DISPATCH_INTERVAL_MAX, DISPATCH_INTERVAL_MIN,
                                   dispatch_interval_seconds, job_enabled, next_runs, parse_daily_times, reschedule_auto_jobs)
-    ui.label("自动运行").classes("font-semibold")
-    hint("所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，"
-             "总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。", after_row=True)
+    ALWAYS_JOBS, AUTO_JOBS = Labels(ALWAYS_JOBS), Labels(AUTO_JOBS)
+    ui.label(_tr('自动运行')).classes("font-semibold")
+    hint(_tr('所有抓取和发送都用「账号」里填的真实凭据直连 X，没有演示/模拟模式。下面列出了会自己跑的每一项功能，总开关一键开关抓取类，也可以逐项开关；节奏改完立即生效，不用重启。'), after_row=True)
 
     cur_disp = display_tz_name()
     disp_tz = ui.select(_TZ_CHOICES if cur_disp in _TZ_CHOICES else [cur_disp] + _TZ_CHOICES, value=cur_disp,
-                        label="界面显示时区").classes("w-72").props("outlined dense")
-    hint("任务队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、"
-             "每日上限、定时计划到点时间仍按各账号自己的时区判断。")
+                        label=_tr('界面显示时区')).classes("w-72").props("outlined dense")
+    hint(_tr('任务队列 / 抓取记录 / 定时发帖等页面上的创建、发送、下次运行时间都按这个时区显示。只影响怎么显示：账号的活跃时段、每日上限、定时计划到点时间仍按各账号自己的时区判断。'))
 
     status_box = ui.column().classes("w-full gap-0")
 
@@ -133,7 +127,7 @@ def _run_panel(jobs):
     def on_disp_tz(e):
         config.set_value("display_timezone", disp_tz.value or DEFAULT_DISPLAY_TZ)
         refresh_display_tz()
-        ui.notify(f"界面时间改为按 {display_tz_name()} 显示（其他页面刷新后生效）", type="positive", multi_line=True)
+        ui.notify(_tr('界面时间改为按 {p0} 显示（其他页面刷新后生效）', p0=display_tz_name()), type="positive", multi_line=True)
         render_status()
     disp_tz.on("update:model-value", on_disp_tz)
 
@@ -143,28 +137,28 @@ def _run_panel(jobs):
         with status_box:
             rows = []
             for jid, (name, desc, _key, _dm, _dt) in AUTO_JOBS.items():
-                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关", "节奏": describe_schedule(jid),
+                rows.append({"功能": name, "状态": _tr('开') if job_enabled(jid) else _tr('关'), "节奏": describe_schedule(jid),
                              "下次运行": fmt_next(nr.get(jid)), "说明": desc})
             for jid, (name, desc, _key) in ALWAYS_JOBS.items():
-                rows.append({"功能": name, "状态": "开" if job_enabled(jid) else "关",
-                             "节奏": f"每 {dispatch_interval_seconds()} 秒" if jid == "dispatcher" else "每分钟",
+                rows.append({"功能": name, "状态": _tr('开') if job_enabled(jid) else _tr('关'),
+                             "节奏": _tr('每 {p0} 秒', p0=dispatch_interval_seconds()) if jid == "dispatcher" else _tr('每分钟'),
                              "下次运行": fmt_next(nr.get(jid)), "说明": desc})
-            ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("功能", "状态", "节奏", "下次运行", "说明")],
+            ui.table(columns=[{"name": k, "label": _tr(k), "field": k, "align": "left"} for k in ('功能', '状态', '节奏', '下次运行', '说明')],
                      rows=rows).classes("w-full").props("dense flat bordered wrap-cells")
     render_status()
 
     ui.separator()
-    master = ui.switch("总开关：启用后台自动轮询（自动搜索 + 自动监控）", value=config.get_bool("auto_jobs_enabled", False))
+    master = ui.switch(_tr('总开关：启用后台自动轮询（自动搜索 + 自动监控）'), value=config.get_bool("auto_jobs_enabled", False))
 
     def on_master(e):
         config.set_value("auto_jobs_enabled", bool(master.value))
-        ui.notify("已" + ("开启" if master.value else "关闭") + "后台自动轮询", type="positive"); render_status()
+        ui.notify(_tr('已') + (_tr('开启') if master.value else _tr('关闭')) + _tr('后台自动轮询'), type="positive"); render_status()
     master.on("update:model-value", on_master)
-    ui.label("测试期建议关着，用各页面的「运行一次」按钮手动触发。").classes("text-xs text-gray-400 -mt-2 mb-1")
+    ui.label(_tr('测试期建议关着，用各页面的「运行一次」按钮手动触发。')).classes("text-xs text-gray-400 -mt-2 mb-1")
 
     tz = ui.select(_TZ_CHOICES if config.get("auto_jobs_timezone", "Asia/Shanghai") in _TZ_CHOICES
                    else [config.get("auto_jobs_timezone")] + _TZ_CHOICES,
-                   value=config.get("auto_jobs_timezone") or "Asia/Shanghai", label="固定时间点按哪个时区").classes("w-72").props("outlined dense")
+                   value=config.get("auto_jobs_timezone") or "Asia/Shanghai", label=_tr('固定时间点按哪个时区')).classes("w-72").props("outlined dense")
 
     controls: dict[str, dict] = {}
     for jid, (name, desc, key, default_min, default_times) in AUTO_JOBS.items():
@@ -172,15 +166,14 @@ def _run_panel(jobs):
             with ui.row().classes("items-center gap-3"):
                 sw = ui.switch(name, value=config.get_bool(key, True))
                 ui.label(desc).classes("text-xs text-gray-400")
-            mode = ui.select({"interval": "每隔一段时间", "daily": "每天固定时间点"},
-                             value=config.get(f"{jid}_schedule_mode") or "interval", label="节奏").classes("w-60").props("outlined dense")
+            mode = ui.select({"interval": _tr('每隔一段时间'), "daily": _tr('每天固定时间点')},
+                             value=config.get(f"{jid}_schedule_mode") or "interval", label=_tr('节奏')).classes("w-60").props("outlined dense")
             with ui.row().classes("items-center gap-3 w-full"):
-                minutes = ui.number("每隔多少分钟", value=config.get_int(f"{jid}_interval_minutes", default_min), min=5, max=10080, step=5) \
+                minutes = ui.number(_tr('每隔多少分钟'), value=config.get_int(f"{jid}_interval_minutes", default_min), min=5, max=10080, step=5) \
                     .classes("w-48").props("outlined dense")
-                times = ui.input("固定时间点（可多个，逗号隔开）", value=config.get(f"{jid}_daily_times") or default_times) \
+                times = ui.input(_tr('固定时间点（可多个，逗号隔开）'), value=config.get(f"{jid}_daily_times") or default_times) \
                     .classes("w-80").props("outlined dense")
-            ui.label(("推荐：搜索每隔 360~720 分钟或每天 2 个时间点；监控每隔 50~120 分钟或每天 3 个时间点。"
-                      "「每隔」是从程序启动 / 改设置那一刻起算；「固定时间点」按上面选的时区，写法 08:00, 20:30。")
+            ui.label((_tr('推荐：搜索每隔 360~720 分钟或每天 2 个时间点；监控每隔 50~120 分钟或每天 3 个时间点。「每隔」是从程序启动 / 改设置那一刻起算；「固定时间点」按上面选的时区，写法 08:00, 20:30。'))
                      ).classes("text-xs text-gray-400")
 
             def sync(mode=mode, minutes=minutes, times=times):
@@ -194,26 +187,25 @@ def _run_panel(jobs):
             dsw = ui.switch(name, value=config.get_bool(key, True))
             ui.label(desc).classes("text-xs text-gray-400")
         dsw.on("update:model-value", lambda e: (config.set_value(key, bool(dsw.value)),
-                                                ui.notify("发送分发已" + ("开启" if dsw.value else "关闭"), type="positive"), render_status()))
-        disp_secs = ui.number("每隔多少秒检查一次待发送", value=dispatch_interval_seconds(), min=DISPATCH_INTERVAL_MIN, max=DISPATCH_INTERVAL_MAX, step=10) \
+                                                ui.notify(_tr('发送分发已') + (_tr('开启') if dsw.value else _tr('关闭')), type="positive"), render_status()))
+        disp_secs = ui.number(_tr('每隔多少秒检查一次待发送'), value=dispatch_interval_seconds(), min=DISPATCH_INTERVAL_MIN, max=DISPATCH_INTERVAL_MAX, step=10) \
             .classes("w-64").props("outlined dense")
-        ui.label(f"允许 {DISPATCH_INTERVAL_MIN}~{DISPATCH_INTERVAL_MAX} 秒，默认 60。只是检查频率；真正多久发一条由各账号的发送间隔决定。"
-                 "随下面「保存节奏设置」一起保存、立即生效。").classes("text-xs text-gray-400 -mt-1")
+        ui.label(_tr('允许 {p0}~{p1} 秒，默认 60。只是检查频率；真正多久发一条由各账号的发送间隔决定。随下面「保存节奏设置」一起保存、立即生效。', p0=DISPATCH_INTERVAL_MIN, p1=DISPATCH_INTERVAL_MAX)).classes("text-xs text-gray-400 -mt-1")
         name2, desc2, _ = ALWAYS_JOBS["scheduled_check"]
         ui.label(f"{name2}：{desc2}").classes("text-xs text-gray-400")
 
     def save():
         for jid, c in controls.items():
             if c["mode"].value == "daily" and not parse_daily_times(c["times"].value or ""):
-                ui.notify(f"「{AUTO_JOBS[jid][0]}」选了固定时间点，但没填出有效的时间（写法 08:00, 20:30）", type="negative"); return
+                ui.notify(_tr('「{p0}」选了固定时间点，但没填出有效的时间（写法 08:00, 20:30）', p0=AUTO_JOBS[jid][0]), type="negative"); return
             if c["mode"].value == "interval" and int(c["minutes"].value or 0) < 5:
-                ui.notify(f"「{AUTO_JOBS[jid][0]}」间隔至少 5 分钟", type="negative"); return
+                ui.notify(_tr('「{p0}」间隔至少 5 分钟', p0=AUTO_JOBS[jid][0]), type="negative"); return
         try:
             secs = int(disp_secs.value or 0)
         except (TypeError, ValueError):
             secs = 0
         if not (DISPATCH_INTERVAL_MIN <= secs <= DISPATCH_INTERVAL_MAX):
-            ui.notify(f"「每隔多少秒检查一次待发送」要在 {DISPATCH_INTERVAL_MIN}~{DISPATCH_INTERVAL_MAX} 之间", type="negative"); return
+            ui.notify(_tr('「每隔多少秒检查一次待发送」要在 {p0}~{p1} 之间', p0=DISPATCH_INTERVAL_MIN, p1=DISPATCH_INTERVAL_MAX), type="negative"); return
         config.set_value("dispatch_interval_seconds", secs)
         config.set_value("auto_jobs_timezone", tz.value or "Asia/Shanghai")
         for jid, c in controls.items():
@@ -224,10 +216,10 @@ def _run_panel(jobs):
         try:
             reschedule_auto_jobs(jobs.scheduler)
         except Exception as e:
-            ui.notify(f"已保存，但重排调度失败：{e}（重启后生效）", type="warning", multi_line=True); render_status(); return
-        ui.notify("已保存并立即生效", type="positive"); render_status()
+            ui.notify(_tr('已保存，但重排调度失败：{p0}（重启后生效）', p0=e), type="warning", multi_line=True); render_status(); return
+        ui.notify(_tr('已保存并立即生效'), type="positive"); render_status()
 
-    ui.button("保存节奏设置", on_click=save).props("color=primary")
+    ui.button(_tr('保存节奏设置'), on_click=save).props("color=primary")
 
 
 # 没有 LLM API 的用户去哪买、用哪两个模型（作者就是拿这两个测的）
@@ -238,27 +230,23 @@ RECOMMENDED_STRONG = "gemini-3.8-flash"
 
 
 def _llm_panel():
-    ui.label("LLM 网关（OpenAI 兼容；留空则用启发式兜底，离线可测）").classes("font-semibold")
+    ui.label(_tr('LLM 网关（OpenAI 兼容；留空则用启发式兜底，离线可测）')).classes("font-semibold")
 
     with ui.card().classes("w-full bg-blue-50 dark:bg-blue-900"):
         with ui.row().classes("items-center gap-2 flex-wrap"):
-            ui.label("还没有 LLM 的 API？").classes("text-sm font-semibold")
-            ui.link("去 apimax 注册购买 ↗", APIMAX_URL, new_tab=True).classes("text-sm")
-        ui.label(f"apimax 是 OpenAI 兼容的中转站，注册后拿到 base_url 和 api_key 填到下面即可。"
-                 f"推荐轻量模型用 {RECOMMENDED_LIGHT}、强模型用 {RECOMMENDED_STRONG}——"
-                 f"作者就是基于这两个模型做的测试，速度快、价格便宜；也可以换成别的模型试试。"
+            ui.label(_tr('还没有 LLM 的 API？')).classes("text-sm font-semibold")
+            ui.link(_tr('去 apimax 注册购买 ↗'), APIMAX_URL, new_tab=True).classes("text-sm")
+        ui.label(_tr('apimax 是 OpenAI 兼容的中转站，注册后拿到 base_url 和 api_key 填到下面即可。推荐轻量模型用 {p0}、强模型用 {p1}——作者就是基于这两个模型做的测试，速度快、价格便宜；也可以换成别的模型试试。', p0=RECOMMENDED_LIGHT, p1=RECOMMENDED_STRONG)
                  ).classes("text-xs text-gray-600 dark:text-gray-300")
-        ui.button("填入推荐配置", icon="auto_fix_high", on_click=lambda: fill_recommended()).props("outline dense color=primary")
+        ui.button(_tr('填入推荐配置'), icon="auto_fix_high", on_click=lambda: fill_recommended()).props("outline dense color=primary")
 
-    base = ui.input("base_url（例：https://api.openai.com/v1，或你用的中转站地址）", value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
+    base = ui.input(_tr('base_url（例：https://api.openai.com/v1，或你用的中转站地址）'), value=config.get("llm_base_url") or "").classes("w-full").props("outlined")
     key = ui.input("api_key", value=config.get("llm_api_key") or "", password=True, password_toggle_button=True).classes("w-full").props("outlined")
-    light = ui.input("轻量模型（便宜、快；量大判断简单的任务）", value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
-    strong = ui.input("强模型（要写东西、要做取舍的任务）", value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
-    timeout_in = ui.number("返回超时（秒）", value=timeout_seconds(), min=TIMEOUT_MIN_SEC, max=TIMEOUT_MAX_SEC, step=5,
+    light = ui.input(_tr('轻量模型（便宜、快；量大判断简单的任务）'), value=config.get("llm_model_light") or "").classes("w-full").props("outlined")
+    strong = ui.input(_tr('强模型（要写东西、要做取舍的任务）'), value=config.get("llm_model_strong") or "").classes("w-full").props("outlined")
+    timeout_in = ui.number(_tr('返回超时（秒）'), value=timeout_seconds(), min=TIMEOUT_MIN_SEC, max=TIMEOUT_MAX_SEC, step=5,
                            format="%.0f").classes("w-64").props("outlined")
-    ui.label(f"等模型生成结果最多等多久。不同模型速度差别很大：快的几秒，慢的（推理模型、拥堵的中转站）可能要一两分钟；"
-             f"超时就按失败处理并提示，不会反复重试。默认 {DEFAULT_TIMEOUT_SEC} 秒，允许 {TIMEOUT_MIN_SEC}~{TIMEOUT_MAX_SEC}；"
-             f"「AI 生成素材」一次要写好几条，按这个值的 2 倍等；「测试连接」固定 20 秒。"
+    ui.label(_tr('等模型生成结果最多等多久。不同模型速度差别很大：快的几秒，慢的（推理模型、拥堵的中转站）可能要一两分钟；超时就按失败处理并提示，不会反复重试。默认 {p0} 秒，允许 {p1}~{p2}；「AI 生成素材」一次要写好几条，按这个值的 2 倍等；「测试连接」固定 20 秒。', p0=DEFAULT_TIMEOUT_SEC, p1=TIMEOUT_MIN_SEC, p2=TIMEOUT_MAX_SEC)
              ).classes("text-xs text-gray-400 -mt-2 mb-1")
 
     def fill_recommended():
@@ -267,28 +255,28 @@ def _llm_panel():
         strong.set_value(RECOMMENDED_STRONG)
         if not (base.value or "").strip():
             base.set_value(APIMAX_BASE_URL)
-        ui.notify("已填入推荐模型" + ("（base_url 也填了 apimax 的地址）" if base.value == APIMAX_BASE_URL else "")
-                  + "。api_key 要用你自己的，填好后点「保存并测试连接」", type="positive", multi_line=True)
-    ui.label("哪些任务用哪档模型（对照表登记在代码 x_operator/llm/client.py 的 SCENE_TIERS；新功能必须先登记才能调用，所以这张表永远是最新的）：").classes("text-xs text-gray-500 mt-2")
+        ui.notify(_tr('已填入推荐模型') + (_tr('（base_url 也填了 apimax 的地址）') if base.value == APIMAX_BASE_URL else "")
+                  + _tr('。api_key 要用你自己的，填好后点「保存并测试连接」'), type="positive", multi_line=True)
+    ui.label(_tr('哪些任务用哪档模型（对照表登记在代码 x_operator/llm/client.py 的 SCENE_TIERS；新功能必须先登记才能调用，所以这张表永远是最新的）：')).classes("text-xs text-gray-500 mt-2")
     tier_rows = [{"任务": desc, "模型档": TIER_LABEL[tier],
                   "当前模型": (config.get(TIER_SETTING_KEY[tier]) or TIER_DEFAULT_MODEL[tier])}
                  for scene, (tier, desc) in SCENE_TIERS.items()]
-    ui.table(columns=[{"name": k, "label": k, "field": k, "align": "left"} for k in ("任务", "模型档", "当前模型")],
+    ui.table(columns=[{"name": k, "label": _tr(k), "field": k, "align": "left"} for k in ('任务', '模型档', '当前模型')],
              rows=tier_rows).classes("w-full").props("dense flat bordered wrap-cells")
 
     def save() -> bool:
         try:
             secs = int(float(timeout_in.value))
         except (TypeError, ValueError):
-            ui.notify(f"「返回超时」要填整数秒，现在填的是「{timeout_in.value}」", type="negative"); return False
+            ui.notify(_tr('「返回超时」要填整数秒，现在填的是「{p0}」', p0=timeout_in.value), type="negative"); return False
         if not (TIMEOUT_MIN_SEC <= secs <= TIMEOUT_MAX_SEC):
-            ui.notify(f"「返回超时」要在 {TIMEOUT_MIN_SEC}~{TIMEOUT_MAX_SEC} 秒之间，现在填的是 {secs}", type="negative"); return False
+            ui.notify(_tr('「返回超时」要在 {p0}~{p1} 秒之间，现在填的是 {p2}', p0=TIMEOUT_MIN_SEC, p1=TIMEOUT_MAX_SEC, p2=secs), type="negative"); return False
         config.set_value("llm_base_url", base.value.strip())
         config.set_value("llm_api_key", key.value.strip())
         config.set_value("llm_model_light", light.value.strip())
         config.set_value("llm_model_strong", strong.value.strip())
         config.set_value("llm_timeout_sec", secs)
-        ui.notify("已保存", type="positive")
+        ui.notify(_tr('已保存'), type="positive")
         return True
 
     async def test():
@@ -297,24 +285,23 @@ def _llm_panel():
             return
         client = LLMClient()
         if not client.configured:
-            ui.notify("未配置网关：当前走启发式兜底（关键词规则打分/匹配，离线可测）。"
-                      "填入 base_url + api_key 后再测，即可切真实 LLM。", type="warning", multi_line=True)
+            ui.notify(_tr('未配置网关：当前走启发式兜底（关键词规则打分/匹配，离线可测）。填入 base_url + api_key 后再测，即可切真实 LLM。'), type="warning", multi_line=True)
             return
         try:
-            async with llm_wait("测试连接", scene="ping") as task:
+            async with llm_wait(_tr('测试连接'), scene="ping") as task:
                 await run.io_bound(client.ping)
-                task.finish("连接成功，打分/匹配将走真实 LLM")
+                task.finish(_tr('连接成功，打分/匹配将走真实 LLM'))
             if not page_client.is_deleted:
                 with page_client.content:
-                    ui.notify("连接成功 ✅ 打分/匹配将走真实 LLM", type="positive")
+                    ui.notify(_tr('连接成功 ✅ 打分/匹配将走真实 LLM'), type="positive")
         except Exception as e:
             if not page_client.is_deleted:
                 with page_client.content:
-                    ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=12000)
+                    ui.notify(_tr('连接失败：{p0}', p0=e), type="negative", multi_line=True, close_button=True, timeout=12000)
 
     with ui.row():
-        ui.button("保存 LLM 设置", on_click=save).props("color=primary")
-        ui.button("保存并测试连接", on_click=test).props("outline")
+        ui.button(_tr('保存 LLM 设置'), on_click=save).props("color=primary")
+        ui.button(_tr('保存并测试连接'), on_click=test).props("outline")
 
 
 def _numeric_panel(fields):
@@ -322,8 +309,8 @@ def _numeric_panel(fields):
     inputs = {}
     for key, label, text, _kind, lo, hi in fields:
         with ui.column().classes("xo-setting-field w-full gap-2"):
-            inputs[key] = ui.input(label, value=config.get(key) or "").classes("w-full").props("outlined")
-            hint(text + f"（允许范围 {lo:g}~{hi:g}）")
+            inputs[key] = ui.input(_tr(label), value=config.get(key) or "").classes("w-full").props("outlined")
+            hint(text + _tr('（允许范围 {p0}~{p1}）', p0=format(lo, 'g'), p1=format(hi, 'g')))
 
     def save():
         parsed = {}
@@ -334,14 +321,14 @@ def _numeric_panel(fields):
                 if kind is int and float(raw) != val:
                     raise ValueError
             except (TypeError, ValueError):
-                ui.notify(f"「{label}」要填{'整数' if kind is int else '数字'}，现在填的是「{raw}」", type="negative"); return
+                ui.notify(_tr('「{p0}」要填{p1}，现在填的是「{p2}」', p0=label, p1=_tr('整数') if kind is int else _tr('数字'), p2=raw), type="negative"); return
             if not (lo <= val <= hi):
-                ui.notify(f"「{label}」要在 {lo:g}~{hi:g} 之间，现在填的是 {val:g}", type="negative"); return
+                ui.notify(_tr('「{p0}」要在 {p1}~{p2} 之间，现在填的是 {p3}', p0=label, p1=format(lo, 'g'), p2=format(hi, 'g'), p3=format(val, 'g')), type="negative"); return
             parsed[key] = val
         for key, val in parsed.items():
             config.set_value(key, val)
-        ui.notify("已保存", type="positive")
-    ui.button("保存", on_click=save).props("color=primary")
+        ui.notify(_tr('已保存'), type="positive")
+    ui.button(_tr('保存'), on_click=save).props("color=primary")
 
 
 # ====================================================================================
@@ -425,27 +412,23 @@ _OFFICIAL_GUIDE = """
 
 
 def _accounts_panel():
-    ui.label("发帖 / 回复账号管理").classes("font-semibold")
-    hint("官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。"
-             "密码登录可按需下载专用浏览器；登录成功后点「测试连接」验证工具的接口连接。", after_row=True)
-    hint("多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、"
-             "主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可改成只用指定的一个或几个账号、或排除某些账号，任务队列里每条也能临时改。"
-             "「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。"
-             "发帖的账号在定时发帖计划里选。", after_row=True)
+    ui.label(_tr('发帖 / 回复账号管理')).classes("font-semibold")
+    hint(_tr('官方通道填 X 开发者平台的密钥（需 Read and Write 权限）；非官方通道填浏览器 Cookie，或用户名+密码+两步验证密钥。密码登录可按需下载专用浏览器；登录成功后点「测试连接」验证工具的接口连接。'), after_row=True)
+    hint(_tr('多账号分工：抓取（读）只用小号、免费，多个小号自动分摊限额（设置 → 抓取「抓取账号池」可让官方 API 也参与，计费）；回复默认在启用中的小号里自动轮流、主号不参与（一个小号都没有时才用主号）；每条搜索规则/监控推主可改成只用指定的一个或几个账号、或排除某些账号，任务队列里每条也能临时改。「主号」（弹窗里的「设为主号」开关，只有官方 API 通道能当主号）主要用来发自己的帖子和在需要时走官方 API 抓取。发帖的账号在定时发帖计划里选。'), after_row=True)
     sys_proxy = detect_system_proxy()
-    hint("本机系统代理：" + (sys_proxy if sys_proxy else "未检测到（将直连）") +
-             "。账号里代理留空时自动使用它。", after_row=True)
+    hint(_tr('本机系统代理：') + (sys_proxy if sys_proxy else _tr('未检测到（将直连）')) +
+             _tr('。账号里代理留空时自动使用它。'), after_row=True)
     login_toolbar = ui.column().classes("w-full")
     body = ui.column().classes("w-full gap-2")
 
     def save_account(data: dict, creds: dict, existing_id: int | None = None) -> int | None:
         handle = data["handle"].lstrip("@").strip()
         if not handle:
-            ui.notify("请填写 handle", type="negative"); return False
+            ui.notify(_tr('请填写 handle'), type="negative"); return False
         if data["is_primary"] and data["access_type"] == "unofficial":
-            ui.notify("主号不能使用非官方（twifork）通道——封号风险过高", type="negative"); return False
+            ui.notify(_tr('主号不能使用非官方（twifork）通道——封号风险过高'), type="negative"); return False
         if data["max_interval_sec"] < data["min_interval_sec"]:
-            ui.notify("最大间隔需 ≥ 最小间隔", type="negative"); return False
+            ui.notify(_tr('最大间隔需 ≥ 最小间隔'), type="negative"); return False
         creds_json = json.dumps({k: v for k, v in creds.items() if (v or "").strip()}, ensure_ascii=False)
         revived = None if existing_id else deleted_account_id(handle)
         try:
@@ -480,65 +463,63 @@ def _accounts_panel():
                     conn.execute("UPDATE accounts SET status='auth_error' WHERE id=? AND status='active'", (existing_id,))
                 conn.commit()
         except sqlite3.IntegrityError as e:
-            ui.notify(f"保存失败：handle 可能重复或违反约束（{e}）", type="negative"); return False
+            ui.notify(_tr('保存失败：handle 可能重复或违反约束（{p0}）', p0=e), type="negative"); return False
         factory.invalidate()
-        ui.notify("这个账号之前删除过，已恢复并接上原来的发送记录" if revived else "已保存", type="positive")
+        ui.notify(_tr('这个账号之前删除过，已恢复并接上原来的发送记录') if revived else _tr('已保存'), type="positive")
         return existing_id
 
     def open_dialog(existing: sqlite3.Row | None = None):
         creds = parse_credentials(existing["credentials"]) if existing else {}
         with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-            ui.label("编辑账号" if existing else "添加账号").classes("text-lg font-bold")
+            ui.label(_tr('编辑账号') if existing else _tr('添加账号')).classes("text-lg font-bold")
             with ui.row().classes("w-full gap-2 no-wrap"):
-                handle = ui.input("handle（不含 @）", value=existing["handle"] if existing else "") \
+                handle = ui.input(_tr('handle（不含 @）'), value=existing["handle"] if existing else "") \
                     .classes("flex-1").props("outlined dense")
-                dname = ui.input("显示名", value=existing["display_name"] if existing else "") \
+                dname = ui.input(_tr('显示名'), value=existing["display_name"] if existing else "") \
                     .classes("flex-1").props("outlined dense")
-            atype = ui.select({"official": "官方 API（可作主号，读写按量计费）", "unofficial": "非官方 twifork（仅小号，Cookie 登录）"},
-                              value=existing["access_type"] if existing else "unofficial", label="通道类型") \
+            atype = ui.select({"official": _tr('官方 API（可作主号，读写按量计费）'), "unofficial": _tr('非官方 twifork（仅小号，Cookie 登录）')},
+                              value=existing["access_type"] if existing else "unofficial", label=_tr('通道类型')) \
                 .classes("w-full").props("outlined dense")
-            primary = ui.switch("设为主号", value=bool(existing["is_primary"]) if existing else False)
-            premium = ui.switch("已订阅 X Premium（会员）", value=bool(existing["is_premium"]) if existing else False)
-            hint("影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），"
-                     "超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。"
-                     "请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。")
+            primary = ui.switch(_tr('设为主号'), value=bool(existing["is_primary"]) if existing else False)
+            premium = ui.switch(_tr('已订阅 X Premium（会员）'), value=bool(existing["is_premium"]) if existing else False)
+            hint(_tr('影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。'))
 
             # ---- 凭据区：按通道类型显示不同字段 ----
             ui.separator()
-            ui.label("凭据（保存在本机；登录及请求时发送给 X）").classes("font-semibold text-sm")
+            ui.label(_tr('凭据（保存在本机；登录及请求时发送给 X）')).classes("font-semibold text-sm")
             cred_inputs: dict[str, ui.input] = {}
             official_box = ui.column().classes("w-full gap-1")
             with official_box:
-                with ui.expansion("怎么拿到这 4 个密钥？（点开看步骤）", icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
-                    ui.markdown(_OFFICIAL_GUIDE).classes("text-xs")
+                with ui.expansion(_tr('怎么拿到这 4 个密钥？（点开看步骤）'), icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
+                    ui.markdown(_tr(_OFFICIAL_GUIDE)).classes("text-xs")
                 for k, label, secret in _OFFICIAL_FIELDS:
-                    cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                    cred_inputs[k] = ui.input(_tr(label), value=creds.get(k, ""), password=secret,
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
             unofficial_box = ui.column().classes("w-full gap-1")
             with unofficial_box:
-                with ui.expansion("怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）",
+                with ui.expansion(_tr('怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）'),
                                   icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
-                    ui.markdown(_COOKIE_GUIDE).classes("text-xs")
+                    ui.markdown(_tr(_COOKIE_GUIDE)).classes("text-xs")
                 has_cookie = bool(creds.get("auth_token"))
                 has_pw = bool(creds.get("username") or creds.get("password"))
-                ui.label("下面两种登录方式选一种填就行（不用两种都填）：").classes("text-sm font-semibold mt-1")
-                method = ui.toggle({"cookie": "方式一：从浏览器复制 Cookie（推荐）", "password": "方式二：账号密码 + 两步验证"},
+                ui.label(_tr('下面两种登录方式选一种填就行（不用两种都填）：')).classes("text-sm font-semibold mt-1")
+                method = ui.toggle({"cookie": _tr('方式一：从浏览器复制 Cookie（推荐）'), "password": _tr('方式二：账号密码 + 两步验证')},
                                    value=("password" if (has_pw and not has_cookie) else "cookie")).props("no-caps spread").classes("w-full")
                 cookie_box = ui.card().classes("w-full gap-1 border-2 border-emerald-500 bg-emerald-50/40")
                 with cookie_box:
-                    ui.label("方式一：浏览器 Cookie").classes("font-semibold text-emerald-700")
-                    ui.label("在浏览器里登录这个小号后，按上面步骤复制两个 Cookie 值粘过来。最稳，一般能用几个月；失效了重新复制一次。"
+                    ui.label(_tr('方式一：浏览器 Cookie')).classes("font-semibold text-emerald-700")
+                    ui.label(_tr('在浏览器里登录这个小号后，按上面步骤复制两个 Cookie 值粘过来。最稳，一般能用几个月；失效了重新复制一次。')
                              ).classes("text-xs text-gray-600")
                     for k, label, secret in _COOKIE_FIELDS:
-                        cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                        cred_inputs[k] = ui.input(_tr(label), value=creds.get(k, ""), password=secret,
                                                   password_toggle_button=secret).classes("w-full").props("outlined dense")
                 pw_box = ui.card().classes("w-full gap-1 border-2 border-amber-500 bg-amber-50/40")
                 with pw_box:
-                    ui.label("方式二：账号密码 + 两步验证密钥").classes("font-semibold text-amber-700")
-                    ui.label("按需下载专用 Chromium，打开窗口辅助登录并保存 Cookie。两步验证填 TOTP 密钥；遇到额外验证时可在浏览器里接手。"
+                    ui.label(_tr('方式二：账号密码 + 两步验证密钥')).classes("font-semibold text-amber-700")
+                    ui.label(_tr('按需下载专用 Chromium，打开窗口辅助登录并保存 Cookie。两步验证填 TOTP 密钥；遇到额外验证时可在浏览器里接手。')
                              ).classes("text-xs text-gray-600")
                     for k, label, secret in _PASSWORD_FIELDS:
-                        cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                        cred_inputs[k] = ui.input(_tr(label), value=creds.get(k, ""), password=secret,
                                                   password_toggle_button=secret).classes("w-full").props("outlined dense")
                 other_note = ui.label("").classes("text-xs text-gray-500")
 
@@ -546,14 +527,14 @@ def _accounts_panel():
                     cookie_box.set_visibility(method.value == "cookie")
                     pw_box.set_visibility(method.value != "cookie")
                     if method.value == "cookie" and has_pw:
-                        other_note.text = "（账号密码已保存，Cookie 失效时可主动点击「浏览器登录」更新）"
+                        other_note.text = _tr('（账号密码已保存，Cookie 失效时可主动点击「浏览器登录」更新）')
                     elif method.value != "cookie" and has_cookie:
-                        other_note.text = "（方式一的 Cookie 也已保存，会优先用 Cookie；登录成功后 Cookie 会自动更新）"
+                        other_note.text = _tr('（方式一的 Cookie 也已保存，会优先用 Cookie；登录成功后 Cookie 会自动更新）')
                     else:
                         other_note.text = ""
                 method.on("update:model-value", lambda e: sync_method()); sync_method()
                 for k, label, secret in _COMMON_FIELDS:
-                    cred_inputs[k] = ui.input(label, value=creds.get(k, ""), password=secret,
+                    cred_inputs[k] = ui.input(_tr(label), value=creds.get(k, ""), password=secret,
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
 
             def sync_boxes():
@@ -564,32 +545,29 @@ def _accounts_panel():
 
             # ---- 限速 / 活跃时段 ----
             ui.separator()
-            ui.label("限速与活跃时段").classes("font-semibold text-sm")
+            ui.label(_tr('限速与活跃时段')).classes("font-semibold text-sm")
             with ui.row().classes("w-full gap-2 no-wrap"):
-                post_lim = ui.number("日发帖上限", value=existing["daily_post_limit"] if existing else 10, min=0) \
+                post_lim = ui.number(_tr('日发帖上限'), value=existing["daily_post_limit"] if existing else 10, min=0) \
                     .props("outlined dense").classes("flex-1")
-                reply_lim = ui.number("日回复上限", value=existing["daily_reply_limit"] if existing else 15, min=0) \
+                reply_lim = ui.number(_tr('日回复上限'), value=existing["daily_reply_limit"] if existing else 15, min=0) \
                     .props("outlined dense").classes("flex-1")
             with ui.row().classes("w-full gap-2 no-wrap"):
-                mn = ui.number("最小间隔(秒)", value=existing["min_interval_sec"] if existing else 180, min=0) \
+                mn = ui.number(_tr('最小间隔(秒)'), value=existing["min_interval_sec"] if existing else 180, min=0) \
                     .props("outlined dense").classes("flex-1")
-                mx = ui.number("最大间隔(秒)", value=existing["max_interval_sec"] if existing else 600, min=0) \
+                mx = ui.number(_tr('最大间隔(秒)'), value=existing["max_interval_sec"] if existing else 600, min=0) \
                     .props("outlined dense").classes("flex-1")
-            hint("两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；"
-                     "同一账号主贴和回复都到点时先发主贴。")
+            hint(_tr('两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；同一账号主贴和回复都到点时先发主贴。'))
             with ui.row().classes("w-full gap-2 no-wrap"):
-                a_start = ui.input("活跃开始 HH:MM", value=existing["active_hours_start"] if existing else "09:00") \
+                a_start = ui.input(_tr('活跃开始 HH:MM'), value=existing["active_hours_start"] if existing else "09:00") \
                     .props("outlined dense").classes("flex-1")
-                a_end = ui.input("活跃结束 HH:MM", value=existing["active_hours_end"] if existing else "22:00") \
+                a_end = ui.input(_tr('活跃结束 HH:MM'), value=existing["active_hours_end"] if existing else "22:00") \
                     .props("outlined dense").classes("flex-1")
                 tz_val = existing["timezone"] if existing else "Asia/Tokyo"
                 tz_opts = _TZ_OPTIONS if tz_val in _TZ_OPTIONS else [tz_val] + _TZ_OPTIONS
-                tz = ui.select(tz_opts, value=tz_val, label="时区").props("outlined dense").classes("flex-1")
-            hint("日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。"
-                     "间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。"
-                     "活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。"
+                tz = ui.select(tz_opts, value=tz_val, label=_tr('时区')).props("outlined dense").classes("flex-1")
+            hint(_tr('日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。')
                      , after_row=True)
-            note = ui.input("备注", value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
+            note = ui.input(_tr('备注'), value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
 
             def collect():
                 return {
@@ -618,19 +596,19 @@ def _accounts_panel():
             def do_save(login=False):
                 for hhmm in (a_start.value, a_end.value):
                     if not _valid_hhmm(hhmm):
-                        ui.notify("活跃时段格式应为 HH:MM", type="negative"); return
+                        ui.notify(_tr('活跃时段格式应为 HH:MM'), type="negative"); return
                 creds_now = collect_creds()
                 if login and (atype.value != "unofficial" or not creds_now.get("username") or not creds_now.get("password")):
-                    ui.notify("请填写用户名和密码；启用两步验证的账号还需填写 TOTP 密钥", type="warning"); return
+                    ui.notify(_tr('请填写用户名和密码；启用两步验证的账号还需填写 TOTP 密钥'), type="warning"); return
                 if atype.value != "official":
                     problem = validate_unofficial_credentials(creds_now)
                     if problem:
                         ui.notify(problem, type="negative", multi_line=True, close_button=True, timeout=15000); return
                     if (creds_now.get("username") and not creds_now.get("password")) or \
                        (creds_now.get("password") and not creds_now.get("username")):
-                        ui.notify("方式二需要用户名和密码都填", type="negative"); return
+                        ui.notify(_tr('方式二需要用户名和密码都填'), type="negative"); return
                     if method.value == "cookie" and not creds_now.get("auth_token") and not creds_now.get("username"):
-                        ui.notify("方式一要把 auth_token 和 ct0 两个都粘进来（或切到方式二填账号密码）。现在先保存也行，之后再补",
+                        ui.notify(_tr('方式一要把 auth_token 和 ct0 两个都粘进来（或切到方式二填账号密码）。现在先保存也行，之后再补'),
                                   type="warning", multi_line=True)
                 aid = save_account(collect(), creds_now, existing["id"] if existing else None)
                 if aid:
@@ -639,9 +617,9 @@ def _accounts_panel():
                         browser_login.login_accounts([aid], render)
 
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("取消", on_click=dlg.close).props("flat")
-                ui.button("保存", on_click=lambda: do_save()).props("outline")
-                login_button = ui.button("保存并登录", icon="login", on_click=lambda: do_save(True))
+                ui.button(_tr('取消'), on_click=dlg.close).props("flat")
+                ui.button(_tr('保存'), on_click=lambda: do_save()).props("outline")
+                login_button = ui.button(_tr('保存并登录'), icon="login", on_click=lambda: do_save(True))
                 login_button.bind_visibility_from(method, "value", backward=lambda value: value == "password")
                 login_button.bind_enabled_from(atype, "value", backward=lambda value: value == "unofficial")
         dlg.open()
@@ -652,12 +630,12 @@ def _accounts_panel():
             if row is None:
                 return
             if row["access_type"] == "unofficial":
-                ui.notify("非官方账号不能设为主号", type="negative"); return
+                ui.notify(_tr('非官方账号不能设为主号'), type="negative"); return
             conn.execute("UPDATE accounts SET is_primary=0")
             conn.execute("UPDATE accounts SET is_primary=1 WHERE id=?", (aid,))
             conn.commit()
         factory.invalidate()
-        ui.notify("已设为主号", type="positive"); render()
+        ui.notify(_tr('已设为主号'), type="positive"); render()
 
     async def del_account(a):
         refs = account_references(a["id"])
@@ -666,10 +644,9 @@ def _accounts_panel():
             await _delete_blocked_dialog(a, refs, blockers)
             return
         keep = refs["queue_history"] or refs["interactions"] or refs["old_plans"]
-        detail = ("它发过东西：发送记录和去重账本会保留（防止别的账号重复回复同一条推文、作者冷却照常算），"
-                  "账号本身从各处消失、凭据清空，历史里显示为「已删除」。以后重新添加同名账号会接上这些记录。"
-                  if keep else "它没有任何发送记录，会彻底删除，凭据一并删掉。")
-        if not await confirm(f"删除账号 @{a['handle']}？", detail + "搜索规则 / 监控推主里指向它的回复账号设置会一并去掉。"):
+        detail = (_tr('它发过东西：发送记录和去重账本会保留（防止别的账号重复回复同一条推文、作者冷却照常算），账号本身从各处消失、凭据清空，历史里显示为「已删除」。以后重新添加同名账号会接上这些记录。')
+                  if keep else _tr('它没有任何发送记录，会彻底删除，凭据一并删掉。'))
+        if not await confirm(_tr('删除账号 @{p0}？', p0=a['handle']), detail + _tr('搜索规则 / 监控推主里指向它的回复账号设置会一并去掉。')):
             return
         result, msg = delete_account(a["id"])
         factory.invalidate(a["id"])
@@ -679,14 +656,14 @@ def _accounts_panel():
     async def test_conn(a):
         ok, why = factory.credential_status(a)
         if not ok:
-            ui.notify(f"未填凭据（{why}）。点「编辑 / 填凭据」补上。", type="warning", multi_line=True, close_button=True)
+            ui.notify(_tr('未填凭据（{p0}）。点「编辑 / 填凭据」补上。', p0=why), type="warning", multi_line=True, close_button=True)
             return
         if a["access_type"] == "unofficial":
             creds = parse_credentials(a["credentials"])
             if not (creds.get("auth_token") and creds.get("ct0")):
                 browser_login.login_accounts([a["id"]], render)
                 return
-        ui.notify("正在使用已保存的凭据连接 X…", type="info")
+        ui.notify(_tr('正在使用已保存的凭据连接 X…'), type="info")
 
         def _probe():
             client = factory.get_real_client(a)
@@ -694,14 +671,14 @@ def _accounts_panel():
         try:
             user, proxy = await run.io_bound(_probe)
         except Exception as e:
-            ui.notify(f"连接失败：{e}", type="negative", multi_line=True, close_button=True, timeout=20000)
+            ui.notify(_tr('连接失败：{p0}', p0=e), type="negative", multi_line=True, close_button=True, timeout=20000)
             return
         with get_conn() as conn:
             conn.execute("UPDATE accounts SET status='active' WHERE id=? AND status='auth_error'", (a["id"],))
             conn.commit()
         factory.invalidate(a["id"])
-        ui.notify(f"连接成功 ✅ 凭据对应的账号是 @{user.handle}（{user.display_name}），{describe_proxy(proxy)}"
-                  + ("" if user.handle.lower() == a["handle"].lower() else f"——注意与你填的 @{a['handle']} 不一致"),
+        ui.notify(_tr('连接成功 ✅ 凭据对应的账号是 @{p0}（{p1}），{p2}', p0=user.handle, p1=user.display_name, p2=describe_proxy(proxy))
+                  + ("" if user.handle.lower() == a["handle"].lower() else _tr('——注意与你填的 @{p0} 不一致', p0=a['handle'])),
                   type="positive", multi_line=True, close_button=True, timeout=12000)
         render()
 
@@ -714,13 +691,12 @@ def _accounts_panel():
                 "SELECT account_id, COUNT(*) c FROM review_queue WHERE status IN ('pending','approved','failed') GROUP BY account_id")}
         with body:
             with ui.row().classes("items-center justify-between w-full"):
-                ui.label(f"共 {len(rows)} 个账号").classes("text-sm text-gray-400")
-                ui.button("添加账号", icon="add", on_click=lambda: open_dialog()).props("color=primary")
+                ui.label(_tr('共 {p0} 个账号', p0=len(rows))).classes("text-sm text-gray-400")
+                ui.button(_tr('添加账号'), icon="add", on_click=lambda: open_dialog()).props("color=primary")
             if not rows:
-                ui.label("暂无账号，点右上「添加账号」新建一个。").classes("text-gray-400")
+                ui.label(_tr('暂无账号，点右上「添加账号」新建一个。')).classes("text-gray-400")
             if n_deleted:
-                ui.label(f"另有 {n_deleted} 个已删除的账号：只保留着发送记录和去重账本（防止重复回复、作者冷却照常算），不会再被用来抓取或发送；"
-                         "重新添加同名账号会接上原来的记录。").classes("text-xs text-gray-400")
+                ui.label(_tr('另有 {p0} 个已删除的账号：只保留着发送记录和去重账本（防止重复回复、作者冷却照常算），不会再被用来抓取或发送；重新添加同名账号会接上原来的记录。', p0=n_deleted)).classes("text-xs text-gray-400")
             for a in rows:
                 cred_ok, cred_why = factory.credential_status(a)
                 acc_creds = parse_credentials(a["credentials"])
@@ -731,42 +707,40 @@ def _accounts_panel():
                         ui.label(f"@{a['handle']}").classes("font-semibold")
                         if a["display_name"]:
                             ui.label(a["display_name"]).classes("text-xs text-gray-400")
-                        ui.badge("官方 API" if a["access_type"] == "official" else "非官方 Cookie", color=None).classes("bg-slate-500")
+                        ui.badge(_tr('官方 API') if a["access_type"] == "official" else _tr('非官方 Cookie'), color=None).classes("bg-slate-500")
                         if a["is_primary"]:
-                            ui.badge("主号 ★", color=None).classes("bg-amber-500")
-                        ui.badge("Premium 会员" if a["is_premium"] else "免费账号 · 280 单位", color=None).classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
-                            .tooltip("会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写")
-                        ui.badge({"active": "启用", "paused": "已暂停", "auth_error": "等待登录" if needs_login else "凭据失效"}.get(a["status"], a["status"]), color=None) \
+                            ui.badge(_tr('主号 ★'), color=None).classes("bg-amber-500")
+                        ui.badge(_tr('Premium 会员') if a["is_premium"] else _tr('免费账号 · 280 单位'), color=None).classes("bg-sky-600" if a["is_premium"] else "bg-slate-400") \
+                            .tooltip(_tr('会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写'))
+                        ui.badge({"active": _tr('启用'), "paused": _tr('已暂停'), "auth_error": _tr('等待登录') if needs_login else _tr('凭据失效')}.get(a["status"], a["status"]), color=None) \
                             .classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
-                        ui.badge("凭据已填" if cred_ok else "未填凭据", color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
-                    ui.label(f"日发帖 {a['daily_post_limit']} / 日回复 {a['daily_reply_limit']} · "
-                             f"间隔 {a['min_interval_sec']}-{a['max_interval_sec']}s · "
-                             f"活跃 {a['active_hours_start']}-{a['active_hours_end']} {a['timezone']}"
+                        ui.badge(_tr('凭据已填') if cred_ok else _tr('未填凭据'), color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
+                    ui.label(_tr('日发帖 {p0} / 日回复 {p1} · 间隔 {p2}-{p3}s · 活跃 {p4}-{p5} {p6}', p0=a['daily_post_limit'], p1=a['daily_reply_limit'], p2=a['min_interval_sec'], p3=a['max_interval_sec'], p4=a['active_hours_start'], p5=a['active_hours_end'], p6=a['timezone'])
                              + (f" · {a['note']}" if a["note"] else "")).classes("text-xs text-gray-400")
                     with ui.row().classes("gap-1 flex-wrap"):
-                        ui.button("测试连接", icon="wifi_tethering", on_click=lambda aa=a: test_conn(aa)).props("flat dense")
-                        ui.button("编辑 / 填凭据", icon="edit", on_click=lambda aa=a: open_dialog(aa)).props("flat dense")
+                        ui.button(_tr('测试连接'), icon="wifi_tethering", on_click=lambda aa=a: test_conn(aa)).props("flat dense")
+                        ui.button(_tr('编辑 / 填凭据'), icon="edit", on_click=lambda aa=a: open_dialog(aa)).props("flat dense")
                         if a["access_type"] == "unofficial":
                             def browser_relogin(aa=a):
                                 creds = parse_credentials(aa["credentials"])
                                 if not (creds.get("username") and creds.get("password")):
                                     open_dialog(aa)
-                                    ui.notify("请切换到账号密码方式，填写后点击「保存并登录」", type="info")
+                                    ui.notify(_tr('请切换到账号密码方式，填写后点击「保存并登录」'), type="info")
                                     return
                                 browser_login.login_accounts([aa["id"]], render)
-                            ui.button("浏览器登录", icon="login", on_click=browser_relogin).props("flat dense")
+                            ui.button(_tr('浏览器登录'), icon="login", on_click=browser_relogin).props("flat dense")
                         if not a["is_primary"] and a["access_type"] == "official":
-                            ui.button("设为主号", on_click=lambda aid=a["id"]: set_primary(aid)).props("flat dense")
+                            ui.button(_tr('设为主号'), on_click=lambda aid=a["id"]: set_primary(aid)).props("flat dense")
                         if a["status"] == "active":
-                            ui.button("暂停", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "paused"), render())).props("flat dense")
+                            ui.button(_tr('暂停'), on_click=lambda aid=a["id"]: (_set_acc_status(aid, "paused"), render())).props("flat dense")
                         else:
-                            ui.button("启用", on_click=lambda aid=a["id"]: (_set_acc_status(aid, "active"), render())).props("flat dense")
+                            ui.button(_tr('启用'), on_click=lambda aid=a["id"]: (_set_acc_status(aid, "active"), render())).props("flat dense")
                         if unsent.get(a["id"]):
-                            ui.button(f"它的任务（{unsent[a['id']]} 条未发送）", icon="list_alt",
+                            ui.button(_tr('它的任务（{p0} 条未发送）', p0=unsent[a['id']]), icon="list_alt",
                                       on_click=lambda aid=a["id"]: ui.navigate.to(f"/queue?status=unsent&account={aid}")) \
                                 .props("flat dense" + ("" if a["status"] == "active" else " color=orange")) \
-                                .tooltip("打开任务队列、只看这个账号的待审核 / 待发送 / 失败条目，可批量转给其他账号或删除")
-                        ui.button("删除", icon="delete", on_click=lambda aa=a: del_account(aa)).props("flat dense color=negative")
+                                .tooltip(_tr('打开任务队列、只看这个账号的待审核 / 待发送 / 失败条目，可批量转给其他账号或删除'))
+                        ui.button(_tr('删除'), icon="delete", on_click=lambda aa=a: del_account(aa)).props("flat dense color=negative")
     with login_toolbar:
         browser_login.toolbar(render)
     render()
@@ -799,20 +773,20 @@ def _resolve_blacklist_entry(raw: str) -> tuple[str, str, str]:
         return v, "", ""
     account, why = ReadPool().pick()
     if account is None:
-        return v, v, f"（{why}，无法查数字 id；按 @handle 拦截）"
+        return v, v, _tr('（{p0}，无法查数字 id；按 @handle 拦截）', p0=why)
     try:
         user = factory.get_client(account).get_user_by_handle(v)
         return user.user_id, user.handle, ""
     except Exception as e:
-        return v, v, f"（查数字 id 失败：{str(e)[:60]}；按 @handle 拦截）"
+        return v, v, _tr('（查数字 id 失败：{p0}；按 @handle 拦截）', p0=str(e)[:60])
 
 
 def _blacklist_panel():
-    hint("黑名单里的作者不会被回复（监控/搜索预检和发送前都会拦）；可填 @handle 或 X 的数字 user_id，两者都能匹配。", after_row=True)
+    hint(_tr('黑名单里的作者不会被回复（监控/搜索预检和发送前都会拦）；可填 @handle 或 X 的数字 user_id，两者都能匹配。'), after_row=True)
     with ui.row().classes("items-end gap-2"):
-        inp = ui.input("@handle 或 user_id").props("outlined dense")
-        reason_in = ui.input("原因（选填）").props("outlined dense")
-        add_btn = ui.button("添加", icon="add").props("color=primary")
+        inp = ui.input(_tr('@handle 或 user_id')).props("outlined dense")
+        reason_in = ui.input(_tr('原因（选填）')).props("outlined dense")
+        add_btn = ui.button(_tr('添加'), icon="add").props("color=primary")
     body = ui.column().classes("w-full gap-1")
 
     async def add():
@@ -827,10 +801,10 @@ def _blacklist_panel():
         with get_conn() as conn:
             conn.execute("INSERT INTO blacklist(x_user_id, handle, reason, created_at) VALUES (?,?,?,?) "
                          "ON CONFLICT(x_user_id) DO UPDATE SET handle=CASE WHEN excluded.handle<>'' THEN excluded.handle ELSE handle END",
-                         (uid, handle, (reason_in.value or "手动添加").strip(), utcnow_iso()))
+                         (uid, handle, (reason_in.value or _tr('手动添加')).strip(), utcnow_iso()))
             conn.commit()
         inp.value = ""; reason_in.value = ""; render()
-        ui.notify("已添加" + note, type="positive" if not note else "warning", multi_line=True)
+        ui.notify(_tr('已添加') + note, type="positive" if not note else "warning", multi_line=True)
     add_btn.on_click(add)
 
     def render():
@@ -839,14 +813,14 @@ def _blacklist_panel():
             rows = conn.execute("SELECT * FROM blacklist ORDER BY id DESC").fetchall()
         with body:
             if not rows:
-                ui.label("黑名单为空").classes("text-gray-400")
+                ui.label(_tr('黑名单为空')).classes("text-gray-400")
             for b in rows:
                 with ui.row().classes("items-center gap-2"):
                     ui.label(f"@{b['handle']}" if b["handle"] else b["x_user_id"]).classes("text-sm")
                     if b["handle"] and b["handle"] != b["x_user_id"]:
                         ui.label(f"id {b['x_user_id']}").classes("text-xs text-gray-400")
                     ui.label(b["reason"]).classes("text-xs text-gray-400")
-                    ui.button("移除", on_click=lambda bb=b: (_del_bl(bb["id"]), render())).props("flat dense color=negative")
+                    ui.button(_tr('移除'), on_click=lambda bb=b: (_del_bl(bb["id"]), render())).props("flat dense color=negative")
     render()
 
 
@@ -860,8 +834,8 @@ def _del_bl(bid):
 # 数据清理
 # ====================================================================================
 def _data_panel():
-    ui.label("数据清理").classes("font-semibold")
-    hint("测试期可以把抓取记录和任务队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。", after_row=True)
+    ui.label(_tr('数据清理')).classes("font-semibold")
+    hint(_tr('测试期可以把抓取记录和任务队列一键清掉重来；素材、账号、规则、黑名单、去重账本都会保留。'), after_row=True)
     info = ui.label("").classes("text-sm")
 
     def refresh_info():
@@ -869,21 +843,21 @@ def _data_panel():
             t = conn.execute("SELECT COUNT(*) AS c FROM target_tweets").fetchone()["c"]
             q = conn.execute("SELECT COUNT(*) AS c FROM review_queue").fetchone()["c"]
             i = conn.execute("SELECT COUNT(*) AS c FROM interactions").fetchone()["c"]
-        info.text = f"当前：抓取记录 {t} 条 · 任务队列 {q} 条 · 去重账本 {i} 条"
+        info.text = _tr('当前：抓取记录 {p0} 条 · 任务队列 {p1} 条 · 去重账本 {p2} 条', p0=t, p1=q, p2=i)
     refresh_info()
 
     async def clear_all():
-        if await confirm("清空全部抓取记录与任务队列？", "包括真实数据。去重账本（防止重复回复）会保留。", ok_label="全部清空"):
+        if await confirm(_tr('清空全部抓取记录与任务队列？'), _tr('包括真实数据。去重账本（防止重复回复）会保留。'), ok_label=_tr('全部清空')):
             with get_conn() as conn:
                 conn.execute("DELETE FROM review_queue")
                 conn.execute("DELETE FROM target_tweets")
                 conn.execute("UPDATE watched_users SET last_seen_tweet_id=NULL, hit_count=0")
                 conn.execute("UPDATE search_rules SET newest_id_cursor=NULL")
                 conn.commit()
-            ui.notify("已清空", type="positive"); refresh_info()
+            ui.notify(_tr('已清空'), type="positive"); refresh_info()
 
     with ui.row().classes("gap-2"):
-        ui.button("清空全部抓取记录与任务队列", icon="delete_forever", on_click=clear_all).props("outline color=negative")
+        ui.button(_tr('清空全部抓取记录与任务队列'), icon="delete_forever", on_click=clear_all).props("outline color=negative")
 
     ui.separator()
     _media_storage_panel()
@@ -891,29 +865,28 @@ def _data_panel():
 
 def _media_storage_panel():
     """素材附件占用空间：只统计、不代删。给一个按钮打开目录，让用户自己去删。"""
-    ui.label("素材附件占用空间").classes("font-semibold")
-    hint("图片 / 视频上传后都复制存在下面这个目录里（数据库只记路径）。程序不会自动删文件；素材删到回收站、审核条目删掉后，"
-             "文件还留着。点「前往清理」在文件管理器里打开目录，自己挑着删。", after_row=True)
+    ui.label(_tr('素材附件占用空间')).classes("font-semibold")
+    hint(_tr('图片 / 视频上传后都复制存在下面这个目录里（数据库只记路径）。程序不会自动删文件；素材删到回收站、审核条目删掉后，文件还留着。点「前往清理」在文件管理器里打开目录，自己挑着删。'), after_row=True)
     path_lbl = ui.label("").classes("text-xs text-gray-500 font-mono break-all")
     info = ui.label("").classes("text-sm")
     orphan_box = ui.column().classes("w-full gap-0")
 
     def refresh():
         st = media.storage_stats()
-        path_lbl.text = f"目录：{st['dir']}"
-        info.text = f"共 {st['count']} 个文件 · 合计 {media.fmt_size(st['bytes'])}"
+        path_lbl.text = _tr('目录：{p0}', p0=st['dir'])
+        info.text = _tr('共 {p0} 个文件 · 合计 {p1}', p0=st['count'], p1=media.fmt_size(st['bytes']))
         orphan_box.clear()
         with orphan_box:
             if st["orphans"]:
-                with ui.expansion(f"其中 {len(st['orphans'])} 个已没有任何素材 / 条目引用（{media.fmt_size(st['orphan_bytes'])}），删掉不影响功能",
+                with ui.expansion(_tr('其中 {p0} 个已没有任何素材 / 条目引用（{p1}），删掉不影响功能', p0=len(st['orphans']), p1=media.fmt_size(st['orphan_bytes'])),
                                   icon="cleaning_services").classes("w-full text-sm"):
-                    hint("按大小从大到小排；其余文件仍被素材库（含回收站）、任务队列或定时发帖引用，删了会导致发送时找不到附件。", after_row=True)
+                    hint(_tr('按大小从大到小排；其余文件仍被素材库（含回收站）、任务队列或定时发帖引用，删了会导致发送时找不到附件。'), after_row=True)
                     for rel, size in st["orphans"][:200]:
                         ui.label(f"{rel}　{media.fmt_size(size)}").classes("text-xs font-mono")
                     if len(st["orphans"]) > 200:
-                        ui.label(f"…还有 {len(st['orphans']) - 200} 个").classes("text-xs text-gray-400")
+                        ui.label(_tr('…还有 {p0} 个', p0=len(st['orphans']) - 200)).classes("text-xs text-gray-400")
             elif st["count"]:
-                ui.label("所有文件都还被素材 / 条目引用着，没有可以放心删的。").classes("text-xs text-gray-400")
+                ui.label(_tr('所有文件都还被素材 / 条目引用着，没有可以放心删的。')).classes("text-xs text-gray-400")
     refresh()
 
     def go():
@@ -921,27 +894,32 @@ def _media_storage_panel():
         if err:
             ui.notify(err, type="warning", multi_line=True)
         else:
-            ui.notify("已在文件管理器里打开素材目录", type="positive")
+            ui.notify(_tr('已在文件管理器里打开素材目录'), type="positive")
 
     with ui.row().classes("gap-2 items-center"):
-        ui.button("前往清理（打开目录）", icon="folder_open", on_click=go).props("outline color=primary") \
-            .tooltip("在本机文件管理器里打开 data/media/，自己挑文件删")
-        ui.button("刷新统计", icon="refresh", on_click=refresh).props("flat dense")
+        ui.button(_tr('前往清理（打开目录）'), icon="folder_open", on_click=go).props("outline color=primary") \
+            .tooltip(_tr('在本机文件管理器里打开 data/media/，自己挑文件删'))
+        ui.button(_tr('刷新统计'), icon="refresh", on_click=refresh).props("flat dense")
 
 
 async def _delete_blocked_dialog(a, refs: dict, blockers: list[str]) -> None:
     """删不了时说清楚卡在哪、给直达按钮。"""
     with ui.dialog() as dlg, ui.card().classes("w-[560px] max-w-[95vw]"):
-        ui.label(f"@{a['handle']} 暂时不能删除").classes("text-lg font-bold")
+        ui.label(_tr('@{p0} 暂时不能删除', p0=a['handle'])).classes("text-lg font-bold")
         for b in blockers:
             ui.label("· " + b).classes("text-sm")
-        hint("处理完再点删除。已发送的记录不用管：删除时会保留它们（用于去重和作者冷却），账号本身照样从各处消失。"
+        hint(_tr('处理完再点删除。已发送的记录不用管：删除时会保留它们（用于去重和作者冷却），账号本身照样从各处消失。')
                  , after_row=True)
         with ui.row().classes("w-full justify-end gap-2"):
             if refs["unsent"]:
-                ui.button("去任务队列处理", icon="list_alt",
+                ui.button(_tr('去任务队列处理'), icon="list_alt",
                           on_click=lambda: ui.navigate.to(f"/queue?status=unsent&account={a['id']}")).props("outline")
             if refs["live_plans"]:
-                ui.button("去定时发帖", icon="schedule", on_click=lambda: ui.navigate.to("/schedule")).props("outline")
-            ui.button("关闭", on_click=dlg.close).props("flat")
+                ui.button(_tr('去定时发帖'), icon="schedule", on_click=lambda: ui.navigate.to("/schedule")).props("outline")
+            ui.button(_tr('关闭'), on_click=dlg.close).props("flat")
     dlg.open()
+
+
+# Resolve display labels per client; keep core dictionaries and stored values unchanged.
+SCENE_TIERS = Labels(SCENE_TIERS)
+TIER_LABEL = Labels(TIER_LABEL)

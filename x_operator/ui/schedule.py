@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .i18n import Labels, t as _tr
+
 from nicegui import run, ui
 
 from ..core import media
 from ..core.schedule_calc import compute_next_run, describe_interval
 from ..core.scheduler import POST_MODE_LABEL
-from ..core.langdetect import LANG_LABEL, lang_name
+from ..core.langdetect import LANG_LABEL, lang_name as source_lang_name
 from ..db.database import get_conn, to_iso, utcnow_iso
 from .layout import page_title, detail_text
 from .layout import confirm, fmt_time, llm_wait, shell, tag
@@ -55,7 +57,7 @@ HINTS = {
 def _post_langs() -> dict:
     with get_conn() as conn:
         rows = conn.execute("SELECT DISTINCT lang FROM materials WHERE kind='post' AND deleted_at IS NULL ORDER BY lang").fetchall()
-    opts = {"": "不限"}
+    opts = {"": _tr('不限')}
     for r in rows:
         opts[r["lang"]] = lang_name(r["lang"])
     return opts
@@ -70,33 +72,31 @@ def register(jobs) -> None:
     def schedule_page():
         with shell("/schedule"):
             with ui.row().classes("items-center justify-between w-full"):
-                page_title("定时发帖", "管理发布计划与内容来源")
-                ui.button("新建发帖计划", icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
-            hint("用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），"
-                     "再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。"
-                     "周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。", after_row=True)
+                page_title(_tr('定时发帖'), _tr('管理发布计划与内容来源'))
+                ui.button(_tr('新建发帖计划'), icon="add", on_click=lambda: _edit(None, render)).props("color=primary")
+            hint(_tr('用自己的账号按计划发主贴（不是回复别人）。到点后按计划的「内容来源」产出一条推文进任务队列（勾了自动批准则直接进待发送），再由发送分发按账号活跃时段/间隔发出。后台每分钟检查一次到点计划。周期性计划请用「素材池轮流」或开「AI 改写变体」，否则每天发同一段文字会被 X 判重复。'), after_row=True)
 
             body = ui.column().classes("w-full gap-2")
 
             async def delete(sp):
-                if await confirm("删除这个定时计划？"):
-                    _delete(sp["id"]); ui.notify("已删除", type="positive"); render()
+                if await confirm(_tr('删除这个定时计划？')):
+                    _delete(sp["id"]); ui.notify(_tr('已删除'), type="positive"); render()
 
             async def fire_now(sp):
                 client = ui.context.client
                 mode = sp["content_mode"] or "fixed"
                 uses_ai = jobs.llm.configured and (mode == "ai_topic" or (sp["ai_rewrite"] and mode in ("fixed", "pool")))
                 if uses_ai:
-                    async with llm_wait("生成主贴", scene="post_write" if mode == "ai_topic" else "post_rewrite",
-                                        result_link=("查看任务队列", "/queue")) as task:
+                    async with llm_wait(_tr('生成主贴'), scene="post_write" if mode == "ai_topic" else "post_rewrite",
+                                        result_link=(_tr('查看任务队列'), "/queue")) as task:
                         ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
-                        task.finish(("已生成一条到任务队列：" if ok else "生成失败：") + msg, ok=ok)
+                        task.finish((_tr('已生成一条到任务队列：') if ok else _tr('生成失败：')) + msg, ok=ok)
                 else:
-                    ui.notify("正在生成…", type="info")
+                    ui.notify(_tr('正在生成…'), type="info")
                     ok, msg = await run.io_bound(jobs.fire_plan_now, sp["id"])
                 if not client.is_deleted:
                     with client.content:
-                        ui.notify(("已生成一条到任务队列：" if ok else "生成失败：") + msg, type="positive" if ok else "negative",
+                        ui.notify((_tr('已生成一条到任务队列：') if ok else _tr('生成失败：')) + msg, type="positive" if ok else "negative",
                                   multi_line=True, close_button=True, timeout=12000)
                         render()
 
@@ -109,50 +109,50 @@ def register(jobs) -> None:
                         "LEFT JOIN materials m ON m.id=sp.material_id ORDER BY sp.id").fetchall()
                 with body:
                     if not rows:
-                        ui.label("暂无定时发帖计划：点右上「新建发帖计划」，让账号按时间自动发主贴").classes("text-gray-400")
+                        ui.label(_tr('暂无定时发帖计划：点右上「新建发帖计划」，让账号按时间自动发主贴')).classes("text-gray-400")
                         return
                     for sp in rows:
                         mode = sp["content_mode"] or "fixed"
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center gap-2 flex-wrap"):
-                                tag(f"@{sp['acc_handle']}" + ("（已删除）" if sp["acc_deleted"] else ""), "account",
-                                    "用哪个账号发" + ("：账号已删除，要继续用这个计划请编辑换一个账号" if sp["acc_deleted"] else ""))
-                                tag(_describe_when(sp), "metric", "什么时候发")
+                                tag(f"@{sp['acc_handle']}" + (_tr('（已删除）') if sp["acc_deleted"] else ""), "account",
+                                    _tr('用哪个账号发') + (_tr('：账号已删除，要继续用这个计划请编辑换一个账号') if sp["acc_deleted"] else ""))
+                                tag(_describe_when(sp), "metric", _tr('什么时候发'))
                                 tag(_STATUS_LABEL.get(sp["status"], sp["status"]),
-                                    {"active": "ok", "paused": "off", "done": "off", "missed": "attn"}.get(sp["status"], "off"), "计划状态")
-                                tag("内容：" + POST_MODE_LABEL.get(mode, mode), "ai" if mode == "ai_topic" else "mode", "每次发什么")
+                                    {"active": "ok", "paused": "off", "done": "off", "missed": "attn"}.get(sp["status"], "off"), _tr('计划状态'))
+                                tag(_tr('内容：') + POST_MODE_LABEL.get(mode, mode), "ai" if mode == "ai_topic" else "mode", _tr('每次发什么'))
                                 if sp["ai_rewrite"]:
-                                    tag("AI 改写变体", "ai", "每次发之前让 AI 换个说法")
+                                    tag(_tr('AI 改写变体'), "ai", _tr('每次发之前让 AI 换个说法'))
                                 if sp["auto_approve"]:
-                                    tag("自动批准", "warn", "到点直接进待发送，不经人工审核")
+                                    tag(_tr('自动批准'), "warn", _tr('到点直接进待发送，不经人工审核'))
                                 if mode == "fixed" and sp["mat_deleted"]:
-                                    tag("素材已在回收站", "warn", "到点会暂停；请编辑计划换素材或恢复素材")
+                                    tag(_tr('素材已在回收站'), "warn", _tr('到点会暂停；请编辑计划换素材或恢复素材'))
                                 if mode == "ai_topic" and sp["media_mode"] == "pool" and media.parse_files(sp["media_files"]):
                                     pool_files = media.parse_files(sp["media_files"])
                                     lost = media.missing(pool_files)
-                                    tag(f"🎲 附件素材池 {len(pool_files)} 个" + ("（有文件丢失）" if lost else ""), "media" if not lost else "bad",
-                                        "每次发帖从这批图片 / 视频里随机挑 1 个" if not lost else "素材池里有文件在 data/media 找不到了，挑到它会发送失败")
+                                    tag(_tr('🎲 附件素材池 {p0} 个', p0=len(pool_files)) + (_tr('（有文件丢失）') if lost else ""), "media" if not lost else "bad",
+                                        _tr('每次发帖从这批图片 / 视频里随机挑 1 个') if not lost else _tr('素材池里有文件在 data/media 找不到了，挑到它会发送失败'))
                                 else:
                                     media_badge(media.parse_files(sp["mat_media"] if mode == "fixed" else (sp["media_files"] if mode == "ai_topic" else None)))
-                                ui.label(f"下次 {fmt_time(sp['next_run_at']) if sp['next_run_at'] else '—'}"
-                                         + (f" · 上次 {fmt_time(sp['last_run_at'])}" if sp["last_run_at"] else "")).classes("text-xs text-gray-400")
+                                ui.label(_tr('下次 {p0}', p0=fmt_time(sp['next_run_at']) if sp['next_run_at'] else '—')
+                                         + (_tr(' · 上次 {p0}', p0=fmt_time(sp['last_run_at'])) if sp["last_run_at"] else "")).classes("text-xs text-gray-400")
                             if mode == "fixed":
-                                ui.label((sp["mat_text"] or "（素材不存在）")[:140]).classes("text-sm")
+                                ui.label((sp["mat_text"] or _tr('（素材不存在）'))[:140]).classes("text-sm")
                             elif mode == "pool":
-                                ui.label("素材池：" + ("语言 " + lang_name(sp["pool_lang"]) if sp["pool_lang"] else "语言不限")
-                                         + ("，标签 " + sp["pool_tags"] if sp["pool_tags"] else "，全部发帖素材")).classes("text-sm")
+                                ui.label(_tr('素材池：') + (_tr('语言 ') + lang_name(sp["pool_lang"]) if sp["pool_lang"] else _tr('语言不限'))
+                                         + (_tr('，标签 ') + sp["pool_tags"] if sp["pool_tags"] else _tr('，全部发帖素材'))).classes("text-sm")
                             else:
-                                ui.label("主题要求：" + (sp["ai_brief"] or "（未填！）")[:140]).classes("text-sm " + ("" if sp["ai_brief"] else "text-red-500"))
+                                ui.label(_tr('主题要求：') + (sp["ai_brief"] or _tr('（未填！）'))[:140]).classes("text-sm " + ("" if sp["ai_brief"] else "text-red-500"))
                             if sp["last_error"]:
-                                detail_text("上次生成失败", sp["last_error"], warning=True)
+                                detail_text(_tr('上次生成失败'), sp["last_error"], warning=True)
                             with ui.row().classes("gap-2"):
-                                ui.button("编辑", on_click=lambda s=sp: _edit(s, render)).props("flat dense")
+                                ui.button(_tr('编辑'), on_click=lambda s=sp: _edit(s, render)).props("flat dense")
                                 if sp["status"] == "active":
-                                    ui.button("暂停", on_click=lambda s=sp: (_set_status(s["id"], "paused"), render())).props("flat dense")
+                                    ui.button(_tr('暂停'), on_click=lambda s=sp: (_set_status(s["id"], "paused"), render())).props("flat dense")
                                 elif sp["status"] in ("paused", "done", "missed"):
-                                    ui.button("恢复/重新启用", on_click=lambda s=sp: (_reactivate(s), render())).props("flat dense")
-                                ui.button("立即生成一次", icon="bolt", on_click=lambda s=sp: fire_now(s)).props("flat dense").tooltip("不等到点，现在就按内容来源生成一条到任务队列（不改下次运行时间）")
-                                ui.button("删除", icon="delete", on_click=lambda s=sp: delete(s)).props("flat dense color=negative")
+                                    ui.button(_tr('恢复/重新启用'), on_click=lambda s=sp: (_reactivate(s), render())).props("flat dense")
+                                ui.button(_tr('立即生成一次'), icon="bolt", on_click=lambda s=sp: fire_now(s)).props("flat dense").tooltip(_tr('不等到点，现在就按内容来源生成一条到任务队列（不改下次运行时间）'))
+                                ui.button(_tr('删除'), icon="delete", on_click=lambda s=sp: delete(s)).props("flat dense color=negative")
 
             render()
 
@@ -164,50 +164,50 @@ def register(jobs) -> None:
             cur_mat = conn.execute("SELECT id, text, status, deleted_at FROM materials WHERE id=?", (sp["material_id"],)).fetchone() \
                 if (sp and sp["material_id"]) else None
         if not accounts:
-            ui.notify("先到「设置 → 账号」添加一个账号", type="negative"); return
+            ui.notify(_tr('先到「设置 → 账号」添加一个账号'), type="negative"); return
 
         with ui.dialog() as dialog, ui.card().classes("w-[720px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-            ui.label("编辑定时发帖计划" if sp else "新建定时发帖计划").classes("text-lg font-bold")
+            ui.label(_tr('编辑定时发帖计划') if sp else _tr('新建定时发帖计划')).classes("text-lg font-bold")
             acc_opts = {a["id"]: a["handle"] for a in accounts}
             if cur_acc is not None and cur_acc["deleted_at"]:
-                acc_opts = {cur_acc["id"]: f"⚠ {cur_acc['handle']}（已删除，请换一个）", **acc_opts}
+                acc_opts = {cur_acc["id"]: _tr('⚠ {p0}（已删除，请换一个）', p0=cur_acc['handle']), **acc_opts}
             acc = ui.select(acc_opts,
-                            value=sp["account_id"] if sp else accounts[0]["id"], label="发帖账号").classes("w-full").props("outlined")
+                            value=sp["account_id"] if sp else accounts[0]["id"], label=_tr('发帖账号')).classes("w-full").props("outlined")
             ui.separator()
-            ui.label("内容来源").classes("font-semibold text-sm")
-            mode = ui.select(POST_MODE_LABEL, value=(sp["content_mode"] if sp else "pool"), label="每次发什么").classes("w-full").props("outlined")
+            ui.label(_tr('内容来源')).classes("font-semibold text-sm")
+            mode = ui.select(POST_MODE_LABEL, value=(sp["content_mode"] if sp else "pool"), label=_tr('每次发什么')).classes("w-full").props("outlined")
             hint(HINTS["mode"])
             # 固定素材
             mat_opts = {m["id"]: m["text"][:40] for m in mats}
             if cur_mat is not None and cur_mat["id"] not in mat_opts:
-                tag = "已在回收站" if cur_mat["deleted_at"] else f"状态：{cur_mat['status']}"
+                tag = _tr('已在回收站') if cur_mat["deleted_at"] else _tr('状态：{p0}', p0=cur_mat['status'])
                 mat_opts = {cur_mat["id"]: f"⚠ {tag}｜{cur_mat['text'][:36]}", **mat_opts}
             mat_box = ui.column().classes("w-full gap-1")
             with mat_box:
                 mat = ui.select(mat_opts, value=(sp["material_id"] if sp and sp["material_id"] in mat_opts else (mats[0]["id"] if mats else None)),
-                                label="发帖素材").classes("w-full").props("outlined")
+                                label=_tr('发帖素材')).classes("w-full").props("outlined")
                 if not mats:
-                    ui.label("还没有启用的发帖素材：素材库 → 新建 → 类型选「发帖」并启用").classes("text-xs text-orange-600")
+                    ui.label(_tr('还没有启用的发帖素材：素材库 → 新建 → 类型选「发帖」并启用')).classes("text-xs text-orange-600")
             # 素材池
             pool_box = ui.column().classes("w-full gap-1")
             with pool_box:
                 with ui.row().classes("w-full gap-2 no-wrap"):
                     pool_lang = ui.select(_post_langs(), value=(sp["pool_lang"] if sp and sp["pool_lang"] in _post_langs() else ""),
-                                          label="素材语言").classes("flex-1").props("outlined")
-                    pool_tags = ui.input("场景标签（选填，逗号隔开）", value=sp["pool_tags"] if sp else "").classes("flex-1").props("outlined")
+                                          label=_tr('素材语言')).classes("flex-1").props("outlined")
+                    pool_tags = ui.input(_tr('场景标签（选填，逗号隔开）'), value=sp["pool_tags"] if sp else "").classes("flex-1").props("outlined")
                 hint(HINTS["pool"], after_row=True)
-            rewrite = ui.switch("AI 改写变体（每次换个说法再发，需 LLM）", value=bool(sp["ai_rewrite"]) if sp else True)
+            rewrite = ui.switch(_tr('AI 改写变体（每次换个说法再发，需 LLM）'), value=bool(sp["ai_rewrite"]) if sp else True)
             rw_hint = hint(HINTS["rewrite"])
             # AI 主题
             ai_box = ui.column().classes("w-full gap-1")
             with ai_box:
                 write_lang = ui.select(_write_langs(), value=(sp["pool_lang"] if sp and sp["pool_lang"] in _write_langs() else "ja"),
-                                       label="推文语言").classes("w-60").props("outlined")
-                brief = ui.textarea("主题要求", value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow")
+                                       label=_tr('推文语言')).classes("w-60").props("outlined")
+                brief = ui.textarea(_tr('主题要求'), value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow")
                 hint(HINTS["brief"], after_row=True)   # ai_box 是 gap-1 的紧凑列，负边距会压到文本框上
                 template_controls(brief)
                 media_mode = ui.select(MEDIA_MODE_LABEL, value=(sp["media_mode"] if sp and sp["media_mode"] in MEDIA_MODE_LABEL else "fixed"),
-                                       label="配图 / 视频怎么带").classes("w-full").props("outlined")
+                                       label=_tr('配图 / 视频怎么带')).classes("w-full").props("outlined")
                 hint(HINTS["media_mode"], after_row=True)
                 mf = MediaField(media.parse_files(sp["media_files"]) if sp else [], label=MEDIA_FIELD_LABEL["fixed"],
                                 note=MEDIA_FIELD_NOTE)
@@ -224,21 +224,21 @@ def register(jobs) -> None:
             mode.on("update:model-value", lambda e: sync()); sync()
 
             ui.separator()
-            ui.label("什么时候发").classes("font-semibold text-sm")
+            ui.label(_tr('什么时候发')).classes("font-semibold text-sm")
             type_opts = dict(_TYPE_OPTIONS)
             if sp and sp["schedule_type"] == "cron":
-                type_opts["cron"] = "每天固定时间（旧 cron 写法）"
-            stype = ui.select(type_opts, value=sp["schedule_type"] if sp else "daily", label="节奏").classes("w-full").props("outlined")
-            expr = ui.input(_EXPR_LABEL.get(stype.value, "表达式"), value=sp["schedule_expr"] if sp else "21:00").classes("w-full").props("outlined")
+                type_opts["cron"] = _tr('每天固定时间（旧 cron 写法）')
+            stype = ui.select(type_opts, value=sp["schedule_type"] if sp else "daily", label=_tr('节奏')).classes("w-full").props("outlined")
+            expr = ui.input(_EXPR_LABEL.get(stype.value, _tr('表达式')), value=sp["schedule_expr"] if sp else "21:00").classes("w-full").props("outlined")
             hint(HINTS["expr"])
 
             def sync_type():
-                expr.props(f'label="{_EXPR_LABEL.get(stype.value, "表达式")}"')
+                expr.set_label(_EXPR_LABEL.get(stype.value, _tr('表达式')))
                 # 换了节奏类型、原表达式是别的类型的默认值或空 → 换成新类型的默认值
                 if (expr.value or "").strip() in ("", *_EXPR_DEFAULT.values()):
                     expr.value = _EXPR_DEFAULT.get(stype.value, "")
             stype.on("update:model-value", lambda e: sync_type())
-            auto = ui.switch("自动批准（到点直接进待发送，不经人工审核）", value=bool(sp["auto_approve"]) if sp else False)
+            auto = ui.switch(_tr('自动批准（到点直接进待发送，不经人工审核）'), value=bool(sp["auto_approve"]) if sp else False)
             hint(HINTS["auto"])
 
             def do_save():
@@ -246,15 +246,15 @@ def register(jobs) -> None:
                     return
                 m = mode.value
                 if m == "fixed" and not mat.value:
-                    ui.notify("固定素材模式要选一条发帖素材", type="negative"); return
+                    ui.notify(_tr('固定素材模式要选一条发帖素材'), type="negative"); return
                 if m == "ai_topic" and not (brief.value or "").strip():
-                    ui.notify("AI 按主题创作要填主题要求", type="negative"); return
+                    ui.notify(_tr('AI 按主题创作要填主题要求'), type="negative"); return
                 media_max = media.POOL_MAX_ITEMS if media_mode.value == "pool" else media.MAX_ITEMS
                 if m == "ai_topic" and media.check_set(mf.files, media_max):
-                    ui.notify(media.check_set(mf.files, media_max) + ("（想放更多请把「配图 / 视频怎么带」改成素材池）" if media_mode.value != "pool" else ""),
+                    ui.notify(media.check_set(mf.files, media_max) + (_tr('（想放更多请把「配图 / 视频怎么带」改成素材池）') if media_mode.value != "pool" else ""),
                               type="negative", multi_line=True); return
                 if (m == "ai_topic" or (rewrite.value and m in ("fixed", "pool"))) and not jobs.llm.configured:
-                    ui.notify("AI 创作 / AI 改写需要先到「设置 → LLM」配置网关（或先关掉「AI 改写变体」）", type="negative", multi_line=True); return
+                    ui.notify(_tr('AI 创作 / AI 改写需要先到「设置 → LLM」配置网关（或先关掉「AI 改写变体」）'), type="negative", multi_line=True); return
                 if m == "pool":
                     with get_conn() as conn:
                         q = "SELECT scenario_tags FROM materials WHERE kind='post' AND status='active' AND deleted_at IS NULL"
@@ -266,23 +266,23 @@ def register(jobs) -> None:
                     if tags:
                         rows = [r for r in rows if set(x.strip() for x in (r["scenario_tags"] or "").split(",")) & set(tags)]
                     if not rows:
-                        ui.notify("按这个语言/标签在素材库里找不到启用的发帖素材，先去素材库加几条", type="negative", multi_line=True); return
+                        ui.notify(_tr('按这个语言/标签在素材库里找不到启用的发帖素材，先去素材库加几条'), type="negative", multi_line=True); return
                 with get_conn() as conn:
                     acc_row = conn.execute("SELECT timezone, deleted_at FROM accounts WHERE id=?", (acc.value,)).fetchone()
                 if acc_row is None or acc_row["deleted_at"]:
-                    ui.notify("所选发帖账号已经删除，请换一个账号", type="negative"); return
+                    ui.notify(_tr('所选发帖账号已经删除，请换一个账号'), type="negative"); return
                 try:
                     nxt = compute_next_run(stype.value, expr.value.strip(), datetime.now(timezone.utc), acc_row["timezone"])
                 except ValueError as e:
                     ui.notify(str(e), type="negative"); return
                 if nxt is None:
-                    ui.notify("这个时间已经过去了，请填一个将来的时间", type="negative"); return
+                    ui.notify(_tr('这个时间已经过去了，请填一个将来的时间'), type="negative"); return
                 nxt_s = to_iso(nxt)
                 if m == "fixed":
                     with get_conn() as conn:
                         ok = conn.execute("SELECT 1 FROM materials WHERE id=? AND status='active' AND deleted_at IS NULL", (mat.value,)).fetchone()
                     if ok is None:
-                        ui.notify("所选素材不是「启用」状态或已在回收站，请换一条（或先到素材库恢复/启用它）", type="negative"); return
+                        ui.notify(_tr('所选素材不是「启用」状态或已在回收站，请换一条（或先到素材库恢复/启用它）'), type="negative"); return
                 if m == "pool":
                     lang_val = pool_lang.value or ""
                 elif m == "ai_topic":
@@ -313,11 +313,11 @@ def register(jobs) -> None:
                             ":schedule_type, :schedule_expr, :next_run_at, :auto_approve, 'active', :created_at)",
                             {**data, "created_at": utcnow_iso()})
                     conn.commit()
-                dialog.close(); refresh(); ui.notify("已保存，下次运行 " + fmt_time(nxt_s), type="positive")
+                dialog.close(); refresh(); ui.notify(_tr('已保存，下次运行 ') + fmt_time(nxt_s), type="positive")
 
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("取消", on_click=dialog.close).props("flat")
-                ui.button("保存", on_click=do_save).props("color=primary")
+                ui.button(_tr('取消'), on_click=dialog.close).props("flat")
+                ui.button(_tr('保存'), on_click=do_save).props("color=primary")
         dialog.open()
 
 
@@ -332,18 +332,18 @@ def _reactivate(sp) -> None:
     with get_conn() as conn:
         acc = conn.execute("SELECT timezone, deleted_at FROM accounts WHERE id=?", (sp["account_id"],)).fetchone()
     if acc["deleted_at"]:
-        ui.notify("这个计划的发帖账号已经删除，请先「编辑」换一个账号", type="warning"); return
+        ui.notify(_tr('这个计划的发帖账号已经删除，请先「编辑」换一个账号'), type="warning"); return
     tz = acc["timezone"]
     try:
         nxt = compute_next_run(sp["schedule_type"], sp["schedule_expr"], datetime.now(timezone.utc), tz)
     except ValueError as e:
         ui.notify(str(e), type="negative"); return
     if nxt is None:
-        ui.notify("一次性计划的时间已过去，请「编辑」改成将来的时间", type="warning"); return
+        ui.notify(_tr('一次性计划的时间已过去，请「编辑」改成将来的时间'), type="warning"); return
     with get_conn() as conn:
         conn.execute("UPDATE scheduled_posts SET status='active', next_run_at=?, last_error=NULL WHERE id=?", (to_iso(nxt), sp["id"]))
         conn.commit()
-    ui.notify("已恢复，下次运行 " + fmt_time(to_iso(nxt)), type="positive")
+    ui.notify(_tr('已恢复，下次运行 ') + fmt_time(to_iso(nxt)), type="positive")
 
 
 def _delete(sid: int):
@@ -351,3 +351,19 @@ def _delete(sid: int):
         conn.execute("UPDATE review_queue SET scheduled_post_id=NULL WHERE scheduled_post_id=?", (sid,))
         conn.execute("DELETE FROM scheduled_posts WHERE id=?", (sid,))
         conn.commit()
+
+
+# Resolve display labels per client; keep core dictionaries and stored values unchanged.
+POST_MODE_LABEL = Labels(POST_MODE_LABEL)
+LANG_LABEL = Labels(LANG_LABEL)
+_TYPE_LABEL = Labels(_TYPE_LABEL)
+_TYPE_OPTIONS = Labels(_TYPE_OPTIONS)
+_EXPR_LABEL = Labels(_EXPR_LABEL)
+_STATUS_LABEL = Labels(_STATUS_LABEL)
+MEDIA_MODE_LABEL = Labels(MEDIA_MODE_LABEL)
+MEDIA_FIELD_LABEL = Labels(MEDIA_FIELD_LABEL)
+HINTS = Labels(HINTS)
+
+
+def lang_name(code):
+    return _tr(source_lang_name(code))

@@ -7,6 +7,8 @@ from threading import RLock
 from uuid import uuid4
 from typing import Callable
 
+from .i18n import t as _tr, localized_props
+
 from nicegui import ui
 
 
@@ -71,8 +73,8 @@ def mount_task_panel() -> None:
     with client.content:
         with ui.card().classes("xo-task-panel fixed bottom-4 right-4 z-50") as panel:
             with ui.row().classes("xo-task-heading w-full items-center justify-between px-3 py-2 gap-2"):
-                heading = ui.label("任务进度").classes("font-semibold text-sm")
-                toggle = ui.button("收起", icon="expand_more").props("flat dense")
+                heading = ui.label(_tr('任务进度')).classes("font-semibold text-sm")
+                toggle = ui.button(_tr('收起'), icon="expand_more").props("flat dense")
             details = ui.column().classes("xo-task-details w-full p-3 pt-0 gap-3 overflow-y-auto")
     initial_tasks = _snapshot()
     expanded = not initial_tasks or any(t.finished is None for t in initial_tasks)
@@ -80,7 +82,7 @@ def mount_task_panel() -> None:
 
     def sync_expanded():
         details.set_visibility(expanded)
-        toggle.set_text("收起" if expanded else "展开")
+        toggle.set_text(_tr('收起') if expanded else _tr('展开'))
         toggle.props("icon=expand_more" if expanded else "icon=expand_less")
         panel.classes(remove="is-collapsed" if expanded else "", add="" if expanded else "is-collapsed")
 
@@ -97,7 +99,7 @@ def mount_task_panel() -> None:
         tasks = _snapshot()
         panel.set_visibility(bool(tasks))
         running = sum(t.finished is None for t in tasks)
-        heading.set_text(f"任务进度 · {running} 项进行中" if running else "任务进度 · 已完成")
+        heading.set_text(_tr('任务进度 · {p0} 项进行中', p0=running) if running else _tr('任务进度 · 已完成'))
         now = time.monotonic()
         current = [(t.id, t.message, t.fraction, t.finished, int((t.finished or now) - t.started)) for t in tasks]
         if signature == current or not expanded:
@@ -117,14 +119,14 @@ def mount_task_panel() -> None:
                         ui.label(task.label).classes("font-medium text-sm flex-1")
                         if not active:
                             ui.button(icon="close", on_click=lambda tid=task.id: _dismiss(tid)) \
-                                .props('flat dense round aria-label="移除已完成任务"').tooltip("移除已完成任务")
+                                .props(localized_props('flat dense round aria-label="移除已完成任务"')).tooltip(_tr('移除已完成任务'))
                     if active:
                         bar = ui.linear_progress(task.fraction or 0, show_value=False).classes("w-full")
                         if task.fraction is None:
                             bar.props("indeterminate")
                     elapsed = int((task.finished or now) - task.started)
                     prefix = f"{int(task.fraction * 100)}% · " if active and task.fraction is not None else ""
-                    ui.label(f"{prefix}{'已运行' if active else '用时'} {elapsed} 秒").classes("text-xs text-slate-500")
+                    ui.label(_tr('{p0}{p1} {p2} 秒', p0=prefix, p1=_tr('已运行') if active else _tr('用时'), p2=elapsed)).classes("text-xs text-slate-500")
                     ui.label(task.message).classes("text-sm whitespace-pre-wrap break-words w-full")
                     if task.note and active:
                         ui.label(task.note).classes("text-xs text-slate-500")
@@ -135,7 +137,7 @@ def mount_task_panel() -> None:
                         def show_result(action=task.result_action):
                             with client.content:
                                 action()
-                        ui.button("查看生成结果", on_click=show_result).props("outline dense")
+                        ui.button(_tr('查看生成结果'), on_click=show_result).props("outline dense")
 
     tick()
     ui.timer(0.5, tick)

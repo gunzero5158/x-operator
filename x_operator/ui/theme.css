@@ -40,6 +40,12 @@ body {
     background: var(--xo-ink); color: white; font-size: 21px;
 }
 .xo-brand-name { font-size: 18px; font-weight: 700; letter-spacing: -.5px; }
+.xo-version { color: var(--xo-muted); font-size: 11px; padding: 1px 6px; border: 1px solid var(--xo-line); border-radius: 5px; font-variant-numeric: tabular-nums; }
+.xo-language { color: var(--xo-accent); margin-right: 10px; }
+html[lang="en-US"] .xo-hint-short::before { content: 'Note · '; }
+html[lang="ja"] .xo-hint-short::before { content: '補足 · '; }
+html[lang="ja"] body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI", "Meiryo", sans-serif; }
+html[lang="zh-TW"] body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei UI", "Microsoft JhengHei", sans-serif; }
 .xo-brand-caption { color: var(--xo-muted); font-size: 12px; padding-left: 12px; border-left: 1px solid var(--xo-line); }
 .xo-nav { order: 3; width: 100%; gap: 6px; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
 .xo-nav-link {
@@ -301,4 +307,22 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
     .xo-nav-link, .xo-page .q-btn { transition: none; }
+}
+
+/* Account quotas remain compact even with hundreds of accounts. */
+.xo-usage-summary { color: var(--xo-ink); font-variant-numeric: tabular-nums; }
+.xo-usage-search { flex: 1 1 240px; max-width: 380px; }
+.xo-usage-scope { min-width: 220px; }
+.xo-usage-table .q-table__middle { overflow-x: auto; }
+.xo-usage-table th { white-space: nowrap; }
+.xo-usage-table td { height: 58px; font-variant-numeric: tabular-nums; }
+.xo-usage-secondary { color: #706b78; font-size: 12px; line-height: 1.5; }
+.xo-usage-exhausted { color: #a96715; font-weight: 650; }
+.xo-page .xo-recent-errors.q-card { padding: 8px 16px; }
+.xo-error-preview { max-width: min(52vw, 700px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xo-errors-table td { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.q-dialog .xo-error-dialog { width: 760px; max-width: 92vw; }
+.xo-error-full { max-height: 60vh; overflow: auto; }
+@media (max-width: 700px) {
+    .xo-usage-search, .xo-usage-scope { width: 100%; max-width: none; }
 }

@@ -1,4 +1,6 @@
 """页面底部的使用声明入口；仅在用户主动打开时展示全文。"""
+from .i18n import t as _tr, localized_props
+
 from nicegui import ui
 
 
@@ -19,16 +21,16 @@ DISCLAIMER = """本项目按 **Apache License 2.0** 以“现状”提供，不�
 def show_disclaimer() -> None:
     with ui.dialog() as dialog, ui.card().classes("xo-disclaimer-dialog"):
         with ui.row().classes("w-full items-center justify-between no-wrap"):
-            ui.label("免责声明").classes("text-lg font-semibold").props('role=heading aria-level=2')
-            ui.button(icon="close", on_click=dialog.close).props('flat round dense aria-label="关闭免责声明"')
-        ui.markdown(DISCLAIMER).classes("xo-disclaimer-copy")
+            ui.label(_tr('免责声明')).classes("text-lg font-semibold").props('role=heading aria-level=2')
+            ui.button(icon="close", on_click=dialog.close).props(localized_props('flat round dense aria-label="关闭免责声明"'))
+        ui.markdown(_tr(DISCLAIMER)).classes("xo-disclaimer-copy")
         with ui.row().classes("w-full justify-end"):
-            ui.button("关闭", on_click=dialog.close).props("flat")
+            ui.button(_tr('关闭'), on_click=dialog.close).props("flat")
     dialog.on("hide", dialog.delete)
     dialog.open()
 
 
 def disclaimer_footer() -> None:
     with ui.element("footer").classes("xo-footer"):
-        ui.label("Apache-2.0 开源许可 · 请合理使用")
-        ui.button("免责声明", on_click=show_disclaimer).props("flat dense no-caps color=secondary").classes("xo-footer-link")
+        ui.label(_tr('Apache-2.0 开源许可 · 请合理使用'))
+        ui.button(_tr('免责声明'), on_click=show_disclaimer).props("flat dense no-caps color=secondary").classes("xo-footer-link")

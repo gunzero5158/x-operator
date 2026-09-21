@@ -1,6 +1,6 @@
 [project]
 name = "x-operator"
-version = "0.1.0"
+dynamic = ["version"]
 description = "通用型 X（推特）半自动化运营工具 —— WebUI MVP"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -24,3 +24,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["x_operator"]
+
+[tool.hatch.version]
+path = "x_operator/version.py"

@@ -217,7 +217,7 @@ async def test_queue_skipped_recheck(user: User):
 async def test_queue_legend(user: User):
     _pages()
     await user.open("/queue")
-    await user.should_see("标签颜色说明")            # 图例改成按需展开的折叠条
+    await user.should_see("审核与标签说明")
     await user.should_see("/280 单位")          # 免费账号按 280 单位计
 
 
@@ -239,6 +239,7 @@ async def test_queue_shows_target_tweet_metrics(user: User):
 async def test_tag_legends(user: User):
     _pages()
     await user.open("/targets")
+    user.find("状态与处理说明").click()
     await user.should_see("标签颜色说明")
     await user.should_see("已进任务队列")
     # 颜色真的能生效：badge 不能带 Quasar 的 color 属性（它会加 !important 的主题蓝把颜色类压掉）；配色走 theme.css 的 xo-tag-* 类
@@ -247,6 +248,7 @@ async def test_tag_legends(user: User):
     st = [e for e in user.find("已进任务队列").elements if isinstance(e, ui.badge)][0]
     assert "xo-tag" in st._classes and "xo-tag-ok" in st._classes, st._classes
     await user.open("/queue")
+    user.find("审核与标签说明").click()
     await user.should_see("标签颜色说明")
     await user.should_see("来源：AI 匹配素材")
 
@@ -529,7 +531,8 @@ async def test_targets_regenerate_hint(user: User):
         c.commit()
     await user.open("/targets")
     await user.should_see("自动匹配")
-    await user.should_see("发送前仍检查黑名单")      # 说明挪进了页顶的「手动处理」条目
+    user.find("状态与处理说明").click()
+    await user.should_see("只生成待审核草稿。发送前仍检查黑名单、重复回复、作者冷却和时效")
     with get_conn() as c:
         c.execute("UPDATE target_tweets SET process_status='queued', llm_relevance_reason=NULL WHERE id=1"); c.commit()
 
@@ -763,7 +766,8 @@ async def test_account_delete_blocked_retired_and_revived(user: User):
     await user.should_see("这个账号之前删除过，已恢复并接上原来的发送记录")
     with get_conn() as c:
         rows = c.execute("SELECT id, deleted_at, status FROM accounts WHERE handle='uidel'").fetchall()
-        assert len(rows) == 1 and rows[0]["id"] == uid and rows[0]["deleted_at"] is None and rows[0]["status"] == "auth_error", [dict(r) for r in rows]   # 小号没填 Cookie：恢复后先标待登录，等浏览器登录 / 补 Cookie
+        # Re-adding with empty Cookie credentials restores history but must not enable sending.
+        assert len(rows) == 1 and rows[0]["id"] == uid and rows[0]["deleted_at"] is None and rows[0]["status"] == "auth_error", [dict(r) for r in rows]
         c.execute("DELETE FROM review_queue WHERE account_id=?", (uid,))
         c.execute("DELETE FROM accounts WHERE id=?", (uid,)); c.commit()
 

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from .i18n import Labels, t as _tr
+
 from nicegui import run, ui
 
 from ..adapters import factory
@@ -35,22 +37,22 @@ def _resolve_and_add(handle: str, note: str) -> str:
     """解析 @handle → x_user_id 并入库。返回错误文案，空串表示成功。（阻塞：在线程池里跑）"""
     handle = handle.lstrip("@").strip()
     if not handle:
-        return "请输入 @handle"
+        return _tr('请输入 @handle')
     account, why = ReadPool().pick()
     if account is None:
-        return f"无法解析用户：{why}"
+        return _tr('无法解析用户：{p0}', p0=why)
     try:
         client = factory.get_client(account)
         user = client.get_user_by_handle(handle)
     except (XClientError, ValueError) as e:
-        return f"解析 @{handle} 失败：{e}"
+        return _tr('解析 @{p0} 失败：{p1}', p0=handle, p1=e)
     with get_conn() as conn:
         try:
             conn.execute("INSERT INTO watched_users(handle, x_user_id, note, created_at) VALUES (?,?,?,?)",
                          (user.handle, user.user_id, note.strip(), utcnow_iso()))
             conn.commit()
         except Exception:
-            return f"@{user.handle} 已在监控列表中"
+            return _tr('@{p0} 已在监控列表中', p0=user.handle)
     return ""
 
 
@@ -59,18 +61,17 @@ def register(jobs) -> None:
     def watched_page():
         with shell("/watched"):
             with ui.row().classes("items-center justify-between w-full"):
-                page_title("监控推主", "关注指定账号，持续收集新内容")
-                ui.button("运行一次监控", icon="play_arrow",
-                          on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), "监控", render,
-                                                                 result_link=("查看抓取记录", "/targets?source=monitor"))).props("outline")
-            hint("添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其新推文 → 预检 → 按该推主的「回复方式」生成草稿 → 进任务队列。"
-                     " 抓到的推文（含被过滤的及原因）都在「抓取记录」页。新添加的推主默认：首次回溯 24 小时、不含回复、匹配素材库——点「编辑」可改。"
+                page_title(_tr('监控推主'), _tr('关注指定账号，持续收集新内容'))
+                ui.button(_tr('运行一次监控'), icon="play_arrow",
+                          on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), _tr('监控'), render, task_key='monitor',
+                                                                 result_link=(_tr('查看抓取记录'), "/targets?source=monitor"))).props("outline")
+            hint(_tr('添加时会通过你的账号去 X 查询该用户；每次运行监控拉取其新推文 → 预检 → 按该推主的「回复方式」生成草稿 → 进任务队列。 抓到的推文（含被过滤的及原因）都在「抓取记录」页。新添加的推主默认：首次回溯 24 小时、不含回复、匹配素材库——点「编辑」可改。')
                      , after_row=True)
 
             with ui.card().classes("w-full"):
                 with ui.row().classes("items-end gap-2 w-full"):
                     inp = ui.input("@handle").props("outlined dense")
-                    note_in = ui.input("备注（选填）").props("outlined dense").classes("flex-1")
+                    note_in = ui.input(_tr('备注（选填）')).props("outlined dense").classes("flex-1")
 
                     async def add():
                         h = inp.value or ""
@@ -82,14 +83,14 @@ def register(jobs) -> None:
                         if err:
                             ui.notify(err, type="negative", multi_line=True, close_button=True)
                         else:
-                            ui.notify("已添加（可点「编辑」调整时间窗和回复方式）", type="positive"); inp.value = ""; note_in.value = ""; render()
-                    add_btn = ui.button("添加", icon="add", on_click=add).props("color=primary")
+                            ui.notify(_tr('已添加（可点「编辑」调整时间窗和回复方式）'), type="positive"); inp.value = ""; note_in.value = ""; render()
+                    add_btn = ui.button(_tr('添加'), icon="add", on_click=add).props("color=primary")
 
             body = ui.column().classes("w-full gap-2")
 
             async def delete(u):
-                if await confirm(f"删除监控推主 @{u['handle']}？", "已抓取的记录会保留。"):
-                    _delete(u["id"]); ui.notify("已删除", type="positive"); render()
+                if await confirm(_tr('删除监控推主 @{p0}？', p0=u['handle']), _tr('已抓取的记录会保留。')):
+                    _delete(u["id"]); ui.notify(_tr('已删除'), type="positive"); render()
 
             def render():
                 body.clear()
@@ -98,7 +99,7 @@ def register(jobs) -> None:
                 acc_opts = account_options(with_auto=False)
                 with body:
                     if not rows:
-                        ui.label("暂无监控推主").classes("text-gray-400")
+                        ui.label(_tr('暂无监控推主')).classes("text-gray-400")
                         return
                     for u in rows:
                         with ui.card().classes("w-full"):
@@ -107,63 +108,63 @@ def register(jobs) -> None:
                                     with ui.row().classes("items-center gap-2"):
                                         ui.label(f"@{u['handle']}").classes("font-semibold")
                                         if u["include_replies"]:
-                                            tag("含回复", "metric", "这个推主回复别人的推文也抓")
-                                        tag(f"首次回溯 {u['lookback_hours']}h", "metric", "第一次运行往回找这么多小时")
+                                            tag(_tr('含回复'), "metric", _tr('这个推主回复别人的推文也抓'))
+                                        tag(_tr('首次回溯 {p0}h', p0=u['lookback_hours']), "metric", _tr('第一次运行往回找这么多小时'))
                                         v_lo, v_hi, v_wait = views_setting(u)
                                         if v_lo or v_hi:
-                                            tag(f"观看 {views_range_text(v_lo, v_hi)}" + (f" · 复查 {v_wait}h" if v_lo and v_wait else ""), "metric",
-                                                "观看量区间：高于上限直接过滤；低于下限的在发推后这么多小时内每次监控都复查")
-                                        tag("回复方式：" + REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"]),
-                                            "ai" if u["reply_mode"] == "ai_write" else "mode", "抓到后怎么生成回复")
-                                        tag("回复账号：" + reply_account_summary(u, acc_opts), "account", "用哪个账号回")
+                                            tag(_tr('观看 {p0}', p0=views_range_text(v_lo, v_hi)) + (_tr(' · 复查 {p0}h', p0=v_wait) if v_lo and v_wait else ""), "metric",
+                                                _tr('观看量区间：高于上限直接过滤；低于下限的在发推后这么多小时内每次监控都复查'))
+                                        tag(_tr('回复方式：') + REPLY_MODE_LABEL.get(u["reply_mode"], u["reply_mode"]),
+                                            "ai" if u["reply_mode"] == "ai_write" else "mode", _tr('抓到后怎么生成回复'))
+                                        tag(_tr('回复账号：') + reply_account_summary(u, acc_opts), "account", _tr('用哪个账号回'))
                                         if u["reply_mode"] == "ai_write" and media.parse_files(u["media_files"]):
                                             n = len(media.parse_files(u["media_files"]))
-                                            tag(f"📎 {'素材池 ' if u['media_mode'] == 'pool' else ''}{n} 个附件", "metric",
-                                                "AI 写的回复会带的配图 / 视频" + ("（每条随机挑 1 个）" if u["media_mode"] == "pool" else ""))
+                                            tag(_tr('📎 {p0}{p1} 个附件', p0=_tr('素材池 ') if u['media_mode'] == 'pool' else '', p1=n), "metric",
+                                                _tr('AI 写的回复会带的配图 / 视频') + (_tr('（每条随机挑 1 个）') if u["media_mode"] == "pool" else ""))
                                         if u["auto_approve"] and u["reply_mode"] != "manual":
-                                            tag(f"免审核 ≥ {float(u['auto_approve_min_confidence'] or 0.7):.2f}", "attn",
-                                                "置信度达到阈值的回复不经人工审核直接进待发送")
+                                            tag(_tr('免审核 ≥ {p0}', p0=format(float(u['auto_approve_min_confidence'] or 0.7), '.2f')), "attn",
+                                                _tr('置信度达到阈值的回复不经人工审核直接进待发送'))
                                         if not u["enabled"]:
-                                            tag("已停用", "off")
-                                    ui.label(f"命中 {u['hit_count']} 次 · 游标 {u['last_seen_tweet_id'] or '无（下次按首次回溯抓）'}"
-                                             + f" · 添加于 {fmt_time(u['created_at'])}"
+                                            tag(_tr('已停用'), "off")
+                                    ui.label(_tr('命中 {p0} 次 · 游标 {p1}', p0=u['hit_count'], p1=u['last_seen_tweet_id'] or _tr('无（下次按首次回溯抓）'))
+                                             + _tr(' · 添加于 {p0}', p0=fmt_time(u['created_at']))
                                              + (f" · {u['note']}" if u['note'] else "")).classes("text-xs text-gray-400")
                                     if u["reply_mode"] == "ai_write":
-                                        detail_text("创作要求", u["ai_brief"] or "未填写创作要求，AI 无法创作", warning=not bool(u["ai_brief"]))
+                                        detail_text(_tr('创作要求'), u["ai_brief"] or _tr('未填写创作要求，AI 无法创作'), warning=not bool(u["ai_brief"]))
                                 with ui.row().classes("items-center gap-1"):
-                                    sw = ui.switch("启用", value=bool(u["enabled"]))
+                                    sw = ui.switch(_tr('启用'), value=bool(u["enabled"]))
                                     sw.on("update:model-value", lambda e, uid=u["id"]: _toggle(uid, e.args))
-                                    ui.button("查看结果", icon="travel_explore",
+                                    ui.button(_tr('查看结果'), icon="travel_explore",
                                               on_click=lambda: ui.navigate.to("/targets?source=monitor")).props("flat dense color=primary")
-                                    ui.button("编辑", on_click=lambda uu=u: _edit(uu, render)).props("flat dense")
-                                    ui.button("重置游标", on_click=lambda uid=u["id"]: (_reset_cursor(uid), ui.notify("已重置，下次监控按「首次回溯」小时数重新抓", type="info"), render())).props("flat dense").tooltip("清掉「上次看到哪条」的记录")
-                                    ui.button("删除", icon="delete", on_click=lambda uu=u: delete(uu)).props("flat dense color=negative")
+                                    ui.button(_tr('编辑'), on_click=lambda uu=u: _edit(uu, render)).props("flat dense")
+                                    ui.button(_tr('重置游标'), on_click=lambda uid=u["id"]: (_reset_cursor(uid), ui.notify(_tr('已重置，下次监控按「首次回溯」小时数重新抓'), type="info"), render())).props("flat dense").tooltip(_tr('清掉「上次看到哪条」的记录'))
+                                    ui.button(_tr('删除'), icon="delete", on_click=lambda uu=u: delete(uu)).props("flat dense color=negative")
 
             render()
 
     def _edit(u, refresh):
         with ui.dialog() as dialog, ui.card().classes("w-[640px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-            ui.label(f"编辑 @{u['handle']}").classes("text-lg font-bold")
-            note = ui.input("备注", value=u["note"] or "").classes("w-full").props("outlined")
-            lookback = ui.number("首次回溯（小时）", value=u["lookback_hours"], min=1, max=720, step=1).classes("w-full").props("outlined")
+            ui.label(_tr('编辑 @{p0}', p0=u['handle'])).classes("text-lg font-bold")
+            note = ui.input(_tr('备注'), value=u["note"] or "").classes("w-full").props("outlined")
+            lookback = ui.number(_tr('首次回溯（小时）'), value=u["lookback_hours"], min=1, max=720, step=1).classes("w-full").props("outlined")
             hint(HINTS["lookback"])
-            incl = ui.switch("监控时包含其回复", value=bool(u["include_replies"]))
+            incl = ui.switch(_tr('监控时包含其回复'), value=bool(u["include_replies"]))
             hint(HINTS["include"])
             v_lo0, v_hi0, v_wait0 = views_setting(u)
             with ui.row().classes("w-full gap-3 no-wrap"):
-                min_views = ui.number("观看量下限（0 = 不限）", value=v_lo0, min=0, step=100).classes("flex-1").props("outlined")
-                max_views = ui.number("观看量上限（0 = 不限）", value=v_hi0, min=0, step=1000).classes("flex-1").props("outlined")
-                wait_h = ui.number("下限复查时长（小时）", value=v_wait0, min=0, max=VIEWS_WAIT_MAX, step=1).classes("flex-1").props("outlined")
+                min_views = ui.number(_tr('观看量下限（0 = 不限）'), value=v_lo0, min=0, step=100).classes("flex-1").props("outlined")
+                max_views = ui.number(_tr('观看量上限（0 = 不限）'), value=v_hi0, min=0, step=1000).classes("flex-1").props("outlined")
+                wait_h = ui.number(_tr('下限复查时长（小时）'), value=v_wait0, min=0, max=VIEWS_WAIT_MAX, step=1).classes("flex-1").props("outlined")
             hint(HINTS["views"], after_row=True)
             mode, brief, polish, acc, auto_sw, auto_thr, media_mode, mf = reply_mode_fields(
-                u["reply_mode"], u["ai_brief"], u["allow_polish"], "抓到新推文后", u,
+                u["reply_mode"], u["ai_brief"], u["allow_polish"], _tr('抓到新推文后'), u,
                 bool(u["auto_approve"]), float(u["auto_approve_min_confidence"] or 0.7), u["media_files"] or "[]", u["media_mode"] or "fixed")
 
             def save():
                 lo, hi = max(0, int(min_views.value or 0)), max(0, int(max_views.value or 0))
                 wait = max(0, min(VIEWS_WAIT_MAX, int(wait_h.value or 0)))
                 if lo and hi and lo > hi:
-                    ui.notify(f"观看量下限 {lo} 比上限 {hi} 还大，这样一条都留不下；请调一下，或把其中一个填 0", type="negative", multi_line=True); return
+                    ui.notify(_tr('观看量下限 {p0} 比上限 {p1} 还大，这样一条都留不下；请调一下，或把其中一个填 0', p0=lo, p1=hi), type="negative", multi_line=True); return
                 problem = reply_mode_invalid(mode, brief, media_mode, mf, acc)
                 if problem:
                     ui.notify(problem, type="negative", multi_line=True); return
@@ -180,11 +181,11 @@ def register(jobs) -> None:
                                   (brief.value or "").strip(), 1 if polish.value else 0,
                                   acc_mode, acc_ids, aa, thr, mm, mfiles, lo, hi, wait, u["id"]))
                     conn.commit()
-                dialog.close(); refresh(); ui.notify("已保存", type="positive")
+                dialog.close(); refresh(); ui.notify(_tr('已保存'), type="positive")
 
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("取消", on_click=dialog.close).props("flat")
-                ui.button("保存", on_click=save).props("color=primary")
+                ui.button(_tr('取消'), on_click=dialog.close).props("flat")
+                ui.button(_tr('保存'), on_click=save).props("color=primary")
         dialog.open()
 
 
@@ -204,3 +205,8 @@ def _delete(uid: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM watched_users WHERE id=?", (uid,))
         conn.commit()
+
+
+# Resolve display labels per client; keep core dictionaries and stored values unchanged.
+REPLY_MODE_LABEL = Labels(REPLY_MODE_LABEL)
+HINTS = Labels(HINTS)

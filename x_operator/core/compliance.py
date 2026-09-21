@@ -165,6 +165,16 @@ class ComplianceGuard:
                 reply_lim = max(1, reply_lim // 2)
         return post_lim, reply_lim
 
+    def check_daily_limit(self, account: sqlite3.Row, action: str, now: datetime) -> GuardResult:
+        """选取待发送条目与发送前复核共用；只检查当前动作类型的日限额。"""
+        post_lim, reply_lim = self.effective_limits(account)
+        limit = post_lim if action == "post" else reply_lim
+        used = self.daily_action_count(account["id"], action, now, account["timezone"])
+        if used >= limit:
+            return GuardResult(False, GuardCode.DAILY_LIMIT_REACHED, False,
+                               f"今日{'发帖' if action == 'post' else '回复'}已达上限（{used}/{limit}）")
+        return GuardResult(True, None, False, "日限额未到")
+
     def check(self, account: sqlite3.Row, item: sqlite3.Row, now: datetime | None = None,
               skip_timing: bool = False) -> GuardResult:
         """发送前的完整校验。skip_timing：人工「立即发送」时不看活跃时段和发送间隔；账号状态、日上限和硬违规照查。"""
@@ -183,14 +193,9 @@ class ComplianceGuard:
                 return GuardResult(False, GuardCode.INTERVAL_NOT_ELAPSED, False,
                                    f"两次{'发帖' if item['action_type'] == 'post' else '回复'}的最小间隔未到")
 
-        # 日上限
-        post_lim, reply_lim = self.effective_limits(account)
-        action = item["action_type"]
-        limit = post_lim if action == "post" else reply_lim
-        used = self.daily_action_count(account["id"], action, now, account["timezone"])
-        if used >= limit:
-            return GuardResult(False, GuardCode.DAILY_LIMIT_REACHED, False,
-                               f"今日{'发帖' if action == 'post' else '回复'}已达上限（{used}/{limit}）")
+        daily = self.check_daily_limit(account, item["action_type"], now)
+        if not daily.ok:
+            return daily
 
         return self.check_hard(item, now)
 

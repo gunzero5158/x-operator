@@ -234,12 +234,17 @@ except AuthExpired as e:
 print("[4] 缺少 Cookie 时提示主动浏览器登录；此检查不证明真实 X 登录成功")
 
 # ---------- 5. 代理与格式校验 ----------
-os.environ["HTTPS_PROXY"] = "127.0.0.1:7890"; os.environ.pop("HTTP_PROXY", None); os.environ.pop("ALL_PROXY", None)
-assert detect_system_proxy() == "http://127.0.0.1:7890", detect_system_proxy()
-assert resolve_proxy({}) == "http://127.0.0.1:7890" and resolve_proxy({"proxy": "direct"}) is None and resolve_proxy({"proxy": "10.0.0.1:1080"}) == "http://10.0.0.1:1080"
-os.environ["HTTPS_PROXY"] = "https://proxy.local:443"
-assert detect_system_proxy() == ("http://proxy.local:443" if sys.platform == "win32" else "https://proxy.local:443"), detect_system_proxy()
-os.environ.pop("HTTPS_PROXY"); assert detect_system_proxy() is None
+# Isolate proxy fixtures from the host's Windows registry/system proxy.
+# This checks proxy resolution rules, not real network connectivity.
+import urllib.request
+from unittest.mock import patch
+with patch("urllib.request.getproxies", urllib.request.getproxies_environment), patch.dict(os.environ):
+    os.environ["HTTPS_PROXY"] = "127.0.0.1:7890"; os.environ.pop("HTTP_PROXY", None); os.environ.pop("ALL_PROXY", None)
+    assert detect_system_proxy() == "http://127.0.0.1:7890", detect_system_proxy()
+    assert resolve_proxy({}) == "http://127.0.0.1:7890" and resolve_proxy({"proxy": "direct"}) is None and resolve_proxy({"proxy": "10.0.0.1:1080"}) == "http://10.0.0.1:1080"
+    os.environ["HTTPS_PROXY"] = "https://proxy.local:443"
+    assert detect_system_proxy() == ("http://proxy.local:443" if sys.platform == "win32" else "https://proxy.local:443"), detect_system_proxy()
+    os.environ.pop("HTTPS_PROXY"); assert detect_system_proxy() is None
 print("[5a] 系统代理检测/直连/自定义 OK（https 前缀只在 Windows 改写）")
 assert validate_unofficial_credentials({"auth_token": "abc", "ct0": "d" * 32}).startswith("auth_token 格式不对")
 assert validate_unofficial_credentials({"auth_token": "a" * 40, "ct0": "zz"}).startswith("ct0 格式不对")
@@ -390,7 +395,8 @@ with get_conn() as conn:
     a = conn.execute("SELECT next_allowed_at, next_allowed_post_at FROM accounts WHERE id=?", (acc["id"],)).fetchone()
 assert rows[qid_p] == "sent" and rows[qid_r] == "approved", rows            # 回复冷却中，主贴发了
 assert a["next_allowed_at"] == reply_na and a["next_allowed_post_at"] and parse_iso(a["next_allowed_post_at"]) > datetime.now(timezone.utc) + timedelta(seconds=200), dict(a)
-r = jobs.dispatcher.tick(); assert r.sent == 0 and "回复还要等约" in r.as_msg() and "发帖还要等约" in r.as_msg(), r.as_msg()
+# Only replies remain queued; do not report cooldowns for an empty post queue.
+r = jobs.dispatcher.tick(); assert r.sent == 0 and "回复还要等约" in r.as_msg() and "发帖还要等约" not in r.as_msg(), r.as_msg()
 with get_conn() as conn:   # 主贴冷却没到、回复到点 → 发回复
     conn.execute("UPDATE accounts SET next_allowed_at=NULL WHERE id=?", (acc["id"],)); conn.commit()
 r = jobs.dispatcher.tick(); assert r.sent == 1, r.as_msg()
