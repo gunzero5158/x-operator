@@ -93,6 +93,21 @@ def _delete_bulk(statuses: list[str]) -> tuple[int, int]:
     return done, kept
 
 
+def _delete_selected(records: dict[int, tuple[str, str, int | None]]) -> tuple[int, int]:
+    """Delete only the confirmed snapshot; recheck state, source and queue references atomically."""
+    done = 0
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for tid, (status, source, rule_id) in records.items():
+            done += conn.execute(
+                "DELETE FROM target_tweets WHERE id=? AND process_status=? AND source=? "
+                "AND source_rule_id IS ? AND NOT EXISTS "
+                "(SELECT 1 FROM review_queue WHERE target_tweet_id=target_tweets.id)",
+                (tid, status, source, rule_id)).rowcount
+        conn.commit()
+    return done, len(records) - done
+
+
 def _blacklist(author_id: str, handle: str) -> None:
     with get_conn() as conn:
         conn.execute("INSERT INTO blacklist(x_user_id, handle, reason, created_at) VALUES (?,?,?,?) "
@@ -121,10 +136,7 @@ def register(jobs) -> None:
                               on_click=lambda: run_job_with_progress(lambda progress: jobs.monitor.run_once(progress=progress), _tr('监控'), render, task_key='monitor')).props("outline dense")
                     ui.button(_tr('运行所有搜索规则'), icon="manage_search",
                               on_click=lambda: run_job_with_progress(lambda progress: jobs.search.run_once(progress=progress), _tr('搜索'), render, task_key='search')).props("outline dense")
-                    with ui.button(icon="delete_sweep").props("outline color=negative dense"):
-                        with ui.menu():
-                            ui.menu_item(_tr('清理已过滤 / 未匹配 / 已过期'), on_click=lambda: clear(["filtered", "no_match", "expired"]))
-                            ui.menu_item(_tr('清理全部抓取记录'), on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
+
 
             with ui.expansion(_tr('状态与处理说明'), icon="help_outline").classes("xo-help w-full text-sm"):
                 tag_legend(["source", "ok", "wait", "attn", "off", "metric"])
@@ -134,6 +146,31 @@ def register(jobs) -> None:
             body = ui.column().classes("w-full gap-2")
             selected: set[int] = set()
             visible_ids: list[int] = []
+            visible_records: dict[int, tuple[str, str, int | None]] = {}
+            deleting = False
+
+            async def delete_selected():
+                nonlocal deleting
+                if deleting:
+                    return
+                records = {tid: visible_records[tid] for tid in visible_ids if tid in selected}
+                if not records:
+                    return
+                deleting = True
+                confirmed = False
+                try:
+                    confirmed = await confirm(_tr('删除选中的 {count} 条抓取记录？', count=len(records)),
+                                         _tr('仅删除本次勾选的记录，不扩大到其他列表。已进入任务队列或状态、来源已改变的记录会保留。此操作不可撤销。'),
+                                         ok_label=_tr('删除选中'))
+                    if not confirmed:
+                        return
+                    done, kept = await run.io_bound(_delete_selected, records)
+                    ui.notify(_tr('已删除 {done} 条，保留 {kept} 条', done=done, kept=kept),
+                              type="warning" if kept else "positive")
+                finally:
+                    deleting = False
+                    if confirmed:
+                        render()
 
             async def clear(statuses: list[str]):
                 c = _counts()
@@ -210,6 +247,7 @@ def register(jobs) -> None:
                 body.clear()
                 selected.clear()
                 visible_ids.clear()
+                visible_records.clear()
                 rid = int(rule_f.value or 0)
                 src = source_f.value
                 if rid and src != "search":
@@ -218,6 +256,13 @@ def register(jobs) -> None:
                 status_f.set_options(_status_options(src, rid), value=status_f.value)
                 rows = _load(status_f.value, src, rid)
                 with body:
+                    # Keep global cleanup beside selection actions, including empty filters.
+                    with ui.row().classes("xo-batch-bar w-full items-center gap-2 flex-wrap") as batch_bar:
+                        with ui.button(_tr('全局清理'), icon="delete_sweep").props("outline color=negative dense") \
+                                .tooltip(_tr('全局清理（不受当前筛选影响）')):
+                            with ui.menu():
+                                ui.menu_item(_tr('清理已过滤 / 未匹配 / 已过期'), on_click=lambda: clear(["filtered", "no_match", "expired"]))
+                                ui.menu_item(_tr('清理全部抓取记录'), on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
                     if not rows:
                         c = _counts(src, rid)
                         if sum(c.values()) == 0:
@@ -226,18 +271,19 @@ def register(jobs) -> None:
                             ui.label(_tr('这个状态下没有记录，换个状态筛选看看。')).classes("text-gray-400")
                         return
                     ui.label(_tr('最近 {p0} 条', p0=len(rows)) + (_tr('（已达显示上限，可清理旧记录）') if len(rows) >= _LIMIT else "")).classes("text-xs text-gray-400")
-                    selection_box = None
-                    if status_f.value in ("filtered", "no_match"):
-                        visible_ids.extend(t["id"] for t in rows)
-                        checkboxes = {}
-                        with ui.row().classes("xo-batch-bar w-full items-center gap-2"):
-                            def set_all(value):
-                                for cb in checkboxes.values():
-                                    cb.set_value(value)
+                    visible_ids.extend(t["id"] for t in rows)
+                    visible_records.update({t["id"]: (t["process_status"], t["source"], t["source_rule_id"]) for t in rows})
+                    checkboxes = {}
+                    batch_buttons = []
+                    with batch_bar:
+                        def set_all(value):
+                            for cb in checkboxes.values():
+                                cb.set_value(value)
 
-                            ui.button(_tr('全选当前列表'), on_click=lambda: set_all(True)).props("flat dense")
-                            ui.button(_tr('取消全选'), on_click=lambda: set_all(False)).props("flat dense")
-                            count_label = ui.label(_tr('已选 0 条')).classes("text-sm text-slate-600")
+                        ui.button(_tr('全选当前列表'), on_click=lambda: set_all(True)).props("flat dense")
+                        ui.button(_tr('取消全选'), on_click=lambda: set_all(False)).props("flat dense")
+                        count_label = ui.label(_tr('已选 0 条')).classes("text-sm text-slate-600")
+                        if status_f.value in ("filtered", "no_match"):
                             batch_btn = ui.button(_tr('批量自动匹配'), icon="autorenew", on_click=rematch_selected).props("outline color=primary")
                             batch_btn.tooltip(_tr('按各条记录的原规则处理；AI 创作规则仍会重新撰写'))
                             batch_btn.disable()
@@ -245,25 +291,48 @@ def register(jobs) -> None:
                                                      on_click=lambda: rematch_selected(material_only=True)).props("outline color=primary")
                             material_btn.tooltip(_tr('从启用的回复素材中自动选择，使用素材原文和附件，不调用 AI 撰写或润色'))
                             material_btn.disable()
+                            batch_buttons.extend([batch_btn, material_btn])
+                        delete_btn = ui.button(_tr('批量删除'), icon="delete_sweep", on_click=delete_selected).props("outline color=negative")
+                        delete_btn.disable()
+                    if status_f.value in ("filtered", "no_match"):
                         detail_text(_tr('批量处理说明'), _tr('「自动匹配」沿用原规则；「素材库匹配」只选已有回复素材，保留原文和附件。两者均跳过打分和预检，成功后进入待审核。全选只包含当前显示的 {p0} 条；运行中可以继续使用其他功能。', p0=len(rows)))
+                    delete_btn.tooltip(_tr('全选只包含当前显示的 {count} 条；批量删除仅处理勾选项。', count=len(rows)))
 
-                        def selection_box(tid):
-                            def change(e):
-                                if e.value:
-                                    selected.add(tid)
-                                else:
-                                    selected.discard(tid)
-                                count_label.set_text(_tr('已选 {p0} 条', p0=len(selected)))
-                                batch_btn.set_enabled(bool(selected))
-                                material_btn.set_enabled(bool(selected))
-                            checkboxes[tid] = ui.checkbox(_tr('选择'), on_change=change).props("dense")
+                    def selection_box(tid):
+                        def change(e):
+                            if e.value:
+                                selected.add(tid)
+                            else:
+                                selected.discard(tid)
+                            count_label.set_text(_tr('已选 {p0} 条', p0=len(selected)))
+                            for button in batch_buttons:
+                                button.set_enabled(bool(selected))
+                            delete_btn.set_enabled(bool(selected) and not deleting)
+                        checkboxes[tid] = ui.checkbox(_tr('选择'), on_change=change).props("dense").mark(f"target-select-{tid}")
 
                     for t in rows:
                         _card(t, rematch, delete_one, blacklist, pick, write, selection_box)
 
-            status_f.on("update:model-value", lambda e: render())
-            source_f.on("update:model-value", lambda e: render())
-            rule_f.on("update:model-value", lambda e: render())
+            updating_filters = False
+
+            def filter_changed(changed):
+                nonlocal updating_filters
+                if updating_filters:
+                    return
+                updating_filters = True
+                try:
+                    if changed == "source" and source_f.value != "search":
+                        rule_f.set_value(0)
+                    elif changed == "rule" and rule_f.value:
+                        source_f.set_value("search")
+                finally:
+                    updating_filters = False
+                ui.navigate.history.replace(f"/targets?status={status_f.value}&source={source_f.value}&rule={int(rule_f.value or 0)}")
+                render()
+
+            status_f.on_value_change(lambda: filter_changed("status"))
+            source_f.on_value_change(lambda: filter_changed("source"))
+            rule_f.on_value_change(lambda: filter_changed("rule"))
             render()
 
 

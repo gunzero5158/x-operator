@@ -192,7 +192,7 @@ async def test_display_timezone_setting(user: User):
 
 
 async def test_queue_skipped_recheck(user: User):
-    """任务队列「已跳过」：原因显示中文、有「重新判断」按钮；顶部「重新判断全部已跳过」只在该筛选下出现；点了能放回待审核。"""
+    """任务队列「已跳过」：原因显示中文、有「重新判断」按钮；统一批量区提供重新判断；单条操作仍能放回待审核。"""
     _pages()
     with get_conn() as conn:
         conn.execute("INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, tweet_created_at, source, process_status) "
@@ -206,7 +206,7 @@ async def test_queue_skipped_recheck(user: User):
     status_sel = [e for e in user.find(kind=ui.select).elements if "skipped" in e.options][0]   # 顶部状态筛选（没有 label）
     UserInteraction(user, {status_sel}, None).trigger("update:modelValue", {"value": list(status_sel.options).index("skipped")})
     await user.should_see("作者冷却期内")
-    await user.should_see("重新判断全部已跳过")
+    await user.should_see("操作范围")
     _click_button(user, "重新判断")
     await user.should_see("已放回待审核")
     with get_conn() as conn:
@@ -682,13 +682,17 @@ async def test_queue_account_filter_transfer_and_delete(user: User):
     await user.should_see("@small1 当前「凭据失效」，名下 3 条未发送的条目发不出去")
     await user.should_see("af_f")
     await user.should_see("af_a")
-    _click_button(user, "批量转给其他账号")
+    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "操作范围")
+    scope.set_value("filtered")
+    operation = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "批量操作")
+    operation.set_value("transfer")
+    _click_button(user, "执行批量操作")
     await user.should_see("转给哪些账号（选多个 = 平均分）")
     sel = [e for e in user.find(kind=ui.select).elements if e._props.get("label") == "转给哪些账号（选多个 = 平均分）"][0]
     assert aid["small1"] not in sel.options and aid["acc1"] in sel.options, sel.options
     sel.set_value([aid["acc1"]])
     _click_button(user, "转移")
-    await user.should_see("已转移 3 条：@acc1 3 条")
+    await user.should_see("已完成 3 条，未完成 0 条")
     await user.should_see("这个账号在此状态下没有条目")
     with get_conn() as c:
         got = {r["final_text"]: (r["account_id"], r["status"]) for r in c.execute("SELECT * FROM review_queue WHERE final_text LIKE 'af_%'")}
@@ -699,8 +703,10 @@ async def test_queue_account_filter_transfer_and_delete(user: User):
                   "VALUES (?,'reply',1,1,'af_del','pending',?)", (aid["small1"], utcnow_iso())); c.commit()
     await user.open(f"/queue?status=pending&account={aid['small1']}")
     await user.should_see("af_del")
+    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "操作范围")
+    scope.set_value("filtered")
     _click_button(user, "批量删除")
-    await user.should_see("删除@small1 的「待审核」全部 1 条条目？")
+    await user.should_see("删除@small1 的「待审核 · 全部类型」全部 1 条条目？")
     _click_button(user, "全部删除")
     await user.should_see("已删除 1 条")
     with get_conn() as c:
@@ -910,3 +916,68 @@ async def test_long_hints_collapse_and_expand(user: User):
     assert short and all(len(e.text) <= 60 for e in short) and all("更多" not in e.text for e in short), [e.text for e in short][:3]
     with get_conn() as c:
         c.execute("DELETE FROM watched_users WHERE handle='hintshort'"); c.commit()
+
+
+async def test_cookie_account_browser_setup_preserves_credentials(user: User, monkeypatch):
+    import json
+    monkeypatch.setattr(settings_page.browser_login.service, "installed", lambda: False)
+    requested = []
+    monkeypatch.setattr(settings_page.browser_login, "login_accounts", lambda ids, refresh: requested.extend(ids))
+    _pages()
+    cookies = {"auth_token": "a" * 40, "ct0": "b" * 32}
+    with get_conn() as conn:
+        aid = conn.execute("INSERT INTO accounts(handle,access_type,credentials) VALUES ('cookie_setup','unofficial',?)", (json.dumps(cookies),)).lastrowid
+        conn.commit()
+    try:
+        await user.open("/settings")
+        button = next(b for b in user.find(kind=ui.button).elements if b.text == "配置浏览器登录" and "cookie_setup" in _card_text(b))
+        UserInteraction(user, {button}, None).click()
+        await user.should_see("方式二：账号密码 + 两步验证密钥")
+        await user.should_not_see("方式一：浏览器 Cookie")
+        await user.should_see("保存并登录")
+        await user.should_see("已有 Cookie 会保留")
+        await user.should_not_see("限速与活跃时段")
+        await user.should_not_see("通道类型")
+        _click_button(user, "取消")
+        with get_conn() as conn:
+            assert json.loads(conn.execute("SELECT credentials FROM accounts WHERE id=?", (aid,)).fetchone()[0]) == cookies
+        assert not requested
+        UserInteraction(user, {button}, None).click()
+        await user.should_see("保存并登录")
+        password = next(e for e in user.find(kind=ui.input).elements if e._props.get("label") == "登录密码" and _in_dialog(e))
+        password.set_value("mock-password")
+        _click_button(user, "保存并登录")
+        await user.should_see("已保存")
+        assert requested == [aid]
+        with get_conn() as conn:
+            saved = json.loads(conn.execute("SELECT credentials FROM accounts WHERE id=?", (aid,)).fetchone()[0])
+        assert saved["auth_token"] == cookies["auth_token"] and saved["ct0"] == cookies["ct0"]
+        assert saved["username"] == "cookie_setup" and saved["password"] == "mock-password"
+    finally:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM accounts WHERE id=?", (aid,)); conn.commit()
+
+
+async def test_browser_login_explains_shared_installation(user: User, monkeypatch):
+    monkeypatch.setattr(settings_page.browser_login.service, "installed", lambda: False)
+    def unexpected_action(*args, **kwargs):
+        raise AssertionError("Opening login guidance must not install or start login")
+    monkeypatch.setattr(settings_page.browser_login.service, "install_browser", unexpected_action)
+    monkeypatch.setattr(settings_page.browser_login.service, "enqueue", unexpected_action)
+    _pages()
+    await user.open("/settings")
+    _click_button(user, "浏览器登录（需安装）")
+    await user.should_see("首次下载一次，所有账号共用")
+    await user.should_see("下载 Chromium")
+
+
+async def test_browser_login_ready_account_uses_existing_browser(user: User, monkeypatch):
+    monkeypatch.setattr(settings_page.browser_login.service, "installed", lambda: True)
+    requested = []
+    monkeypatch.setattr(settings_page.browser_login, "login_accounts", lambda ids, refresh: requested.extend(ids))
+    _pages()
+    await user.open("/settings")
+    _click_button(user, "浏览器登录")
+    with get_conn() as conn:
+        aid = conn.execute("SELECT id FROM accounts WHERE handle='small1'").fetchone()[0]
+    assert requested == [aid]

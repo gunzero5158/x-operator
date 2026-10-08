@@ -1,6 +1,6 @@
 """任务队列（design-v1.1 §8.2）：核心页。逐条卡片，可编辑文案、换素材、批准/跳过/拉黑/删除。
 
-顶部可按状态 + 发送账号筛选；选了某个账号后能把筛出来的条目批量转给其他账号或批量删除（账号凭据失效时清理用）。
+顶部按状态、发送账号和帖子类型筛选；列表批量操作区统一选择范围并执行转移、清理等操作。
 
 自动刷新只在「条目集合变了」时才重绘，避免把用户正在编辑的文案冲掉。
 已发送条目显示 X 上的链接与「回查核实」结果（发送接口返回成功 ≠ 一定真的发出去了）。
@@ -11,7 +11,7 @@ from .i18n import Labels, t as _tr
 
 from nicegui import run, ui
 
-from ..core import media, textlimit
+from ..core import media, textlimit, queue_actions
 from ..core.compliance import ComplianceGuard, SKIP_REASON_LABEL
 from ..core.langdetect import lang_name as source_lang_name
 from ..db.database import get_conn, utcnow_iso
@@ -45,23 +45,39 @@ UNSENT_LABEL = "未发送的全部（待审核 + 待发送 + 失败）"
 # 能批量转给别的账号的状态（发送中 / 已发送的不能动）
 TRANSFERABLE = ("pending", "approved", "failed", "skipped", "expired")
 ALL_ACCOUNTS = 0
+ACTION_TYPE_LABELS = {"all": "全部类型", "reply": "回复", "post": "发帖"}
+BATCH_LABELS = {"restore": "捞回待审核", "approve": "批准", "skip": "跳过", "revert": "撤回到待审核",
+                "recheck": "重新判断", "force": "突破规则并放回待审核", "transfer": "转给其他账号", "verify": "重新回查"}
+BATCH_DETAILS = {
+    "restore": "放回待审核、重试次数清零，保留失败原因；已回复过的条目不会重复恢复。批准后才会重新发送。",
+    "approve": "使用当前编辑框中的文案，检查空白和账号长度上限。批准后将进入正常发送队列，分发器可能自动发送。",
+    "skip": "将选中的待审核任务标记为已跳过。未保存的文案修改不会写入；之后可重新判断。",
+    "revert": "仅撤回尚未开始发送的任务。已经发送或发送中的任务会保留。",
+    "recheck": "重新检查黑名单、去重、作者冷却与时效；通过的放回待审核，过期的移入已过期，其余保留并显示原因。",
+    "force": "保留文案和附件，绕过黑名单、作者冷却与时效，仍需审核批准。去重、账号状态和发送额度限制仍保留。",
+    "verify": "逐条查询 X 上的发送结果，会产生读取请求；无法查询的条目会保留供重试。",
+}
 ACC_STATUS_LABEL = {"active": "", "paused": "已暂停", "auth_error": "凭据失效"}
 DELETED_LABEL = "已删除"
 
 
-def _where(status: str, account_id: int = ALL_ACCOUNTS) -> tuple[str, list]:
+def _where(status: str, account_id: int = ALL_ACCOUNTS, action_type: str = "all") -> tuple[str, list]:
     if status == UNSENT:
         sql, args = f"rq.status IN ({','.join('?' * len(UNSENT_STATUSES))})", list(UNSENT_STATUSES)
     else:
         sql, args = "rq.status=?", [status]
     if account_id:
         sql += " AND rq.account_id=?"; args.append(int(account_id))
+    if action_type not in ACTION_TYPE_LABELS:
+        raise ValueError("Invalid action type")
+    if action_type != "all":
+        sql += " AND rq.action_type=?"; args.append(action_type)
     return sql, args
 
 
-def _load(status: str, account_id: int = ALL_ACCOUNTS):
+def _load(status: str, account_id: int = ALL_ACCOUNTS, action_type: str = "all"):
     order = _ORDER_BY.get(status, _ORDER_DEFAULT)
-    where, args = _where(status, account_id)
+    where, args = _where(status, account_id, action_type)
     with get_conn() as conn:
         items = conn.execute(
             "SELECT rq.*, a.handle AS acc_handle, a.deleted_at AS acc_deleted, tt.author_handle, tt.author_id, tt.text AS tgt_text, "
@@ -80,24 +96,26 @@ def _load(status: str, account_id: int = ALL_ACCOUNTS):
     return items
 
 
-def _counts(account_id: int = ALL_ACCOUNTS) -> dict[str, int]:
-    """各状态条数（选了账号就只数它的），另带 unsent = 未发送的全部。"""
+def _counts(account_id: int = ALL_ACCOUNTS, action_type: str = "all") -> dict[str, int]:
+    clauses, args = [], []
+    if account_id:
+        clauses.append("account_id=?"); args.append(account_id)
+    if action_type != "all":
+        clauses.append("action_type=?"); args.append(action_type)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with get_conn() as conn:
-        if account_id:
-            rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue WHERE account_id=? GROUP BY status", (int(account_id),)).fetchall()
-        else:
-            rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue GROUP BY status").fetchall()
+        rows = conn.execute("SELECT status, COUNT(*) AS c FROM review_queue" + where + " GROUP BY status", args).fetchall()
     out = {r["status"]: r["c"] for r in rows}
     out[UNSENT] = sum(out.get(k, 0) for k in UNSENT_STATUSES)
     return out
 
 
-def _account_filter_options(status: str) -> dict:
+def _account_filter_options(status: str, action_type: str = "all") -> dict:
     """账号筛选下拉：{0: 全部账号, id: @handle · 凭据失效（当前状态下 N 条）}。停用 / 失效的账号也列出来，正是要清理它们；
     已删除的账号只在当前状态下还有它的记录时列出。"""
     with get_conn() as conn:
         accs = conn.execute("SELECT id, handle, status, deleted_at FROM accounts ORDER BY (deleted_at IS NOT NULL), (status='active'), is_primary DESC, id").fetchall()
-        where, args = _where(status)
+        where, args = _where(status, action_type=action_type)
         cnt = {r["account_id"]: r["c"] for r in conn.execute(
             f"SELECT rq.account_id, COUNT(*) AS c FROM review_queue rq WHERE {where} GROUP BY rq.account_id", args)}
     opts = {ALL_ACCOUNTS: _tr('全部账号')}
@@ -109,28 +127,35 @@ def _account_filter_options(status: str) -> dict:
     return opts
 
 
-def _matching_ids(status: str, account_id: int = ALL_ACCOUNTS) -> list[int]:
+def _matching_ids(status: str, account_id: int = ALL_ACCOUNTS, action_type: str = "all") -> list[int]:
     """当前筛选下的全部条目 id（不受页面只显示 200 条的限制）。"""
-    where, args = _where(status, account_id)
+    where, args = _where(status, account_id, action_type)
     with get_conn() as conn:
         return [r["id"] for r in conn.execute(f"SELECT rq.id FROM review_queue rq WHERE {where} ORDER BY rq.id", args).fetchall()]
 
 
-def transfer_items(item_ids: list[int], target_ids: list[int]) -> dict:
+def transfer_items(item_ids: list[int], target_ids: list[int], expected_records: dict | None = None) -> dict:
     """把条目批量转给其他账号：选多个目标账号就按顺序平均分。只转 TRANSFERABLE 状态的（发送中 / 已发送跳过）；
     目标账号必须是启用中的。待发送的条目如果超出新账号的长度上限（免费账号 280 单位），退回待审核让人删减，不然发送时必失败。
     返回 {moved, per_account: {handle: n}, back_to_pending, not_movable, error}。"""
-    res = {"moved": 0, "per_account": {}, "back_to_pending": 0, "not_movable": 0, "error": ""}
+    res = {"moved": 0, "per_account": {}, "back_to_pending": 0, "not_movable": 0, "error": "", "moved_ids": []}
     with get_conn() as conn:
-        accs = {a["id"]: a for a in conn.execute("SELECT * FROM accounts WHERE status='active'").fetchall()}
+        conn.execute("BEGIN IMMEDIATE")
+        accs = {a["id"]: a for a in conn.execute("SELECT * FROM accounts WHERE status='active' AND deleted_at IS NULL").fetchall()}
         targets = [accs[i] for i in dict.fromkeys(int(t) for t in target_ids) if i in accs]
         if not targets:
             res["error"] = _tr('没有选启用中的目标账号')
+            conn.rollback()
             return res
-        items = conn.execute(f"SELECT id, status, final_text FROM review_queue WHERE id IN ({','.join('?' * len(item_ids))}) ORDER BY id",
+        items = conn.execute(f"SELECT id, status, account_id, final_text FROM review_queue WHERE id IN ({','.join('?' * len(item_ids))}) ORDER BY id",
                              list(item_ids)).fetchall() if item_ids else []
+        res["not_movable"] += len(set(item_ids)) - len(items)
         k = 0
         for it in items:
+            expected = (expected_records or {}).get(it["id"])
+            if expected_records is not None and (expected is None or any(it[k] != expected[k] for k in ("status", "account_id"))):
+                res["not_movable"] += 1
+                continue
             if it["status"] not in TRANSFERABLE:
                 res["not_movable"] += 1
                 continue
@@ -144,6 +169,7 @@ def transfer_items(item_ids: list[int], target_ids: list[int]) -> dict:
                 cur = conn.execute("UPDATE review_queue SET account_id=? WHERE id=? AND status=?", (acc["id"], it["id"], it["status"]))
             if cur.rowcount:
                 res["moved"] += 1
+                res["moved_ids"].append(it["id"])
                 res["per_account"][acc["handle"]] = res["per_account"].get(acc["handle"], 0) + 1
             else:
                 res["not_movable"] += 1   # 刚好被分发器拿去发了
@@ -248,12 +274,14 @@ def _set_media(item_id: int, files: list[str]) -> bool:
     return cur.rowcount > 0
 
 
-def _delete(item_id: int, expected_status: str | tuple[str, ...] | None = None) -> bool:
+def _delete(item_id: int, expected_status: str | tuple[str, ...] | None = None,
+            expected_account_id: int | None = None) -> bool:
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT target_tweet_id, status FROM review_queue WHERE id=?", (item_id,)).fetchone()
+        row = conn.execute("SELECT target_tweet_id, status, account_id FROM review_queue WHERE id=?", (item_id,)).fetchone()
         allowed = (expected_status,) if isinstance(expected_status, str) else expected_status
-        if row is None or row["status"] == "sending" or (allowed and row["status"] not in allowed):
+        if (row is None or row["status"] == "sending" or (allowed and row["status"] not in allowed)
+                or (expected_account_id is not None and row["account_id"] != expected_account_id)):
             conn.rollback()
             return False
         conn.execute("DELETE FROM review_queue WHERE id=?", (item_id,))
@@ -268,32 +296,36 @@ def _delete(item_id: int, expected_status: str | tuple[str, ...] | None = None) 
     return True
 
 
-def _delete_all(status: str, account_id: int = ALL_ACCOUNTS) -> int:
-    ids = _matching_ids(status, account_id)
-    return sum(_delete(i, status if status != UNSENT else UNSENT_STATUSES) for i in ids)
+def _delete_all(status: str, account_id: int = ALL_ACCOUNTS, action_type: str = "all") -> int:
+    ids = _matching_ids(status, account_id, action_type)
+    return sum(_delete(i, status if status != UNSENT else UNSENT_STATUSES, account_id or None) for i in ids)
+
+
+def _delete_selected(records: dict[int, tuple[str, int]]) -> tuple[int, int]:
+    """Preserve moved/changed tasks and all sending tasks, even after confirmation."""
+    done = sum(_delete(item_id, status, account_id) for item_id, (status, account_id) in records.items())
+    return done, len(records) - done
 
 
 def register(jobs) -> None:
     @ui.page("/queue")
-    def queue_page(status: str = "pending", account: int = ALL_ACCOUNTS):
+    def queue_page(status: str = "pending", account: int = ALL_ACCOUNTS, action_type: str = "all"):
         with shell("/queue"):
             if status not in QUEUE_STATUS_LABEL and status != UNSENT:
                 status = "pending"
-            if account not in _account_filter_options(status):
+            if action_type not in ACTION_TYPE_LABELS:
+                action_type = "all"
+            if account not in _account_filter_options(status, action_type):
                 account = ALL_ACCOUNTS
             with ui.row().classes("xo-page-heading w-full"):
                 page_title(_tr('任务队列'), _tr('审核文案，安排每一次发布'))
                 with ui.row().classes("xo-toolbar w-full items-center gap-2"):
-                    status_sel = ui.select(_status_options(account), value=status).props("dense outlined")
-                    acc_filter = ui.select(_account_filter_options(status), value=account, label=_tr('发送账号')) \
+                    status_sel = ui.select(_status_options(account, action_type), value=status).props("dense outlined")
+                    acc_filter = ui.select(_account_filter_options(status, action_type), value=account, label=_tr('发送账号')) \
                         .props("dense outlined").classes("min-w-40") \
                         .tooltip(_tr('只看某个账号的条目；账号凭据失效时选它，再批量转给其他账号或批量删除'))
-                    recheck_btn = ui.button(_tr('重新判断全部已跳过'), icon="refresh").props("outline dense") \
-                        .tooltip(_tr('逐条再查黑名单 / 是否已回复过 / 作者冷却；都不成立的放回待审核'))
-                    transfer_btn = ui.button(_tr('批量转给其他账号'), icon="swap_horiz").props("outline dense color=primary") \
-                        .tooltip(_tr('把当前筛出来的全部条目改由别的启用账号发送（选多个就平均分）'))
-                    clear_btn = ui.button(_tr('批量删除'), icon="delete_sweep").props("outline color=negative dense") \
-                        .tooltip(_tr('删除当前筛选（状态 + 账号）下的全部条目，不只是页面上显示的'))
+                    type_filter = ui.select({k: _tr(v) for k, v in ACTION_TYPE_LABELS.items()}, value=action_type,
+                                            label=_tr('帖子类型')).props("dense outlined").classes("min-w-32").mark("queue-type-filter")
                     ui.button(_tr('触发发送'), icon="send",
                               on_click=lambda: run_job(jobs.dispatcher.tick, _tr('发送'), render)).props("outline")
             acc_hint = ui.label("").classes("text-sm text-orange-600")
@@ -308,7 +340,7 @@ def register(jobs) -> None:
             body = ui.column().classes("w-full gap-3")
             # dirty：正在改文案的条目 id；busy：有弹窗开着。两者任一非空时自动刷新只更新计数、不重绘卡片，
             # 免得把用户改到一半的文案或开着的弹窗冲掉
-            state = {"sig": None, "dirty": set(), "busy": 0, "selected": set()}
+            state = {"sig": None, "dirty": set(), "busy": 0, "selected": set(), "visible": {}, "deleting": False, "updating_filters": False, "processing": False, "items": {}, "editors": {}, "batch_scope": "selected"}
             paused_hint = ui.label("").classes("text-xs text-orange-500")
 
             def signature(items) -> tuple:
@@ -318,58 +350,137 @@ def register(jobs) -> None:
                 return int(acc_filter.value or 0)
 
             def render(force: bool = True):
-                items = _load(status_sel.value, acc_id())
+                if body.is_deleted or body.client.is_deleted:
+                    return
+                items = _load(status_sel.value, acc_id(), type_filter.value)
                 sig = signature(items)
                 if not force:
                     if sig == state["sig"]:
                         return
-                    if state["dirty"] or state["busy"]:
+                    if state["dirty"] or state["busy"] or state["selected"]:
                         paused_hint.text = _tr('列表有更新，但你正在编辑/操作，暂不刷新（改完点批准或跳过后会自动刷新）')
                         return
                 paused_hint.text = ""
                 state["sig"] = sig
+                drafts = {i: e.value for i, e in state["editors"].items() if i in state["dirty"] and not e.is_deleted}
                 state["dirty"].clear()
-                status_sel.set_options(_status_options(acc_id()), value=status_sel.value)
-                acc_filter.set_options(_account_filter_options(status_sel.value), value=acc_id())
+                state["editors"].clear()
+                state["items"] = {it["id"]: dict(it) for it in items}
+                # Option/count updates are not user filter changes.
+                state["updating_filters"] = True
+                try:
+                    status_sel.set_options(_status_options(acc_id(), type_filter.value), value=status_sel.value)
+                    acc_filter.set_options(_account_filter_options(status_sel.value, type_filter.value), value=acc_id())
+                finally:
+                    state["updating_filters"] = False
                 sync_toolbar()
                 body.clear()
-                state["selected"].intersection_update(it["id"] for it in items if it["status"] == "expired")
+                state["visible"] = {it["id"]: (it["status"], it["account_id"]) for it in items if it["status"] != "sending"}
+                state["selected"].intersection_update(state["visible"])
                 with body:
                     if not items:
                         ui.label(_tr('此状态下暂无条目 🎉') if not acc_id() else _tr('这个账号在此状态下没有条目')).classes("text-gray-400")
                         return
                     if len(items) >= _LIMIT:
                         ui.label(_tr('只显示最新的 {p0} 条，处理掉一些后会显示更多', p0=_LIMIT)).classes("text-xs text-gray-400")
-                    select_cb = None
-                    if status_sel.value == "expired":
-                        visible_ids = {it["id"] for it in items}
+                    checkboxes = []
+                    def select_all(value):
+                        # Updating only checkboxes preserves unsaved edits and expanded cards.
+                        for checkbox in checkboxes:
+                            checkbox.set_value(value)
 
-                        def select_all(value):
-                            state["selected"] = set(visible_ids) if value else set()
-                            render()
+                    available = {key: _tr(label) for key, label in BATCH_LABELS.items()
+                                 if any(it["status"] in queue_actions.ACTION_STATUSES[key] for it in items)}
+                    async def execute_batch():
+                        await process_selected(operation.value, filtered_records() if state["batch_scope"] == "filtered" else None)
 
-                        with ui.row().classes("xo-batch-bar w-full items-center gap-3"):
+                    async def delete_batch():
+                        records = ({i: (r["status"], r["account_id"]) for i, r in filtered_records().items()}
+                                   if state["batch_scope"] == "filtered" else None)
+                        await delete_selected(records)
+
+                    counts = _counts(acc_id(), type_filter.value)
+                    filtered_count = sum(counts.get(st, 0)
+                                         for st in (UNSENT_STATUSES if status_sel.value == UNSENT else [status_sel.value]))
+                    with ui.column().classes("xo-batch-bar w-full gap-2").mark("queue-batch-area"):
+                        with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                            batch_scope = ui.select({"selected": _tr('已勾选'), "filtered": _tr('当前筛选全部')},
+                                                    value=state["batch_scope"], label=_tr('操作范围')) \
+                                .props("dense outlined").style("width: 11rem; max-width: 100%").mark("queue-batch-scope")
                             ui.button(_tr('全选当前列表'), on_click=lambda: select_all(True)).props("flat dense")
                             ui.button(_tr('取消全选'), on_click=lambda: select_all(False)).props("flat dense")
                             selected_label = ui.label(_tr('已选 {p0} 条', p0=len(state['selected']))).classes("text-sm")
-                            batch_restore = ui.button(_tr('批量突破规则'), icon="lock_open", on_click=batch_force_expired).props("outline color=orange")
-                            batch_delete = ui.button(_tr('批量删除'), icon="delete_sweep", on_click=batch_delete_expired).props("outline color=negative")
+                            operation = None
+                            execute = None
+                            if available:
+                                operation = ui.select(available, value=next(iter(available)), label=_tr('批量操作')) \
+                                    .props("dense outlined").style("width: 15rem; max-width: 100%").mark("queue-batch-action")
+                                execute = ui.button(_tr('执行批量操作'), icon="playlist_play",
+                                                    on_click=execute_batch).props("outline color=primary")
+                                operation.on_value_change(lambda: sync_selection())
+                            batch_delete = ui.button(_tr('批量删除'), icon="delete_sweep", on_click=delete_batch).props("outline color=negative")
+                        hint(_tr('批量操作按所选范围执行；全选仅勾选当前显示的条目，当前筛选全部包含未显示的条目。状态或账号已改变的任务会保留。'), after_row=True)
 
-                        def select_cb(item_id, checked):
-                            if checked:
-                                state["selected"].add(item_id)
-                            else:
-                                state["selected"].discard(item_id)
-                            selected_label.text = _tr('已选 {p0} 条', p0=len(state['selected']))
-                            batch_restore.set_enabled(bool(state["selected"]))
-                            batch_delete.set_enabled(bool(state["selected"]))
+                    def sync_selection():
+                        all_filtered = state["batch_scope"] == "filtered"
+                        selected_label.text = (_tr('当前筛选共 {count} 条', count=filtered_count) if all_filtered
+                                               else _tr('已选 {p0} 条', p0=len(state['selected'])))
+                        if execute is not None:
+                            eligible = all_filtered or any(state["items"][i]["status"] in queue_actions.ACTION_STATUSES[operation.value]
+                                           for i in state["selected"] if i in state["items"])
+                            execute.set_enabled(eligible and not state["processing"])
+                        batch_delete.set_enabled((bool(filtered_count) if all_filtered else bool(state["selected"]))
+                                                 and status_sel.value != "sending" and not state["deleting"] and not state["processing"])
 
-                        batch_restore.set_enabled(bool(state["selected"]))
-                        batch_delete.set_enabled(bool(state["selected"]))
+                    def scope_changed():
+                        state["batch_scope"] = batch_scope.value
+                        sync_selection()
+                    batch_scope.on_value_change(scope_changed)
+
+                    def select_cb(item_id, checked):
+                        if checked:
+                            state["selected"].add(item_id)
+                        else:
+                            state["selected"].discard(item_id)
+                        sync_selection()
+                    sync_selection()
+
+                    if status_sel.value == "expired":
                         hint(_tr('全选仅包含当前显示的 {p0} 条；突破规则后放回待审核，批准后进入正常待发送队列。', p0=len(items)), after_row=True)
                     for it in items:
                         _card(it, render, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, state["dirty"], recheck_cb, force_cb, send_now_cb, restore_failed_cb,
-                              force_send_cb, select_cb, it["id"] in state["selected"])
+                              force_send_cb, select_cb if it["status"] != "sending" else None, it["id"] in state["selected"], checkboxes, state["editors"])
+                        if it["status"] == "pending" and it["id"] in drafts:
+                            state["editors"][it["id"]].set_value(drafts[it["id"]])
+
+            async def delete_selected(records: dict | None = None):
+                if state["deleting"] or state["processing"]:
+                    return
+                all_filtered = records is not None
+                if records is None:
+                    records = {item_id: state["visible"][item_id] for item_id in state["selected"] if item_id in state["visible"]}
+                if not records:
+                    return
+                state["deleting"] = True
+                state["busy"] += 1
+                confirmed = False
+                try:
+                    title = (_tr('删除{p0}全部 {p1} 条条目？', p0=scope_text(), p1=len(records)) if all_filtered
+                             else _tr('删除选中的 {count} 条任务？', count=len(records)))
+                    confirmed = await confirm(title,
+                        _tr('只删除确认范围内的任务，不删除素材、X 上的推文或发送账本。发送中、状态或发送账号已改变的任务会保留。未发送任务删除后，对应抓取记录在没有其他待处理或已发送任务时退回「达标但未生成回复」。此操作不可撤销。'),
+                        ok_label=_tr('全部删除') if all_filtered else _tr('删除选中'))
+                    if not confirmed:
+                        return
+                    done, kept = await run.io_bound(_delete_selected, records)
+                    state["selected"].difference_update(records)
+                    ui.notify(_tr('已删除 {done} 条，保留 {kept} 条', done=done, kept=kept),
+                              type="warning" if kept else "positive")
+                finally:
+                    state["deleting"] = False
+                    state["busy"] -= 1
+                    if confirmed:
+                        render()
 
             async def delete_cb(it):
                 if it["status"] == "pending" or it["status"] == "approved":
@@ -459,55 +570,6 @@ def register(jobs) -> None:
                 ui.notify(detail, type="positive" if done else "negative", multi_line=True)
                 render()
 
-            async def batch_expired(restore: bool):
-                ids = sorted(state["selected"])
-                if not ids:
-                    ui.notify(_tr('请先勾选已过期条目'), type="info")
-                    return
-                state["busy"] += 1
-                try:
-                    ok = await confirm(
-                        _tr('{p0}选中的 {p1} 条已过期记录？', p0=_tr('突破规则并放回待审核') if restore else _tr('删除'), p1=len(ids)),
-                        (_tr('保留原文案、附件和发送账号，绕过作者冷却、黑名单与草稿时效，不再自动过期。仍需逐条审核批准；发送时保留去重、账号状态、日上限、时段和间隔限制。已有其他待处理任务的推文不会重复入队。')
-                         if restore else _tr('仅删除本次勾选的过期记录，不删除素材或发送账本。没有其他待处理或已发送任务的抓取记录将退回「达标但未生成回复」。')),
-                        ok_label=_tr('放回待审核') if restore else _tr('删除选中'), color="warning" if restore else "negative")
-                    if not ok:
-                        return
-
-                    def work():
-                        done, reasons = 0, {}
-                        for item_id in ids:
-                            try:
-                                if restore:
-                                    success, detail = jobs.guard.force_restore(item_id, expected_status="expired")
-                                else:
-                                    success = _delete(item_id, "expired")
-                                    detail = _tr('条目已改变状态或不存在')
-                            except Exception as exc:
-                                success, detail = False, _tr('处理失败：{p0}', p0=exc)
-                            done += int(success)
-                            if not success:
-                                reasons[detail] = reasons.get(detail, 0) + 1
-                        return done, reasons
-
-                    done, reasons = await run.io_bound(work)
-                    state["selected"].difference_update(ids)
-                    text = _tr('已{p0} {p1} 条，未处理 {p2} 条', p0=_tr('放回待审核') if restore else _tr('删除'), p1=done, p2=len(ids) - done)
-                    if reasons:
-                        text += "；" + "；".join(_tr('{p0}（{p1} 条）', p0=reason, p1=n) for reason, n in list(reasons.items())[:5])
-                        if len(reasons) > 5:
-                            text += _tr('；其余未处理记录保留在已过期列表')
-                    notify_long(text, ok=not reasons, kind="warning" if reasons else None)
-                finally:
-                    state["busy"] -= 1
-                    render()
-
-            async def batch_force_expired():
-                await batch_expired(True)
-
-            async def batch_delete_expired():
-                await batch_expired(False)
-
             async def force_send_cb(it):
                 state["busy"] += 1
                 try:
@@ -542,29 +604,19 @@ def register(jobs) -> None:
                 notify_long(detail, ok=ok, kind=None if ok else "warning")
                 render()
 
-            def recheck_all():
-                n = _counts().get("skipped", 0)
-                if not n:
-                    ui.notify(_tr('没有已跳过的条目'), type="info"); return
-                res = jobs.guard.recheck_all_skipped()
-                parts = [_tr('放回待审核 {p0} 条', p0=res['restored']), _tr('已过期 {p0} 条', p0=res['expired']), _tr('仍跳过 {p0} 条', p0=res['still'])]
-                if res["reasons"]:
-                    parts.append("；".join(_tr('{p0} {p1} 条', p0=k, p1=v) for k, v in res["reasons"].items()))
-                notify_long(_tr('重新判断完成：') + "，".join(parts), ok=res["restored"] > 0, kind=None if res["restored"] else "info")
-                render()
-            recheck_btn.on_click(recheck_all)
+            def filtered_records():
+                where, args = _where(status_sel.value, acc_id(), type_filter.value)
+                with get_conn() as conn:
+                    return {it["id"]: dict(it) for it in conn.execute("SELECT rq.* FROM review_queue rq WHERE " + where, args)}
 
             def scope_text() -> str:
                 st = status_sel.value
                 label = UNSENT_LABEL if st == UNSENT else QUEUE_STATUS_LABEL.get(st, st)
                 who = _account_handle(acc_id())
-                return (_tr('@{p0} 的', p0=who) if who else "") + f"「{label}」"
+                return (_tr('@{p0} 的', p0=who) if who else "") + f"「{label} · {_tr(ACTION_TYPE_LABELS[type_filter.value])}」"
 
             def sync_toolbar():
-                st, aid = status_sel.value, acc_id()
-                recheck_btn.set_visibility(st == "skipped" and not aid)
-                clear_btn.set_visibility(st not in ("expired", "sending"))
-                transfer_btn.set_visibility(bool(aid) and st not in ("sent", "sending") and not _account_deleted(aid))
+                aid = acc_id()
                 acc_hint.text = ""
                 if aid:
                     with get_conn() as conn:
@@ -572,61 +624,92 @@ def register(jobs) -> None:
                     if a is not None and a["deleted_at"]:
                         acc_hint.text = _tr('@{p0} 已删除，这里只剩它的历史记录（保留着用于去重和作者冷却）。', p0=a['handle'])
                     elif a is not None and a["status"] != "active":
-                        n = _counts(aid).get(UNSENT, 0)
-                        acc_hint.text = (_tr('@{p0} 当前「{p1}」，名下 {p2} 条未发送的条目发不出去：可以「批量转给其他账号」，或「批量删除」。状态选「未发送的全部」可以一次处理完。', p0=a['handle'], p1=ACC_STATUS_LABEL.get(a['status'], a['status']), p2=n))
+                        n = _counts(aid, type_filter.value).get(UNSENT, 0)
+                        acc_hint.text = (_tr('@{p0} 当前「{p1}」，名下 {p2} 条未发送的条目发不出去：可在下方批量操作区转给其他账号或删除。处理全部时，状态选「未发送的全部」，操作范围选「当前筛选全部」。', p0=a['handle'], p1=ACC_STATUS_LABEL.get(a['status'], a['status']), p2=n))
 
-            async def clear_all():
-                st, aid = status_sel.value, acc_id()
-                n = len(_matching_ids(st, aid))
-                if not n:
-                    ui.notify(_tr('没有可删除的条目'), type="info"); return
-                state["busy"] += 1
-                try:
-                    ok = await confirm(_tr('删除{p0}全部 {p1} 条条目？', p0=scope_text(), p1=n),
-                                       _tr('没发出去的条目删除后，对应的抓取记录会退回「达标但未生成回复」，之后可以重新处理；已发送记录删除后不影响去重账本（不会重复回复同一推文）。'), ok_label=_tr('全部删除'))
-                finally:
-                    state["busy"] -= 1
-                if ok:
-                    done = _delete_all(st, aid)
-                    ui.notify(_tr('已删除 {p0} 条', p0=done), type="positive")
-                    render()
-            clear_btn.on_click(clear_all)
-
-            async def transfer_all():
-                st, aid = status_sel.value, acc_id()
-                ids = _matching_ids(st, aid)
-                if not ids:
-                    ui.notify(_tr('没有可转移的条目'), type="info"); return
-                state["busy"] += 1
-                try:
-                    targets = await _transfer_dialog(scope_text(), len(ids), aid)
-                finally:
-                    state["busy"] -= 1
-                if not targets:
+            async def process_selected(action: str, records: dict | None = None):
+                if state["processing"] or state["deleting"]:
                     return
-                res = transfer_items(ids, targets)
-                if res["error"]:
-                    ui.notify(res["error"], type="negative"); return
-                parts = [_tr('已转移 {p0} 条：', p0=res['moved']) + "、".join(_tr('@{p0} {p1} 条', p0=h, p1=n) for h, n in res["per_account"].items())]
-                if res["back_to_pending"]:
-                    parts.append(_tr('其中 {p0} 条待发送的超出新账号的长度上限，已退回待审核，请删减或点「AI 缩写」', p0=res['back_to_pending']))
-                if res["not_movable"]:
-                    parts.append(_tr('{p0} 条正在发送或已发送，没动', p0=res['not_movable']))
-                notify_long("；".join(parts), ok=res["moved"] > 0, kind=None if res["moved"] else "warning")
-                render()
-            transfer_btn.on_click(transfer_all)
+                all_filtered = records is not None
+                if records is None:
+                    records = {i: dict(state["items"][i]) for i in state["selected"] if i in state["items"]}
+                if not records:
+                    return
+                drafts = {i: e.value for i, e in state["editors"].items() if i in records and not e.is_deleted}
+                state["processing"] = True
+                state["busy"] += 1
+                client = body.client
+                controls = [(e, e.enabled) for e in [status_sel, acc_filter, type_filter, *body.descendants()]
+                            if hasattr(e, "set_enabled")]
+                for control, _ in controls:
+                    control.disable()
+                executed = False
+                try:
+                    if action == "transfer":
+                        scope = (_tr('当前筛选全部') if all_filtered else _tr('已勾选')) + ' · ' + scope_text()
+                        destinations = await _transfer_dialog(scope, len(records), acc_id())
+                        if not destinations:
+                            return
+                        executed = True
+                        result = await run.io_bound(transfer_items, list(records), destinations, records)
+                        completed = set(result["moved_ids"])
+                        text = _tr('已完成 {done} 条，未完成 {kept} 条', done=len(completed), kept=len(records)-len(completed))
+                        if result["error"]:
+                            text += "；" + result["error"]
+                        if result["not_movable"]:
+                            text += "；" + _tr('条目状态或账号已改变，请刷新后重试')
+                        if result["back_to_pending"]:
+                            text += "；" + _tr('其中 {count} 条超出新账号长度上限，已退回待审核。', count=result["back_to_pending"])
+                    else:
+                        title = (_tr('对当前筛选全部 {count} 条任务执行「{action}」？', count=len(records), action=_tr(BATCH_LABELS[action]))
+                                 if all_filtered else _tr('对选中的 {count} 条任务执行「{action}」？', count=len(records), action=_tr(BATCH_LABELS[action])))
+                        if not await confirm(title,
+                                             _tr(BATCH_DETAILS[action]), ok_label=_tr('确认执行'),
+                                             color="warning" if action in ("approve", "force") else "primary"):
+                            return
+                        executed = True
+                        ui.notify(_tr('批量处理中…'), type="info")
+                        result = await run.io_bound(queue_actions.apply_selected, jobs, action, records, drafts)
+                        completed = result["done"]
+                        text = _tr('已完成 {done} 条，未完成 {kept} 条', done=len(completed), kept=len(records)-len(completed))
+                        for reason, count in result["reasons"].items():
+                            text += "；" + _tr('{p0}（{p1} 条）', p0=_tr(reason), p1=count)
+                        if action == "verify":
+                            outcome = result["outcomes"]
+                            text += "；" + _tr('回查结果：存在 {ok} 条，未找到 {missing} 条，未知 {unknown} 条',
+                                               ok=outcome.get("ok", 0), missing=outcome.get("missing", 0), unknown=outcome.get("unknown", 0))
+                    state["selected"].difference_update(completed)
+                    if not client.is_deleted:
+                        with client.content:
+                            warning = len(completed) != len(records) or bool(result.get("outcomes", {}).get("missing"))
+                            notify_long(text, ok=not warning, kind="warning" if warning else None)
+                finally:
+                    state["processing"] = False
+                    state["busy"] -= 1
+                    for control, enabled in controls:
+                        if not control.is_deleted:
+                            control.set_enabled(enabled)
+                    if executed and not client.is_deleted:
+                        with client.content:
+                            render()
 
             def on_filter_change():
+                if state["updating_filters"] or state["processing"]:
+                    return
                 state["selected"].clear()
+                state["batch_scope"] = "selected"
+                # A reconnect may reload the page: keep its query parameters in sync.
+                ui.navigate.history.replace(f"/queue?status={status_sel.value}&account={acc_id()}&action_type={type_filter.value}")
                 render()
-            status_sel.on("update:model-value", lambda e: on_filter_change())
-            acc_filter.on("update:model-value", lambda e: on_filter_change())
+            status_sel.on_value_change(on_filter_change)
+            acc_filter.on_value_change(on_filter_change)
+            type_filter.on_value_change(on_filter_change)
             render()
             ui.timer(5.0, lambda: render(force=False))
 
 
-def _status_options(account_id: int = ALL_ACCOUNTS) -> dict:
-    c = _counts(account_id)
+def _status_options(account_id: int = ALL_ACCOUNTS, action_type: str = "all") -> dict:
+    c = _counts(account_id, action_type)
     return {k: f"{v}（{c.get(k, 0)}）" for k, v in QUEUE_STATUS_LABEL.items() if k != "sending"} | \
         ({"sending": _tr('发送中（{p0}）', p0=c['sending'])} if c.get("sending") else {}) | {UNSENT: f"{UNSENT_LABEL}（{c[UNSENT]}）"}
 
@@ -688,14 +771,17 @@ async def _attach_dialog(initial: list[str]):
 
 
 def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dirty: set, recheck_cb=None, force_cb=None, send_now_cb=None,
-          restore_failed_cb=None, force_send_cb=None, select_cb=None, selected=False):
+          restore_failed_cb=None, force_send_cb=None, select_cb=None, selected=False, checkboxes=None, editors=None):
     files = media.parse_files(it["final_media_files"])
     limits = _account_limits()
     cur_acc = {"id": it["account_id"]}
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2 w-full"):
-            if it["status"] == "expired" and select_cb:
-                ui.checkbox(_tr('选择'), value=selected, on_change=lambda e: select_cb(it["id"], bool(e.value)))
+            if select_cb:
+                checkbox = ui.checkbox(_tr('选择'), value=selected, on_change=lambda e: select_cb(it["id"], bool(e.value))) \
+                    .mark(f"queue-select-{it['id']}")
+                if checkboxes is not None:
+                    checkboxes.append(checkbox)
             if it["status"] == "pending" and it["error_msg"]:
                 ui.label(_tr('上次发送失败：{p0}（已捞回，批准前请确认问题已解决）', p0=it['error_msg'])).classes("text-xs text-red-600 w-full")
             if it["status"] == "pending":
@@ -762,6 +848,8 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
 
         editable = it["status"] == "pending"
         ta = ui.textarea(label=_tr('待发布文案') if editable else _tr('发布文案'), value=it["final_text"]).classes("w-full").props("outlined autogrow" + ("" if editable else " readonly"))
+        if editable and editors is not None:
+            editors[it["id"]] = ta
         wl_label = ui.label("").classes("text-xs")
 
         def update_len():
@@ -778,7 +866,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
                     dirty.add(it["id"])
                 else:
                     dirty.discard(it["id"])
-        ta.on("update:model-value", lambda e: update_len())
+        ta.on_value_change(lambda e: update_len())
         shorten_btn = None
         media_strip(files)
         if it["status"] == "expired" and it["related_queue_id"]:

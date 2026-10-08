@@ -226,7 +226,7 @@ class ComplianceGuard:
             return GuardResult(False, blocks[0].code, True, "；".join(b.detail for b in blocks))
         return GuardResult(True, None, False, "通过（人工放行）" if forced else "通过")
 
-    def recheck_skipped(self, item_id: int, now: datetime | None = None) -> tuple[bool, str]:
+    def recheck_skipped(self, item_id: int, now: datetime | None = None, *, expected_account_id: int | None = None) -> tuple[bool, str]:
         """「已跳过」条目重新判断：按现在的情况把跳过规则（黑名单 / 已回复过 / 作者冷却 / 时效）全部再查一遍，
         都不再成立 → 放回待审核（时效不动）；已过期 → 移到已过期；其他拦截 → 保持已跳过，原因更新为当前结果。返回 (是否放回, 说明)。"""
         now = now or datetime.now(timezone.utc)
@@ -237,6 +237,9 @@ class ComplianceGuard:
             if item is None:
                 conn.commit()
                 return False, "条目不存在"
+            if expected_account_id is not None and item["account_id"] != expected_account_id:
+                conn.rollback()
+                return False, "发送账号已改变，请刷新后重新确认"
             if item["status"] != "skipped":
                 conn.commit()
                 return False, "只有「已跳过」的条目能重新判断"
@@ -262,10 +265,10 @@ class ComplianceGuard:
             conn.commit()
         return True, "已放回待审核"
 
-    def force_restore(self, item_id: int, *, expected_status: str | None = None) -> tuple[bool, str]:
+    def force_restore(self, item_id: int, *, expected_status: str | None = None, expected_account_id: int | None = None) -> tuple[bool, str]:
         """人工放行：不管跳过原因，直接放回待审核，并标 force_send=1——发送时不再按冷却 / 黑名单 / 时效拦；
         时效清空（不再自动过期，由人负责）。「已回复过」仍会拦，因为去重账本记不了第二条。返回 (是否成功, 说明)。"""
-        return self._force_transition(item_id, expected_status, "pending")
+        return self._force_transition(item_id, expected_status, "pending", expected_account_id)
 
     def claim_expired(self, item_id: int, account_id: int) -> tuple[bool, str]:
         """分发器持有账号锁后，原子地将过期草稿人工放行并认领为发送中。"""
@@ -311,18 +314,25 @@ class ComplianceGuard:
             conn.commit()
         return True, "已人工放行到待审核" if destination == "pending" else "已人工放行，正在发送"
 
-    def restore_failed(self, item_id: int) -> tuple[bool, str]:
+    def restore_failed(self, item_id: int, *, expected_account_id: int | None = None) -> tuple[bool, str]:
         """「失败」条目捞回任务队列：放回待审核（人再看一眼、批准后重新发），重试计数清零，上次的错误原因保留在条目上；
         时效已过的按当前设置重新给一段时效。「已回复过」的不能捞（去重账本只记一次）。返回 (是否成功, 说明)。"""
         with get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             item = conn.execute("SELECT * FROM review_queue WHERE id=?", (item_id,)).fetchone()
             if item is None:
+                conn.rollback()
                 return False, "条目不存在"
+            if expected_account_id is not None and item["account_id"] != expected_account_id:
+                conn.rollback()
+                return False, "发送账号已改变，请刷新后重新确认"
             if item["status"] != "failed":
+                conn.rollback()
                 return False, "只有「失败」的条目能捞回"
             if item["action_type"] == "reply" and item["target_tweet_id"]:
                 tgt = conn.execute("SELECT tweet_id FROM target_tweets WHERE id=?", (item["target_tweet_id"],)).fetchone()
                 if tgt and conn.execute("SELECT 1 FROM interactions WHERE action='reply' AND tweet_id=?", (tgt["tweet_id"],)).fetchone():
+                    conn.rollback()
                     return False, "该推文已回复过（上次其实发出去了），去重账本不允许再回一次"
             now = datetime.now(timezone.utc)
             expires = parse_iso(item["expires_at"])
@@ -331,7 +341,7 @@ class ComplianceGuard:
             if item["action_type"] == "reply" and expires and expires <= now and not item["force_send"]:
                 new_exp = to_iso(now + timedelta(hours=config.get_int("reply_ttl_hours", 48)))
                 note = "，时效已过、按当前设置重新计时"
-            conn.execute("UPDATE review_queue SET status='pending', decided_at=NULL, retry_count=0, expires_at=? WHERE id=?",
+            conn.execute("UPDATE review_queue SET status='pending', decided_at=NULL, retry_count=0, expires_at=? WHERE id=? AND status='failed'",
                          (new_exp, item_id))
             if item["target_tweet_id"]:
                 conn.execute("UPDATE target_tweets SET process_status='queued' WHERE id=? AND process_status IN ('expired','no_match','filtered')",

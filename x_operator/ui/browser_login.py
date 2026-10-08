@@ -30,7 +30,7 @@ def login_accounts(account_ids: list[int], refresh=lambda: None) -> None:
 def browser_setup(account_ids=None, refresh=lambda: None) -> None:
     with ui.dialog() as dlg, ui.card().classes("w-[560px] max-w-[95vw] gap-4"):
         ui.label(_tr('专用浏览器 · 可选组件')).classes("text-lg font-bold")
-        ui.label(_tr('密码登录需要下载专用 Chromium。Cookie 登录不需要安装，下载完成后可以重复使用。'))
+        ui.label(_tr('浏览器登录需要专用 Chromium，首次下载一次，所有账号共用。已有 Cookie 的正常使用不需要安装；下载完成后点击「开始登录」。'))
         hint(_tr('浏览器窗口会打开在运行服务的电脑上，需要本机有桌面环境。它不读取你日常 Chrome 的个人资料。下载使用系统代理；账号登录使用账号配置的代理。'))
         status = ui.label().classes("text-sm").props('role="status" aria-live="polite"')
         progress = ui.linear_progress(0, show_value=False).classes("w-full")

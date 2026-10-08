@@ -94,7 +94,10 @@ async def confirm(title: str, detail: str = "", ok_label: str = _tr('确认删�
             ui.button(_tr('取消'), on_click=lambda: dlg.submit(False)).props("flat")
             ui.button(_tr(ok_label), on_click=lambda: dlg.submit(True)).props(f"color={color}")
     dlg.open()
-    return bool(await dlg)
+    try:
+        return bool(await dlg)
+    finally:
+        dlg.delete()
 
 
 def notify_long(msg: str, ok: bool = True, kind: str | None = None) -> None:

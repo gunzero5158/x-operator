@@ -468,21 +468,27 @@ def _accounts_panel():
         ui.notify(_tr('这个账号之前删除过，已恢复并接上原来的发送记录') if revived else _tr('已保存'), type="positive")
         return existing_id
 
-    def open_dialog(existing: sqlite3.Row | None = None):
+    def open_dialog(existing: sqlite3.Row | None = None, *, for_browser_login: bool = False):
         creds = parse_credentials(existing["credentials"]) if existing else {}
         with ui.dialog() as dlg, ui.card().classes("w-[680px] max-w-[95vw] max-h-[92vh] overflow-auto"):
-            ui.label(_tr('编辑账号') if existing else _tr('添加账号')).classes("text-lg font-bold")
-            with ui.row().classes("w-full gap-2 no-wrap"):
-                handle = ui.input(_tr('handle（不含 @）'), value=existing["handle"] if existing else "") \
-                    .classes("flex-1").props("outlined dense")
-                dname = ui.input(_tr('显示名'), value=existing["display_name"] if existing else "") \
-                    .classes("flex-1").props("outlined dense")
-            atype = ui.select({"official": _tr('官方 API（可作主号，读写按量计费）'), "unofficial": _tr('非官方 twifork（仅小号，Cookie 登录）')},
-                              value=existing["access_type"] if existing else "unofficial", label=_tr('通道类型')) \
-                .classes("w-full").props("outlined dense")
-            primary = ui.switch(_tr('设为主号'), value=bool(existing["is_primary"]) if existing else False)
-            premium = ui.switch(_tr('已订阅 X Premium（会员）'), value=bool(existing["is_premium"]) if existing else False)
-            hint(_tr('影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。'))
+            ui.label(_tr('配置浏览器登录') if for_browser_login else (_tr('编辑账号') if existing else _tr('添加账号'))).classes("text-lg font-bold")
+            if for_browser_login:
+                ui.label(_tr('浏览器登录需要登录名和密码，已为你切换到账号密码填写区。已有 Cookie 会保留；填写后点击「保存并登录」。')).classes("text-sm text-slate-600")
+            with ui.column().classes("w-full") as profile_fields:
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    handle = ui.input(_tr('handle（不含 @）'), value=existing["handle"] if existing else "") \
+                        .classes("flex-1").props("outlined dense")
+                    dname = ui.input(_tr('显示名'), value=existing["display_name"] if existing else "") \
+                        .classes("flex-1").props("outlined dense")
+                atype = ui.select({"official": _tr('官方 API（可作主号，读写按量计费）'), "unofficial": _tr('非官方 twifork（仅小号，Cookie 登录）')},
+                                  value=existing["access_type"] if existing else "unofficial", label=_tr('通道类型')) \
+                    .classes("w-full").props("outlined dense")
+                primary = ui.switch(_tr('设为主号'), value=bool(existing["is_primary"]) if existing else False)
+                premium = ui.switch(_tr('已订阅 X Premium（会员）'), value=bool(existing["is_premium"]) if existing else False)
+                hint(_tr('影响推文长度上限：免费账号一条最多 280 个单位（中日韩每字算 2 → 约 140 个汉字/假名，链接固定算 23），超了的回复/主贴会自动让 AI 缩写，缩不下来的不会发；会员账号最多 25000 单位，不做缩写。请如实勾选：勾了会员但实际没订阅，X 会直接拒发超长推文。'))
+            profile_fields.set_visibility(not for_browser_login)
+            if for_browser_login and existing:
+                ui.label(f"@{existing['handle']}").classes("font-semibold")
 
             # ---- 凭据区：按通道类型显示不同字段 ----
             ui.separator()
@@ -497,14 +503,17 @@ def _accounts_panel():
                                               password_toggle_button=secret).classes("w-full").props("outlined dense")
             unofficial_box = ui.column().classes("w-full gap-1")
             with unofficial_box:
-                with ui.expansion(_tr('怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）'),
-                                  icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
-                    ui.markdown(_tr(_COOKIE_GUIDE)).classes("text-xs")
+                if not for_browser_login:
+                    with ui.expansion(_tr('怎么拿到 auth_token / ct0？密码 + 两步验证怎么填？（点开看手把手步骤）'),
+                                      icon="help_outline").classes("w-full text-sm bg-blue-50 rounded"):
+                        ui.markdown(_tr(_COOKIE_GUIDE)).classes("text-xs")
                 has_cookie = bool(creds.get("auth_token"))
                 has_pw = bool(creds.get("username") or creds.get("password"))
-                ui.label(_tr('下面两种登录方式选一种填就行（不用两种都填）：')).classes("text-sm font-semibold mt-1")
+                if not for_browser_login:
+                    ui.label(_tr('下面两种登录方式选一种填就行（不用两种都填）：')).classes("text-sm font-semibold mt-1")
                 method = ui.toggle({"cookie": _tr('方式一：从浏览器复制 Cookie（推荐）'), "password": _tr('方式二：账号密码 + 两步验证')},
-                                   value=("password" if (has_pw and not has_cookie) else "cookie")).props("no-caps spread").classes("w-full")
+                                   value=("password" if for_browser_login or (has_pw and not has_cookie) else "cookie")).props("no-caps spread").classes("w-full")
+                method.set_visibility(not for_browser_login)
                 cookie_box = ui.card().classes("w-full gap-1 border-2 border-emerald-500 bg-emerald-50/40")
                 with cookie_box:
                     ui.label(_tr('方式一：浏览器 Cookie')).classes("font-semibold text-emerald-700")
@@ -543,31 +552,33 @@ def _accounts_panel():
             atype.on("update:model-value", lambda e: sync_boxes())
             sync_boxes()
 
-            # ---- 限速 / 活跃时段 ----
-            ui.separator()
-            ui.label(_tr('限速与活跃时段')).classes("font-semibold text-sm")
-            with ui.row().classes("w-full gap-2 no-wrap"):
-                post_lim = ui.number(_tr('日发帖上限'), value=existing["daily_post_limit"] if existing else 10, min=0) \
-                    .props("outlined dense").classes("flex-1")
-                reply_lim = ui.number(_tr('日回复上限'), value=existing["daily_reply_limit"] if existing else 15, min=0) \
-                    .props("outlined dense").classes("flex-1")
-            with ui.row().classes("w-full gap-2 no-wrap"):
-                mn = ui.number(_tr('最小间隔(秒)'), value=existing["min_interval_sec"] if existing else 180, min=0) \
-                    .props("outlined dense").classes("flex-1")
-                mx = ui.number(_tr('最大间隔(秒)'), value=existing["max_interval_sec"] if existing else 600, min=0) \
-                    .props("outlined dense").classes("flex-1")
-            hint(_tr('两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；同一账号主贴和回复都到点时先发主贴。'))
-            with ui.row().classes("w-full gap-2 no-wrap"):
-                a_start = ui.input(_tr('活跃开始 HH:MM'), value=existing["active_hours_start"] if existing else "09:00") \
-                    .props("outlined dense").classes("flex-1")
-                a_end = ui.input(_tr('活跃结束 HH:MM'), value=existing["active_hours_end"] if existing else "22:00") \
-                    .props("outlined dense").classes("flex-1")
-                tz_val = existing["timezone"] if existing else "Asia/Tokyo"
-                tz_opts = _TZ_OPTIONS if tz_val in _TZ_OPTIONS else [tz_val] + _TZ_OPTIONS
-                tz = ui.select(tz_opts, value=tz_val, label=_tr('时区')).props("outlined dense").classes("flex-1")
-            hint(_tr('日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。')
-                     , after_row=True)
-            note = ui.input(_tr('备注'), value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
+            with ui.column().classes("w-full") as scheduling_fields:
+                # ---- 限速 / 活跃时段 ----
+                ui.separator()
+                ui.label(_tr('限速与活跃时段')).classes("font-semibold text-sm")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    post_lim = ui.number(_tr('日发帖上限'), value=existing["daily_post_limit"] if existing else 10, min=0) \
+                        .props("outlined dense").classes("flex-1")
+                    reply_lim = ui.number(_tr('日回复上限'), value=existing["daily_reply_limit"] if existing else 15, min=0) \
+                        .props("outlined dense").classes("flex-1")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    mn = ui.number(_tr('最小间隔(秒)'), value=existing["min_interval_sec"] if existing else 180, min=0) \
+                        .props("outlined dense").classes("flex-1")
+                    mx = ui.number(_tr('最大间隔(秒)'), value=existing["max_interval_sec"] if existing else 600, min=0) \
+                        .props("outlined dense").classes("flex-1")
+                hint(_tr('两次发送之间随机停这么久。主贴和回复各自一套冷却、互不影响：发了一条回复不会让主贴等，反之亦然；同一账号主贴和回复都到点时先发主贴。'))
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    a_start = ui.input(_tr('活跃开始 HH:MM'), value=existing["active_hours_start"] if existing else "09:00") \
+                        .props("outlined dense").classes("flex-1")
+                    a_end = ui.input(_tr('活跃结束 HH:MM'), value=existing["active_hours_end"] if existing else "22:00") \
+                        .props("outlined dense").classes("flex-1")
+                    tz_val = existing["timezone"] if existing else "Asia/Tokyo"
+                    tz_opts = _TZ_OPTIONS if tz_val in _TZ_OPTIONS else [tz_val] + _TZ_OPTIONS
+                    tz = ui.select(tz_opts, value=tz_val, label=_tr('时区')).props("outlined dense").classes("flex-1")
+                hint(_tr('日发帖/日回复上限：每天最多发几条，超了自动等明天。推荐主号 5/10、小号 3/5，养号期减半。间隔：两次发送之间随机等待的秒数范围，越像人越安全。推荐 180~600（3~10 分钟），小号 600~1800。活跃时段：只在这个时段内发送（按所选时区），模拟真人作息；首尾相同（如 00:00-00:00）表示全天。推荐 09:00-22:00。')
+                         , after_row=True)
+                note = ui.input(_tr('备注'), value=existing["note"] if existing else "").classes("w-full").props("outlined dense")
+            scheduling_fields.set_visibility(not for_browser_login)
 
             def collect():
                 return {
@@ -697,9 +708,12 @@ def _accounts_panel():
                 ui.label(_tr('暂无账号，点右上「添加账号」新建一个。')).classes("text-gray-400")
             if n_deleted:
                 ui.label(_tr('另有 {p0} 个已删除的账号：只保留着发送记录和去重账本（防止重复回复、作者冷却照常算），不会再被用来抓取或发送；重新添加同名账号会接上原来的记录。', p0=n_deleted)).classes("text-xs text-gray-400")
+            browser_ready = browser_login.service.installed()
             for a in rows:
                 cred_ok, cred_why = factory.credential_status(a)
                 acc_creds = parse_credentials(a["credentials"])
+                password_ready = bool(acc_creds.get("username") and acc_creds.get("password"))
+                cookie_ready = bool(acc_creds.get("auth_token") and acc_creds.get("ct0"))
                 needs_login = a["access_type"] == "unofficial" and bool(acc_creds.get("password")) and not (
                     acc_creds.get("auth_token") and acc_creds.get("ct0"))
                 with ui.card().classes("w-full"):
@@ -714,7 +728,13 @@ def _accounts_panel():
                             .tooltip(_tr('会员不限推文长度；免费账号一条最多 280 单位（≈140 个汉字），超了会自动 AI 缩写'))
                         ui.badge({"active": _tr('启用'), "paused": _tr('已暂停'), "auth_error": _tr('等待登录') if needs_login else _tr('凭据失效')}.get(a["status"], a["status"]), color=None) \
                             .classes("bg-green-600" if a["status"] == "active" else "bg-red-600")
-                        ui.badge(_tr('凭据已填') if cred_ok else _tr('未填凭据'), color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
+                        credential_label = _tr('凭据已填') if cred_ok else _tr('未填凭据')
+                        if a["access_type"] == "unofficial":
+                            if cookie_ready:
+                                credential_label = _tr('Cookie 已填写')
+                            elif password_ready:
+                                credential_label = _tr('账号密码已保存')
+                        ui.badge(credential_label, color=None).classes("bg-emerald-600" if cred_ok else "bg-orange-500").tooltip(cred_why)
                     ui.label(_tr('日发帖 {p0} / 日回复 {p1} · 间隔 {p2}-{p3}s · 活跃 {p4}-{p5} {p6}', p0=a['daily_post_limit'], p1=a['daily_reply_limit'], p2=a['min_interval_sec'], p3=a['max_interval_sec'], p4=a['active_hours_start'], p5=a['active_hours_end'], p6=a['timezone'])
                              + (f" · {a['note']}" if a["note"] else "")).classes("text-xs text-gray-400")
                     with ui.row().classes("gap-1 flex-wrap"):
@@ -724,11 +744,12 @@ def _accounts_panel():
                             def browser_relogin(aa=a):
                                 creds = parse_credentials(aa["credentials"])
                                 if not (creds.get("username") and creds.get("password")):
-                                    open_dialog(aa)
-                                    ui.notify(_tr('请切换到账号密码方式，填写后点击「保存并登录」'), type="info")
+                                    open_dialog(aa, for_browser_login=True)
                                     return
                                 browser_login.login_accounts([aa["id"]], render)
-                            ui.button(_tr('浏览器登录'), icon="login", on_click=browser_relogin).props("flat dense")
+                            login_label = (_tr('配置浏览器登录') if not password_ready else
+                                           (_tr('浏览器登录') if browser_ready else _tr('浏览器登录（需安装）')))
+                            ui.button(login_label, icon="login", on_click=browser_relogin).props("flat dense")
                         if not a["is_primary"] and a["access_type"] == "official":
                             ui.button(_tr('设为主号'), on_click=lambda aid=a["id"]: set_primary(aid)).props("flat dense")
                         if a["status"] == "active":
