@@ -21,6 +21,7 @@ from .. import config
 from ..db.database import get_conn, to_iso, utcnow_iso
 from ..llm.client import LLMClient, LLMError
 from . import media, textlimit
+from .search_lifecycle import check_rule
 from .accounts import choose_reply_account, fallback_reply_account
 from .langdetect import lang_name, material_lang_tiers
 
@@ -138,6 +139,7 @@ class MatchEngine:
             pipeline: bool = True) -> MatchOutcome:
         """account = 抓取用的账号；真正用哪个账号回复由规则/推主的「回复账号」决定（见 core/accounts.py）。
         pipeline：搜索 / 监控自动调用为 True（才按这条规则 / 推主的「免审核」设置决定是否直接进待发送）；界面上人点的「重新匹配」传 False。"""
+        check_rule()
         if cfg is None:
             cfg = load_source_cfg(target)
         mode = _cfg_get(cfg, "reply_mode", "material")
@@ -202,10 +204,12 @@ class MatchEngine:
         cand_payload = [{"material_id": c["id"], "text": c["text"], "lang": c["lang"]} for c in candidates]
         decision: dict = {}
         fallback_why = ""
+        check_rule()
         try:
             decision = self.llm.match_reply(target["text"], lang, cand_payload, allow_polish=allow_polish) or {}
         except LLMError as e:
             fallback_why = f"AI 匹配出错（{str(e)[:120]}）"
+        check_rule()
         threshold = config.get_float("match_confidence_threshold", 0.4)
         confidence = _to_float(decision.get("confidence"), 0.0)
         if not fallback_why and (decision.get("skip") or confidence < threshold):
@@ -278,11 +282,13 @@ class MatchEngine:
         if not brief:
             return MatchOutcome("no_match", None, "请先写创作要求（主题、立场、必须带的链接或 @账号、语气）")
         must = extract_must_include(brief)
+        check_rule()
         try:
             res = self.llm.write_reply(target["text"], target["lang"] or "und", brief, must, textlimit.limit_for(account))
         except LLMError as e:
             self._mark_no_match(target["id"], f"AI 撰写失败：{e}")
             return MatchOutcome("no_match", None, f"AI 撰写失败：{e}")
+        check_rule()
         reason = "AI 按创作要求撰写" + (f"（已强制包含：{'、'.join(must)}）" if must else "") + "：" + (res.get("reason") or "")
         if acc_note:
             reason += f"｜{acc_note}"
@@ -404,6 +410,7 @@ class MatchEngine:
             # 生成期间其他操作也可能处理同一记录；入队检查与写入必须原子执行。
             if not conn.in_transaction:   # 线程内复用连接：前面若有没 commit 的写入，再 BEGIN 会报错
                 conn.execute("BEGIN IMMEDIATE")
+            check_rule(conn=conn)
             target = conn.execute("SELECT process_status FROM target_tweets WHERE id=?", (target_id,)).fetchone()
             if target is None:
                 raise ValueError("抓取记录已删除，未创建回复草稿")

@@ -4,6 +4,7 @@
 都有「查看结果」直达按钮，运行完也会弹出带跳转按钮的结果框。支持「AI 生成规则」：用大白话描述想找谁。
 """
 from __future__ import annotations
+from .admin_batch import AdminBatch
 
 from .i18n import Labels, t as _tr
 
@@ -119,7 +120,7 @@ def register(jobs) -> None:
             body = ui.column().classes("w-full gap-2")
 
             async def delete(r):
-                if await confirm(_tr('删除规则「{p0}」？', p0=r['name']), _tr('已抓取的记录会保留。')):
+                if await confirm(_tr('删除规则「{p0}」？', p0=r['name']), _tr('移除这些搜索规则并停止后续处理；已抓取记录和已生成任务会保留。已发出的网络请求无法撤回。此操作不可撤销。')):
                     _delete(r["id"]); ui.notify(_tr('已删除'), type="positive"); render()
 
             def render():
@@ -132,11 +133,13 @@ def register(jobs) -> None:
                     if not rows:
                         ui.label(_tr('暂无搜索规则。点「新建规则」手动填，或点「AI 生成规则」用大白话描述你想找谁。')).classes("text-gray-400")
                         return
+                    batch = AdminBatch('rules', rows, render)
                     for r in rows:
                         c = counts.get(r["id"], {})
                         total = sum(c.values())
                         with ui.card().classes("xo-rule-card w-full"):
                             with ui.row().classes("items-center gap-2 w-full"):
+                                batch.checkbox(r['id'])
                                 ui.label(r["name"]).classes("xo-record-title")
                                 tag(SOURCE_KIND_LABEL[rule_source_kind(r)], "source", _tr('推文来源：关键词搜索 / 某账号的推荐流 / 关注流'))
                                 tag(REPLY_MODE_LABEL.get(r["reply_mode"], r["reply_mode"]),

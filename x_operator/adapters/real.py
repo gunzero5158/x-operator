@@ -541,7 +541,11 @@ class UnofficialXClient(XClient):
         if isinstance(e, E.DuplicateTweet):
             return DuplicateContent(f"X 判定为重复内容，拒绝发送（{what}）。", raw=e)
         if isinstance(e, (E.Forbidden, E.CouldNotTweet)):
-            return PermissionDenied(f"X 拒绝操作（{what}）：对方限制回复或账号被限写。{msg}", raw=e)
+            from ..core.error_types import error_type
+            category = error_type(msg)
+            detail = {"target": "目标不可回复：原推文已删除、当前账号不可见，或原作者限制回复",
+                      "quota": "账号额度限制：X 提示已达到每日发送上限"}.get(category, "操作权限不足，具体原因请查看 X 返回信息")
+            return PermissionDenied(f"X 拒绝操作（{what}）：{detail}。{msg}", raw=e)
         if isinstance(e, (E.NotFound, E.UserNotFound, E.UserUnavailable, E.TweetNotAvailable)):
             return TargetNotFound(f"目标不存在或不可用（{what}）。{msg}", raw=e)
         if isinstance(e, E.InvalidMedia):

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from .batch_bar import BatchBar
+from .pagination import pagination
 from .i18n import Labels, t as _tr
 
 from nicegui import run, ui
@@ -21,10 +23,10 @@ from .layout import (TARGET_STATUS_LABEL, QUEUE_STATUS_LABEL, confirm, fmt_time,
                      run_job_with_progress, shell, source_label, tweet_link)
 from .pickers import ai_write_dialog, pick_material_dialog
 
-_LIMIT = 150
+_LIMIT = 25
 
 
-def _load(status: str, source: str, rule_id: int = 0):
+def _load(status: str, source: str, rule_id: int = 0, offset: int = 0, limit: int | None = None):
     q = ("SELECT tt.*, sr.name AS rule_name, sr.min_llm_score AS rule_min, sr.source_kind AS rule_kind, wu.handle AS watched_handle, "
          "linked.id AS queue_id, linked.status AS queue_status, "
          "(SELECT COUNT(*) FROM review_queue rq WHERE rq.target_tweet_id=tt.id AND rq.status='expired') AS expired_queue_count "
@@ -41,9 +43,23 @@ def _load(status: str, source: str, rule_id: int = 0):
         q += " AND tt.source=?"; args.append(source)
     if rule_id:
         q += " AND tt.source='search' AND tt.source_rule_id=?"; args.append(rule_id)
-    q += f" ORDER BY tt.fetched_at DESC, tt.id DESC LIMIT {_LIMIT}"
+    q += " ORDER BY tt.fetched_at DESC, tt.id DESC LIMIT ? OFFSET ?"
+    args.extend([_LIMIT if limit is None else limit, max(0, offset)])
     with get_conn() as conn:
         return conn.execute(q, args).fetchall()
+
+
+def _selection_records(status: str, source: str, rule_id: int = 0):
+    sql = "SELECT id, process_status, source, source_rule_id FROM target_tweets WHERE 1=1"
+    args = []
+    if status != "all":
+        sql += " AND process_status=?"; args.append(status)
+    if source != "all":
+        sql += " AND source=?"; args.append(source)
+    if rule_id:
+        sql += " AND source='search' AND source_rule_id=?"; args.append(rule_id)
+    with get_conn() as conn:
+        return {r["id"]: (r["process_status"], r["source"], r["source_rule_id"]) for r in conn.execute(sql, args)}
 
 
 def _counts(source: str = "all", rule_id: int = 0) -> dict[str, int]:
@@ -148,12 +164,13 @@ def register(jobs) -> None:
             visible_ids: list[int] = []
             visible_records: dict[int, tuple[str, str, int | None]] = {}
             deleting = False
+            paging = dict(page=0, size=_LIMIT, action=None)
 
             async def delete_selected():
                 nonlocal deleting
                 if deleting:
                     return
-                records = {tid: visible_records[tid] for tid in visible_ids if tid in selected}
+                records = {tid: visible_records[tid] for tid in selected if tid in visible_records}
                 if not records:
                     return
                 deleting = True
@@ -173,13 +190,13 @@ def register(jobs) -> None:
                         render()
 
             async def clear(statuses: list[str]):
-                c = _counts()
-                n = sum(c.get(s, 0) for s in statuses)
-                if not n:
+                records = {i: r for i, r in _selection_records("all", "all").items() if r[0] in statuses}
+                if not records:
                     ui.notify(_tr('没有可清理的记录'), type="info"); return
-                if await confirm(_tr('删除 {p0} 条抓取记录？', p0=n), _tr('已进入任务队列的记录会保留。'), ok_label=_tr('删除')):
-                    done, kept = _delete_bulk(statuses)
-                    ui.notify(_tr('已删除 {p0} 条', p0=done) + (_tr('，{p0} 条因在任务队列中而保留', p0=kept) if kept else ""), type="positive")
+                if await confirm(_tr('删除 {p0} 条抓取记录？', p0=len(records)),
+                                 _tr('全局清理不受当前筛选和勾选影响；已进入任务队列或状态、来源已改变的记录会保留。'), ok_label=_tr('删除')):
+                    done, kept = await run.io_bound(_delete_selected, records)
+                    ui.notify(_tr('已删除 {done} 条，保留 {kept} 条', done=done, kept=kept), type="warning" if kept else "positive")
                     render()
 
             async def rematch(tid: int, *, material_only: bool = False):
@@ -196,12 +213,15 @@ def register(jobs) -> None:
                                             task_key=f"rematch:{tid}:{material_only}")
 
             async def rematch_selected(*, material_only: bool = False):
-                ids = [tid for tid in visible_ids if tid in selected]
+                ids = sorted(selected)
                 if not ids:
                     ui.notify(_tr('请先勾选要自动匹配的记录'), type="info")
                     return
                 expected_status = status_f.value
                 label = _tr('批量素材库匹配') if material_only else _tr('批量自动匹配')
+                if not await confirm(_tr('对选中的 {count} 条抓取记录执行「{action}」？', count=len(ids), action=label),
+                                     _tr('仅处理本次勾选的记录，新增记录不会自动加入。'), ok_label=_tr('确认执行')):
+                    return
                 scope_label = TARGET_STATUS_LABEL[expected_status]
                 # 两个状态列表可并行；同一列表的两种匹配方式仍互斥。
                 task_key = f"batch-rematch:{expected_status}"
@@ -241,77 +261,110 @@ def register(jobs) -> None:
                 await ai_write_dialog(jobs, t["id"], t["text"], default_brief)
                 render()
 
-            def render():
+            def render(preserve=False):
                 if body.is_deleted or body.client.is_deleted:
                     return
                 body.clear()
-                selected.clear()
+                if not preserve:
+                    selected.clear()
+                    visible_records.clear()
+                    paging['action'] = None
                 visible_ids.clear()
-                visible_records.clear()
                 rid = int(rule_f.value or 0)
                 src = source_f.value
                 if rid and src != "search":
                     src = "search"; source_f.value = "search"
                 rule_f.set_visibility(src in ("search", "all"))
                 status_f.set_options(_status_options(src, rid), value=status_f.value)
-                rows = _load(status_f.value, src, rid)
+                counts = _counts(src, rid)
+                total = sum(counts.values()) if status_f.value == 'all' else counts.get(status_f.value, 0)
+                paging['page'] = min(paging['page'], max(0, (total - 1) // paging['size']))
+                rows = _load(status_f.value, src, rid, paging['page'] * paging['size'], paging['size'])
                 with body:
-                    # Keep global cleanup beside selection actions, including empty filters.
-                    with ui.row().classes("xo-batch-bar w-full items-center gap-2 flex-wrap") as batch_bar:
-                        with ui.button(_tr('全局清理'), icon="delete_sweep").props("outline color=negative dense") \
-                                .tooltip(_tr('全局清理（不受当前筛选影响）')):
-                            with ui.menu():
-                                ui.menu_item(_tr('清理已过滤 / 未匹配 / 已过期'), on_click=lambda: clear(["filtered", "no_match", "expired"]))
-                                ui.menu_item(_tr('清理全部抓取记录'), on_click=lambda: clear(list(TARGET_STATUS_LABEL)))
+                    def change_page(page):
+                        paging['page'] = max(0, page)
+                        render(preserve=True)
+
+                    def change_size(size):
+                        paging.update(page=0, size=size)
+                        render(preserve=True)
+
+                    def pager(position):
+                        pagination(paging['page'], paging['size'], total, change_page, change_size,
+                                   marker='targets-' + position)
+
+                    pager('top')
+                    visible_ids.extend(t["id"] for t in rows)
+                    for t in rows:
+                        if t['id'] not in selected:
+                            visible_records[t['id']] = (t['process_status'], t['source'], t['source_rule_id'])
+                    checkboxes = {}
+                    actions = {}
+                    if status_f.value in ("filtered", "no_match"):
+                        actions.update(rematch=_tr('批量自动匹配'), material=_tr('批量素材库匹配'))
+                    actions.update(delete=_tr('批量删除'), clear_stale=_tr('全局清理：已过滤 / 未匹配 / 已过期'),
+                                   clear_all=_tr('全局清理：全部抓取记录'))
+
+                    selecting = False
+
+                    def set_all(value, page_only=False):
+                        nonlocal selecting
+                        selected.clear()
+                        if value:
+                            snapshot = ({i: visible_records[i] for i in visible_ids} if page_only else
+                                        _selection_records(status_f.value, source_f.value, int(rule_f.value or 0)))
+                            visible_records.update({i: r for i, r in snapshot.items() if i not in visible_ids})
+                            selected.update(snapshot)
+                        selecting = True
+                        try:
+                            for checkbox in checkboxes.values():
+                                checkbox.set_value(value)
+                        finally:
+                            selecting = False
+                        bar.update(len(selected))
+
+                    async def execute_batch(action):
+                        if action == "delete":
+                            await delete_selected()
+                        elif action in ("rematch", "material"):
+                            await rematch_selected(material_only=action == "material")
+                        else:
+                            await clear(["filtered", "no_match", "expired"] if action == "clear_stale" else list(TARGET_STATUS_LABEL))
+
+                    global_hint = '全局清理不受当前筛选和勾选影响；已进入任务队列或状态、来源已改变的记录会保留。'
+                    bar = BatchBar(actions, lambda: set_all(True), lambda: set_all(False), execute_batch,
+                                   lambda action: not deleting and (bool(selected) or action.startswith("clear_")),
+                                   marker="targets-batch-action", descriptions={"clear_stale": global_hint, "clear_all": global_hint},
+                                   select_page=lambda: set_all(True, page_only=True))
+                    if paging['action'] in actions:
+                        bar.action.set_value(paging['action'])
+                    bar.action.on_value_change(lambda e: paging.update(action=e.value))
+                    bar.update(len(selected))
                     if not rows:
                         c = _counts(src, rid)
                         if sum(c.values()) == 0:
                             ui.label(_tr('这个范围内还没有抓取记录。点上方「运行监控」或「运行搜索」试试；如果刚运行过却没记录，看弹出的结果说明（可能是游标之后没新推文，或账号连不上）。')).classes("text-gray-400")
                         else:
                             ui.label(_tr('这个状态下没有记录，换个状态筛选看看。')).classes("text-gray-400")
+                        pager('bottom')
                         return
-                    ui.label(_tr('最近 {p0} 条', p0=len(rows)) + (_tr('（已达显示上限，可清理旧记录）') if len(rows) >= _LIMIT else "")).classes("text-xs text-gray-400")
-                    visible_ids.extend(t["id"] for t in rows)
-                    visible_records.update({t["id"]: (t["process_status"], t["source"], t["source_rule_id"]) for t in rows})
-                    checkboxes = {}
-                    batch_buttons = []
-                    with batch_bar:
-                        def set_all(value):
-                            for cb in checkboxes.values():
-                                cb.set_value(value)
-
-                        ui.button(_tr('全选当前列表'), on_click=lambda: set_all(True)).props("flat dense")
-                        ui.button(_tr('取消全选'), on_click=lambda: set_all(False)).props("flat dense")
-                        count_label = ui.label(_tr('已选 0 条')).classes("text-sm text-slate-600")
-                        if status_f.value in ("filtered", "no_match"):
-                            batch_btn = ui.button(_tr('批量自动匹配'), icon="autorenew", on_click=rematch_selected).props("outline color=primary")
-                            batch_btn.tooltip(_tr('按各条记录的原规则处理；AI 创作规则仍会重新撰写'))
-                            batch_btn.disable()
-                            material_btn = ui.button(_tr('批量素材库匹配'), icon="inventory_2",
-                                                     on_click=lambda: rematch_selected(material_only=True)).props("outline color=primary")
-                            material_btn.tooltip(_tr('从启用的回复素材中自动选择，使用素材原文和附件，不调用 AI 撰写或润色'))
-                            material_btn.disable()
-                            batch_buttons.extend([batch_btn, material_btn])
-                        delete_btn = ui.button(_tr('批量删除'), icon="delete_sweep", on_click=delete_selected).props("outline color=negative")
-                        delete_btn.disable()
                     if status_f.value in ("filtered", "no_match"):
-                        detail_text(_tr('批量处理说明'), _tr('「自动匹配」沿用原规则；「素材库匹配」只选已有回复素材，保留原文和附件。两者均跳过打分和预检，成功后进入待审核。全选只包含当前显示的 {p0} 条；运行中可以继续使用其他功能。', p0=len(rows)))
-                    delete_btn.tooltip(_tr('全选只包含当前显示的 {count} 条；批量删除仅处理勾选项。', count=len(rows)))
+                        detail_text(_tr('批量处理说明'), _tr('「自动匹配」沿用原规则；「素材库匹配」只选已有回复素材，保留原文和附件。两者均跳过打分和预检，成功后进入待审核。'))
 
                     def selection_box(tid):
                         def change(e):
+                            if selecting:
+                                return
                             if e.value:
                                 selected.add(tid)
                             else:
                                 selected.discard(tid)
-                            count_label.set_text(_tr('已选 {p0} 条', p0=len(selected)))
-                            for button in batch_buttons:
-                                button.set_enabled(bool(selected))
-                            delete_btn.set_enabled(bool(selected) and not deleting)
-                        checkboxes[tid] = ui.checkbox(_tr('选择'), on_change=change).props("dense").mark(f"target-select-{tid}")
+                            bar.update(len(selected))
+                        checkboxes[tid] = ui.checkbox(_tr('选择'), value=tid in selected, on_change=change).props("dense").mark(f"target-select-{tid}")
 
                     for t in rows:
                         _card(t, rematch, delete_one, blacklist, pick, write, selection_box)
+                    pager('bottom')
 
             updating_filters = False
 
@@ -328,6 +381,7 @@ def register(jobs) -> None:
                 finally:
                     updating_filters = False
                 ui.navigate.history.replace(f"/targets?status={status_f.value}&source={source_f.value}&rule={int(rule_f.value or 0)}")
+                paging['page'] = 0
                 render()
 
             status_f.on_value_change(lambda: filter_changed("status"))

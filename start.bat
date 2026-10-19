@@ -25,8 +25,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [x-operator] 启动中，请在浏览器打开 config/settings.toml 中配置的地址（默认 http://localhost:8080）。
-echo [x-operator] 停止服务请按 Ctrl+C；修改 Python 代码后请重启。
-uv run --no-sync python -m x_operator.main
-
+echo [x-operator] Starting the background service...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\restart-local.ps1" -StartOnly
+set "launcherExit=%errorlevel%"
+if errorlevel 1 (
+  echo [x-operator] Start failed. See the error and log path above.
+)
 pause
+exit /b %launcherExit%

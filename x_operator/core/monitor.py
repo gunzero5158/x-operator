@@ -121,7 +121,12 @@ def store_target(t: TweetData, source: str, source_rule_id: int | None,
                  process_status: str = "new", score: int | None = None,
                  reason: str | None = None, views_recheck_until: datetime | None = None) -> int | None:
     """写入 target_tweets（tweet_id 唯一，冲突则跳过返回 None）。"""
+    from .search_lifecycle import active_rule, check_rule
     with get_conn() as conn:
+        if active_rule.get() is not None:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            check_rule(conn=conn)
         try:
             cur = conn.execute(
                 "INSERT INTO target_tweets(tweet_id, author_id, author_handle, text, lang, view_count, media, "
@@ -135,6 +140,8 @@ def store_target(t: TweetData, source: str, source_rule_id: int | None,
             conn.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
+            if active_rule.get() is not None:
+                conn.rollback()
             return None
 
 

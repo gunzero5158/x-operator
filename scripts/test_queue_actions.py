@@ -6,7 +6,7 @@ from nicegui import ui
 from nicegui.testing import User
 from nicegui.testing.user_interaction import UserInteraction
 
-from scripts.test_batch_delete import pages, task, target, cancel_dialog
+from scripts.test_batch_delete import pages, task, target, cancel_dialog, batch_action
 from x_operator.core import queue_actions
 from x_operator.core.scheduler import Jobs
 from x_operator.db.database import get_conn
@@ -146,7 +146,7 @@ async def test_status_specific_toolbar_and_cancel(user: User, pages, status, act
     assert action in selector.options
     execute = next(iter(user.find(kind=ui.button, content='执行批量操作').elements))
     assert not execute.enabled
-    click(user, '全选当前列表')
+    click(user, '全选列表所有条目')
     with user:
         selector.set_value(action)
     assert execute.enabled
@@ -165,7 +165,7 @@ async def test_failed_type_filter_batch_restore_and_concurrent_move(user: User, 
         next(iter(user.find('queue-type-filter').elements)).set_value('reply')
     await user.should_see(f'queue-select-{selected}')
     await user.should_not_see(f'queue-select-{post}')
-    click(user, '全选当前列表')
+    click(user, '全选列表所有条目')
     click(user, '执行批量操作')
     await user.should_see('确认执行')
     edit('UPDATE review_queue SET account_id=2 WHERE id=?', (moved,))
@@ -208,14 +208,12 @@ async def test_clear_filtered_tasks_keeps_other_types_new_rows_and_changed_tasks
     first, changed = task('failed', tid=target()), task('failed', tid=target())
     post, other = task('failed'), task('failed', account=2, tid=target())
     await user.open('/queue?status=failed&account=1&action_type=reply')
-    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get('label') == '操作范围')
-    with user:
-        scope.set_value('filtered')
-    click(user, '批量删除')
-    await user.should_see('全部删除')
+    click(user, '全选列表所有条目')
+    batch_action(user, 'delete').click()
+    await user.should_see('删除选中')
     new = task('failed', tid=target())
     edit("UPDATE review_queue SET status='sent' WHERE id=?", (changed,))
-    click(user, '全部删除')
+    click(user, '删除选中')
     await user.should_see('已删除 1 条，保留 1 条', retries=30)
     with get_conn() as conn:
         remaining = {r[0] for r in conn.execute('SELECT id FROM review_queue')}
@@ -226,10 +224,9 @@ async def test_recheck_filtered_tasks_respects_account_and_type(user: User, page
     selected = task('skipped', tid=target())
     post, other = task('skipped'), task('skipped', account=2, tid=target())
     await user.open('/queue?status=skipped&account=1&action_type=reply')
-    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get('label') == '操作范围')
+    click(user, '全选列表所有条目')
     operation = next(e for e in user.find(kind=ui.select).elements if e._props.get('label') == '批量操作')
     with user:
-        scope.set_value('filtered')
         operation.set_value('recheck')
     click(user, '执行批量操作')
     await user.should_see('确认执行')
@@ -245,3 +242,20 @@ def test_force_selected_replies_does_not_duplicate_active_task(pages):
     result = queue_actions.apply_selected(Jobs(), 'force', records(first, second))
     assert len(result['done']) == 1 and sum(result['reasons'].values()) == 1
     assert sorted([row(first)['status'], row(second)['status']]) == ['expired','pending']
+
+
+async def test_error_filter_ui_selection_and_reload(user: User, pages):
+    selected, other = task('failed'), task('failed')
+    edit("UPDATE review_queue SET error_msg='old wrapper (385)' WHERE id=?", (selected,))
+    edit("UPDATE review_queue SET error_msg='old wrapper (501)' WHERE id=?", (other,))
+    await user.open('/queue?status=failed&error_kind=target')
+    await user.should_see(f'queue-select-{selected}')
+    await user.should_not_see(f'queue-select-{other}')
+    click(user, '全选列表所有条目')
+    await user.should_see('已选 1 条')
+    selector = next(e for e in user.find(kind=ui.select).elements if e._props.get('label') == '错误类型')
+    with user:
+        selector.set_value('quota')
+    await user.should_see(f'queue-select-{other}')
+    await user.should_not_see(f'queue-select-{selected}')
+    await user.should_see('已选 0 条')

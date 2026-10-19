@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 from .i18n import describe_schedule, Labels, t as _tr
+from .admin_batch import AdminBatch
 
 from nicegui import run, ui
 
@@ -709,6 +710,7 @@ def _accounts_panel():
             if n_deleted:
                 ui.label(_tr('另有 {p0} 个已删除的账号：只保留着发送记录和去重账本（防止重复回复、作者冷却照常算），不会再被用来抓取或发送；重新添加同名账号会接上原来的记录。', p0=n_deleted)).classes("text-xs text-gray-400")
             browser_ready = browser_login.service.installed()
+            batch = AdminBatch('accounts', rows, render) if rows else None
             for a in rows:
                 cred_ok, cred_why = factory.credential_status(a)
                 acc_creds = parse_credentials(a["credentials"])
@@ -718,6 +720,7 @@ def _accounts_panel():
                     acc_creds.get("auth_token") and acc_creds.get("ct0"))
                 with ui.card().classes("w-full"):
                     with ui.row().classes("items-center gap-2"):
+                        batch.checkbox(a['id'])
                         ui.label(f"@{a['handle']}").classes("font-semibold")
                         if a["display_name"]:
                             ui.label(a["display_name"]).classes("text-xs text-gray-400")

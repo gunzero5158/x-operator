@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 import tomllib
@@ -23,6 +24,12 @@ log = logging.getLogger("x_operator")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _thumbnail_slots = asyncio.Semaphore(2)
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    from .version import __version__
+    return {"status": "ok", "version": __version__, "repository": str(PROJECT_ROOT), "pid": os.getpid()}
 
 
 @app.get("/media-thumbnail/{rel:path}", include_in_schema=False)

@@ -23,6 +23,7 @@ from . import budget
 from .langdetect import LANG_LABEL  # noqa: F401  规则页等处仍从 search 取
 from .langdetect import lang_allowed, lang_name, rule_langs_normalized, x_search_code
 from .matcher import MatchEngine
+from .search_lifecycle import active_rule, check_rule, SearchCancelled
 from .monitor import (FILTER_REASONS, _log_read, _row_int,
                       precheck, read_is_billed, store_target)
 from .readpool import ReadPool
@@ -190,6 +191,7 @@ class SearchJob:
             if progress:
                 progress(frac, text)
 
+        check_rule(rule["id"])
         feed = is_feed_rule(rule)
         if feed:
             account = self.feed_account(rule, account)
@@ -247,6 +249,7 @@ class SearchJob:
                                           start_time=start_time, max_results=max_results,
                                           min_views=min_views, scan_limit=scan_limit, max_views=max_views)
             _log_read(account["id"], client.api_kind, "search_recent", result.reads_consumed)
+        check_rule(rule["id"])
         tweets = result.tweets
         if views_on and notes is not None and result.scanned:
             dropped = []
@@ -319,6 +322,7 @@ class SearchJob:
 
         scored: list[ScoredCandidate] = []
         if to_score:
+            check_rule(rule["id"])
             _p(0.4, f"规则「{rule['name']}」：{len(to_score)} 条送去打分（"
                     + (f"LLM，最多等 {timeout_for('relevance')} 秒" if self.llm.configured else "关键词粗估")
                     + f"），预检挡下 {len(pre)} 条…")
@@ -339,6 +343,7 @@ class SearchJob:
             for t in to_score:
                 s = score_map.get(t.tweet_id, {"score": 0, "reason": "LLM 没有返回这条的打分"})
                 scored.append(ScoredCandidate(t, coerce_score(s.get("score", 0)), str(s.get("reason", "") or "")))
+        check_rule(rule["id"])
         out = pre + scored
         out.sort(key=lambda c: int(c.tweet.tweet_id) if c.tweet.tweet_id.isdigit() else 0)
         _p(0.6, f"规则「{rule['name']}」：打分完成，正在生成回复草稿…")
@@ -380,11 +385,14 @@ class SearchJob:
                 if account is None:
                     stats.notes.insert(0, f"⏸ 停在规则「{rule['name']}」之前：{why}。剩下 {len(rules) - i} 条规则下次运行再跑")
                     break
-            stats.rules_run += 1
-            min_scores.append(int(rule["min_llm_score"]))
+            token = active_rule.set(rule["id"])
             try:
+                check_rule()
+                stats.rules_run += 1
+                min_scores.append(int(rule["min_llm_score"]))
                 while True:
                     pool.wait_gap()
+                    check_rule()
                     pool.note_request(account)
                     try:
                         scored = self.run_rule(rule, account, notes=stats.notes,
@@ -399,9 +407,11 @@ class SearchJob:
                         if nxt is None:
                             raise XClientError(f"换不到号了：{why}。这条规则下次运行再抓") from e
                         account = nxt
+                check_rule()
                 stats.tweets_fetched += len(scored)
                 newest_id = None
                 for k, cand in enumerate(scored):
+                    check_rule()
                     _p(i, 0.6 + 0.4 * k / max(1, len(scored)), f"规则「{rule['name']}」：处理第 {k + 1}/{len(scored)} 条…")
                     t = cand.tweet
                     if t.tweet_id.isdigit() and (newest_id is None or int(t.tweet_id) > int(newest_id)):
@@ -424,6 +434,7 @@ class SearchJob:
                         continue
                     with get_conn() as conn:
                         target = conn.execute("SELECT * FROM target_tweets WHERE id=?", (tid,)).fetchone()
+                    check_rule()
                     outcome = self.match.run(target, account, cfg=rule)
                     if outcome.status == "queued":
                         stats.queued += 1
@@ -437,6 +448,9 @@ class SearchJob:
                     else:
                         conn.execute("UPDATE search_rules SET last_run_at=? WHERE id=?", (utcnow_iso(), rule["id"]))
                     conn.commit()
+            except SearchCancelled:
+                from ..ui.i18n import t
+                stats.notes.append(t("规则「{name}」已删除，已停止本轮处理", name=rule["name"]))
             except (XClientError, ValueError) as e:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{e}")
@@ -445,6 +459,8 @@ class SearchJob:
                 stats.errors += 1
                 stats.notes.insert(0, f"❌ 规则「{rule['name']}」出错：{type(e).__name__}: {e}")
                 _log_read(account["id"], _kind(account), "search_recent", 0, success=False, error=str(e))
+            finally:
+                active_rule.reset(token)
 
         if stats.tweets_fetched and stats.queued == 0 and stats.no_match == 0 and below:
             tip = f"这次抓到的推文全部未达标（相关性打分低于达标分 {min(min_scores)}）。"

@@ -22,6 +22,7 @@ from ..adapters.base import (AuthExpired, DuplicateContent, MediaError, NetworkE
                              PostResult, RateLimited, TargetNotFound, XClientError)
 from ..db.database import get_conn, parse_iso, to_iso, utcnow_iso
 from . import media, textlimit
+from .error_types import error_type
 from .compliance import ComplianceGuard, GuardCode, expire_queue_items, next_allowed_key
 
 log = logging.getLogger("x_operator.dispatcher")
@@ -91,7 +92,16 @@ class Dispatcher:
         if not lock.acquire(blocking=False):
             return False, "该账号正有另一次发送在进行中，本轮跳过"
         try:
-            return self._dispatch_account_locked(account, waiting)
+            # Bound both network attempts and work per account. Only target-specific
+            # failures may advance within this tick; account errors stop immediately.
+            notes = []
+            for _ in range(5):
+                ok, why = self._dispatch_account_locked(account, waiting)
+                if why:
+                    notes.append(why)
+                if not why.startswith("[target-unavailable]"):
+                    return ok, "；".join(n.removeprefix("[target-unavailable]") for n in notes)
+            return False, "；".join(n.removeprefix("[target-unavailable]") for n in notes)
         finally:
             lock.release()
 
@@ -153,7 +163,8 @@ class Dispatcher:
             row = conn.execute("SELECT status, error_msg FROM review_queue WHERE id=?", (item["id"],)).fetchone()
         if row["status"] == "approved":
             return False, f"条目 #{item['id']} 未发出、已回置待发：{row['error_msg'] or '稍后重试'}"
-        return False, f"条目 #{item['id']} 发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
+        prefix = "[target-unavailable]" if item["action_type"] == "reply" and row["status"] == "failed" and error_type(row["error_msg"]) == "target" else ""
+        return False, prefix + f"条目 #{item['id']} 发送失败（{row['status']}）：{row['error_msg'] or '未知错误'}"
 
     def send_now(self, item_id: int, *, force_expired: bool = False,
                  expected_account_id: int | None = None) -> tuple[bool, str]:

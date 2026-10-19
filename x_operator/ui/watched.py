@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from .i18n import Labels, t as _tr
+from .admin_batch import AdminBatch
 
 from nicegui import run, ui
 
@@ -101,11 +102,13 @@ def register(jobs) -> None:
                     if not rows:
                         ui.label(_tr('暂无监控推主')).classes("text-gray-400")
                         return
+                    batch = AdminBatch('watched', rows, render)
                     for u in rows:
                         with ui.card().classes("w-full"):
                             with ui.row().classes("items-center justify-between w-full"):
                                 with ui.column().classes("gap-0"):
                                     with ui.row().classes("items-center gap-2"):
+                                        batch.checkbox(u['id'])
                                         ui.label(f"@{u['handle']}").classes("font-semibold")
                                         if u["include_replies"]:
                                             tag(_tr('含回复'), "metric", _tr('这个推主回复别人的推文也抓'))

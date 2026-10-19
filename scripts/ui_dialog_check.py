@@ -206,7 +206,7 @@ async def test_queue_skipped_recheck(user: User):
     status_sel = [e for e in user.find(kind=ui.select).elements if "skipped" in e.options][0]   # 顶部状态筛选（没有 label）
     UserInteraction(user, {status_sel}, None).trigger("update:modelValue", {"value": list(status_sel.options).index("skipped")})
     await user.should_see("作者冷却期内")
-    await user.should_see("操作范围")
+    await user.should_see("批量操作")
     _click_button(user, "重新判断")
     await user.should_see("已放回待审核")
     with get_conn() as conn:
@@ -682,8 +682,7 @@ async def test_queue_account_filter_transfer_and_delete(user: User):
     await user.should_see("@small1 当前「凭据失效」，名下 3 条未发送的条目发不出去")
     await user.should_see("af_f")
     await user.should_see("af_a")
-    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "操作范围")
-    scope.set_value("filtered")
+    _click_button(user, "全选列表所有条目")
     operation = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "批量操作")
     operation.set_value("transfer")
     _click_button(user, "执行批量操作")
@@ -703,11 +702,12 @@ async def test_queue_account_filter_transfer_and_delete(user: User):
                   "VALUES (?,'reply',1,1,'af_del','pending',?)", (aid["small1"], utcnow_iso())); c.commit()
     await user.open(f"/queue?status=pending&account={aid['small1']}")
     await user.should_see("af_del")
-    scope = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "操作范围")
-    scope.set_value("filtered")
-    _click_button(user, "批量删除")
-    await user.should_see("删除@small1 的「待审核 · 全部类型」全部 1 条条目？")
-    _click_button(user, "全部删除")
+    _click_button(user, "全选列表所有条目")
+    operation = next(e for e in user.find(kind=ui.select).elements if e._props.get("label") == "批量操作")
+    operation.set_value("delete")
+    _click_button(user, "执行批量操作")
+    await user.should_see("删除选中的 1 条任务？")
+    _click_button(user, "删除选中")
     await user.should_see("已删除 1 条")
     with get_conn() as c:
         left = {r["final_text"] for r in c.execute("SELECT final_text FROM review_queue WHERE final_text LIKE 'af_%'")}
@@ -947,6 +947,8 @@ async def test_cookie_account_browser_setup_preserves_credentials(user: User, mo
         password = next(e for e in user.find(kind=ui.input).elements if e._props.get("label") == "登录密码" and _in_dialog(e))
         password.set_value("mock-password")
         _click_button(user, "保存并登录")
+        # "已保存" also occurs in account badges; wait for this save dialog to close.
+        await user.should_not_see("保存并登录")
         await user.should_see("已保存")
         assert requested == [aid]
         with get_conn() as conn:
