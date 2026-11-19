@@ -1230,5 +1230,7 @@
   "错误类型": "Error type",
   "移除这些搜索规则并停止后续处理；已抓取记录和已生成任务会保留。已发出的网络请求无法撤回。此操作不可撤销。": "Remove these search rules and stop further processing. Existing fetched records and generated tasks are retained. Requests already sent cannot be recalled. This cannot be undone.",
   "规则「{name}」已删除，已停止本轮处理": "Rule “{name}” was deleted; stopped this run.",
-  "阿拉伯语": "Arabic"
+  "阿拉伯语": "Arabic",
+  "模拟模式：不会真的发推": "Mock mode: nothing is posted",
+  "启动时设置了测试用的环境变量 X_OPERATOR_MOCK=1：所有「已发送」都是假的，没有任何内容发到 X。去掉这个环境变量后重启即可恢复正常": "The test-only environment variable X_OPERATOR_MOCK=1 was set at startup: every \"sent\" status is simulated and nothing reaches X. Remove the variable and restart to return to normal."
 }

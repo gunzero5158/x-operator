@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
@@ -18,6 +19,8 @@ from .. import config
 from ..core.langdetect import material_lang_tiers, rule_langs_normalized
 from ..db.database import get_conn, utcnow_iso
 from . import prompts
+
+log = logging.getLogger("x_operator.llm")
 
 
 class LLMError(Exception):
@@ -230,7 +233,7 @@ class LLMClient:
                 )
                 conn.commit()
         except Exception:
-            pass
+            log.warning("LLM 用量记录写入失败（仪表盘的用量统计会缺这一条）", exc_info=True)
 
     def ping(self) -> str:
         self.chat_json("ping", [{"role": "user", "content": "只回复 JSON：{\"ok\":true}"}],

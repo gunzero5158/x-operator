@@ -8,6 +8,7 @@ from .i18n import Labels, t as _tr, localized_props
 
 from nicegui import run, ui
 
+from ..adapters.factory import _testing_mock
 from ..db.database import get_conn
 from ..llm.client import timeout_for
 from .disclaimer import disclaimer_footer
@@ -71,6 +72,9 @@ def shell(active: str):
             ui.icon("schedule").classes("text-base")
             ui.label(display_tz_name()) \
                 .tooltip(_tr('页面上所有时间按这个时区显示，可在「设置 → 自动运行」里改；不影响账号活跃时段 / 定时计划的判断'))
+            if _testing_mock():
+                ui.badge(_tr('模拟模式：不会真的发推'), color=None).classes("bg-red-600 text-white") \
+                    .tooltip(_tr('启动时设置了测试用的环境变量 X_OPERATOR_MOCK=1：所有「已发送」都是假的，没有任何内容发到 X。去掉这个环境变量后重启即可恢复正常'))
             ac = _alert_count()
             if ac:
                 ui.badge(_tr('⚠ {p0} 账号凭据失效', p0=ac), color=None).classes("bg-red-600 text-white")

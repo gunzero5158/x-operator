@@ -54,6 +54,18 @@ def load_toml() -> dict:
     return {}
 
 
+def check_listen_host(host: str, allow_remote: bool) -> None:
+    """页面没有登录保护：监听地址不是本机时拒绝启动，除非 settings.toml 的 [app] 里明确写了 allow_remote = true。"""
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return
+    if not allow_remote:
+        raise SystemExit(
+            f"拒绝启动：config/settings.toml 里的 host = \"{host}\" 不是本机地址。页面没有登录保护，"
+            "同一网络里的任何人都能看到账号凭据并操作发送。请改回 host = \"127.0.0.1\"；"
+            "确实要对外监听，就在 [app] 里加一行 allow_remote = true 再启动。")
+    log.warning("正在监听 %s：页面没有登录保护，同一网络里的任何人都能看到账号凭据并操作发送！", host)
+
+
 def main() -> None:
     conf = load_toml()
     app_conf = conf.get("app", {})
@@ -64,6 +76,7 @@ def main() -> None:
     port = int(app_conf.get("port", 8080))
     # 默认只监听本机：页面没有登录保护，账号密码/Cookie 都在设置页明文可见，绝不能暴露到局域网
     host = str(app_conf.get("host", "127.0.0.1"))
+    check_listen_host(host, allow_remote=app_conf.get("allow_remote") is True)
 
     db_path = data_dir / "x_operator.db"
     init_db(db_path, setting_overrides=conf.get("defaults") or {})
@@ -93,8 +106,6 @@ def main() -> None:
     app.on_shutdown(lambda: scheduler.shutdown(wait=False))
     app.on_shutdown(browser_login.shutdown)
 
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        log.warning("正在监听 %s：页面没有登录保护，同一网络里的任何人都能看到账号凭据并操作发送！", host)
     ui.run(host=host, port=port, title="x-operator", show=False, reload=False,
            storage_secret="x-operator-mvp")
 
