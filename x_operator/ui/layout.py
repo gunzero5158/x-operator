@@ -301,7 +301,7 @@ def detail_text(title: str, text: str, *, warning: bool = False):
     summary = summary[:64] + ("…" if len(summary) > 64 else "")
     with ui.expansion(f"{title} · {summary}", icon="info_outline" if warning else "notes").classes(
             "xo-detail w-full" + (" xo-detail-warning" if warning else "")) as detail:
-        ui.label(text).classes("xo-prose whitespace-pre-wrap")
+        ui.label(text).classes("xo-prose whitespace-pre-wrap").props("dir=auto").style("text-align: start; width: 100%")
     return detail
 
 
@@ -309,7 +309,7 @@ def preview_text(text: str):
     """长正文先展示四行，可随时展开原文；短正文不增加按钮。"""
     text = text or ""
     with ui.column().classes("xo-preview w-full gap-1") as box:
-        label = ui.label(text).classes("xo-prose whitespace-pre-wrap")
+        label = ui.label(text).classes("xo-prose whitespace-pre-wrap").props("dir=auto").style("text-align: start; width: 100%")
         if len(text) > 180 or text.count("\n") > 3:
             label.classes("xo-preview-clamped")
 
@@ -328,8 +328,8 @@ def fmt_views(n: int | None) -> str:
     """观看量的易读写法：1234 → 1234；12345 → 1.2万；1234567 → 123.5万。"""
     if n is None:
         return "—"
-    if current_language() == "en":
-        for size, unit in ((1_000_000, "M"), (1_000, "K")):
+    if current_language() in ("en", "ru"):
+        for size, unit in (((1_000_000, " млн"), (1_000, " тыс.")) if current_language() == "ru" else ((1_000_000, "M"), (1_000, "K"))):
             if n >= size:
                 return f"{n / size:.1f}".removesuffix(".0") + unit
         return str(n)

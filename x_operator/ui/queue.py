@@ -904,7 +904,7 @@ def _card(it, refresh, delete_cb, swap_cb, verify_cb, attach_cb, shorten_cb, dir
         editable = it["status"] == "pending"
         ta = None
         if editable:
-            ta = ui.textarea(label=_tr('待发布文案'), value=it["final_text"]).classes("w-full").props("outlined autogrow")
+            ta = ui.textarea(label=_tr('待发布文案'), value=it["final_text"]).classes("w-full").props("outlined autogrow input-class=xo-multilingual-input")
         else:
             ui.label(_tr('发布文案')).classes('text-xs text-gray-500')
             preview_text(it["final_text"] or '')

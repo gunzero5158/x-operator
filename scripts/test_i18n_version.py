@@ -45,7 +45,7 @@ def pages(tmp_path):
         module.register(jobs)
 
 
-@pytest.mark.parametrize("language", ["zh-CN", "zh-Hant", "en", "ja"])
+@pytest.mark.parametrize("language", ["zh-CN", "zh-Hant", "en", "ja", "ru"])
 async def test_all_pages_render(user: User, pages, language):
     await user.open("/")
     with user:
@@ -56,10 +56,10 @@ async def test_all_pages_render(user: User, pages, language):
         await user.should_see(t("免责声明", _language=language))
         with user:
             assert current_language() == language
-            assert ui.context.client.page.language == {"en": "en-US", "ja": "ja", "zh-CN": "zh-CN", "zh-Hant": "zh-TW"}[language]
+            assert ui.context.client.page.language == {"en": "en-US", "ja": "ja", "zh-CN": "zh-CN", "zh-Hant": "zh-TW", "ru": "ru"}[language]
 
 
-@pytest.mark.parametrize("language", ["en", "ja", "zh-Hant"])
+@pytest.mark.parametrize("language", ["en", "ja", "zh-Hant", "ru"])
 async def test_material_form_keeps_user_content_and_option_keys(user: User, pages, language):
     await user.open("/")
     with user:
@@ -104,7 +104,7 @@ async def test_language_switch_confirm_and_persistence(user: User, pages):
 def test_catalogs_cover_explicit_messages_and_preserve_placeholders():
     def fields(text):
         return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
-    for language in ("en", "ja", "zh-Hant"):
+    for language in ("en", "ja", "zh-Hant", "ru"):
         messages = catalog(language)
         assert len(messages) > 1000
         for source, translation in messages.items():
@@ -217,7 +217,7 @@ def test_importing_ui_does_not_start_script_mode():
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("language", ["en", "ja", "zh-Hant"])
+@pytest.mark.parametrize("language", ["en", "ja", "zh-Hant", "ru"])
 async def test_credentials_and_table_keep_data_fields(user: User, pages, language):
     with get_conn() as conn:
         conn.execute("INSERT INTO action_log(api_kind,endpoint,error,success) VALUES ('x_mock','SMOKE-ONLY','original error',0)")
@@ -274,3 +274,16 @@ def test_version_command_changes_only_once_per_release(tmp_path, monkeypatch):
     assert '"1.3.0"' in version.read_text()
     release_version.main()
     assert '"1.3.0"' in version.read_text()
+
+async def test_russian_switch_persists(user: User, pages):
+    await user.open('/materials')
+    user.find(kind=ui.button, content='简体中文').click()
+    user.find('language-ru').click()
+    await user.should_see('切换界面语言')
+    user.find(kind=ui.button, content='切换').click()
+    await user.should_see(t('素材库', _language='ru'))
+    await user.open('/settings')
+    with user:
+        assert current_language() == 'ru'
+        assert app.storage.user['ui_language'] == 'ru'
+        assert ui.context.client.page.language == 'ru'

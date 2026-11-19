@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 ZH_HANS, ZH_HANT, ZH_ANY = "zh-Hans", "zh-Hant", "zh"
 
 # 可选的语言码 → 中文名（规则页 / 素材页 / 定时发帖 / AI 生成素材的下拉都用它）
 LANG_LABEL = {"ja": "日语", "en": "英语", ZH_HANS: "简体中文", ZH_HANT: "繁体中文", "ko": "韩语", "es": "西班牙语",
-              "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
+              "vi": "越南语", "ru": "俄语", "ar": "阿拉伯语", "fr": "法语", "de": "德语", "pt": "葡萄牙语", "id": "印尼语", "th": "泰语"}
 # 只用于显示、不能手选的
 _EXTRA_NAME = {ZH_ANY: "中文（简繁未定）", "und": "未知", "": "未知"}
 
@@ -82,7 +83,7 @@ def zh_script(text: str) -> str:
 def detect(text: str) -> str:
     """返回语言码（ja/en/zh-Hans/zh-Hant/ko/th/es/fr/de/pt/id），判不出来返回 ""。
     中文看不出简繁时按简体（界面会提示可以手选繁体）。"""
-    s = _RE_NOISE.sub(" ", text or "")
+    s = unicodedata.normalize("NFC", _RE_NOISE.sub(" ", text or ""))
     if not s.strip():
         return ""
     kana = len(_RE_KANA.findall(s))
@@ -102,6 +103,16 @@ def detect(text: str) -> str:
             return "th"
         # 只有汉字没有假名：中文，再分简繁。（日文全汉字短句会误判成中文，属于可接受的手选托底场景）
         return zh_script(s) or ZH_HANS
+
+    if any("\u0620" <= ch <= "\u064a" and ch.isalpha() for ch in s):
+        return "ar"
+
+    # Russian alphabet; exclude distinctive Ukrainian/Belarusian letters.
+    if re.search(r"[А-Яа-яЁё]", s) and not re.search(r"[ІіЇїЄєҐґЎў]", s):
+        return "ru"
+
+    if re.search(r"[ĂăĐđƠơƯưẠ-ỹ]", s):
+        return "vi"
 
     if not latin:
         return ""  # 纯表情 / 数字 / 符号

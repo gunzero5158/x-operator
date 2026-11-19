@@ -246,7 +246,7 @@ def register(jobs) -> None:
             lang_opts = {AUTO_LANG: _tr('自动判断（按正文内容）'), **LANG_LABEL}
             lang_init = (m["lang"] if m and m["lang"] in LANG_LABEL else AUTO_LANG)   # 旧数据的 zh（简繁未定）按自动判断重新识别
             lang = ui.select(lang_opts, value=lang_init, label=_tr('语言')).classes("w-full").props("outlined")
-            text = ui.textarea(_tr('正文'), value=m["text"] if m else "").classes("w-full").props("outlined autogrow")
+            text = ui.textarea(_tr('正文'), value=m["text"] if m else "").classes("w-full").props("outlined autogrow input-class=xo-multilingual-input")
             lang_hint = ui.label().classes("text-xs text-gray-400 -mt-2 mb-1")
 
             def refresh_lang_hint():
@@ -293,7 +293,7 @@ def register(jobs) -> None:
                 lang = ui.select(LANG_LABEL, value="ja", label=_tr('语言')).classes("flex-1").props("outlined")
                 count = ui.number(_tr('生成条数'), value=5, min=1, max=20, step=1).classes("w-32").props("outlined")
             hint(_tr('类型决定口吻：回复=接着别人的话说；发帖=像账号主人日常发帖。条数推荐 5~10，一次太多会趋同。'))
-            topic = ui.textarea(_tr('主题 / 要传达的信息'), value="").classes("w-full").props("outlined autogrow")
+            topic = ui.textarea(_tr('主题 / 要传达的信息'), value="").classes("w-full").props("outlined autogrow input-class=xo-multilingual-input")
             ui.label(_tr('例：我们是面向独立开发者的 XX 工具，比同类产品便宜、上手快；主打省钱和省事。')).classes("text-xs text-gray-400 -mt-2 mb-1")
             style = ui.input(_tr('风格 / 语气'), value="").classes("w-full").props("outlined")
             ui.label(_tr('例：像同行随口聊天，不像客服；简短；可以带一点自嘲。留空=自然口语。')).classes("text-xs text-gray-400 -mt-2 mb-1")
@@ -345,7 +345,7 @@ def _material_preview(items: list[dict], kind: str, lang: str, task) -> None:
             with ui.row().classes("w-full items-start gap-2 no-wrap"):
                 chosen[i] = ui.checkbox(_tr('入库'), value=True)
                 with ui.column().classes("flex-1 gap-0"):
-                    editors[i] = ui.textarea(value=item["text"]).classes("w-full").props("outlined autogrow dense")
+                    editors[i] = ui.textarea(value=item["text"]).classes("w-full").props("outlined autogrow input-class=xo-multilingual-input dense")
                     editors[i].on_value_change(lambda e, i=i: items[i].__setitem__("text", e.value))
                     ui.label(_tr('场景：') + (item.get("scenario_tags") or "")).classes("text-xs text-slate-500")
         status_sel = ui.select({"active": _tr('直接启用'), "draft": _tr('先存为草稿')}, value="active",

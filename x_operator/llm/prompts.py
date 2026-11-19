@@ -142,7 +142,7 @@ RULE_GEN_SYSTEM = """你是 X（推特）搜索专家，帮运营者把「想找
 要求：
 1. keywords 是「命中任意一个即可」的词表，8~20 个，覆盖目标人群会用的各种说法、俚语、缩写、多语言写法；
    每个词 1~4 个单词或 2~8 个汉字/假名；不要写 OR、括号、引号、lang: 等语法。
-2. langs 从 ja/en/zh-Hans/zh-Hant/ko/es/fr/de/pt/id/th 里选，按目标人群实际使用的语言给，通常 1~3 个。
+2. langs 从 ja/en/zh-Hans/zh-Hant/ko/es/fr/de/pt/id/th/ar/ru/vi 里选，按目标人群实际使用的语言给，通常 1~3 个。
    中文分简繁：zh-Hans = 简体中文（中国大陆、新加坡等），zh-Hant = 繁体中文（台湾、香港、澳门等）；两边都要就两个都给。
 3. semantic_criteria 用两三句话写清「保留什么」「排除什么」，避免抽象词。
 4. 只输出 JSON。"""

@@ -203,7 +203,7 @@ def register(jobs) -> None:
             with ai_box:
                 write_lang = ui.select(_write_langs(), value=(sp["pool_lang"] if sp and sp["pool_lang"] in _write_langs() else "ja"),
                                        label=_tr('推文语言')).classes("w-60").props("outlined")
-                brief = ui.textarea(_tr('主题要求'), value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow")
+                brief = ui.textarea(_tr('主题要求'), value=sp["ai_brief"] if sp else "").classes("w-full").props("outlined autogrow input-class=xo-multilingual-input")
                 hint(HINTS["brief"], after_row=True)   # ai_box 是 gap-1 的紧凑列，负边距会压到文本框上
                 template_controls(brief)
                 media_mode = ui.select(MEDIA_MODE_LABEL, value=(sp["media_mode"] if sp and sp["media_mode"] in MEDIA_MODE_LABEL else "fixed"),

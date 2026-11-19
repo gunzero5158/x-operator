@@ -10,7 +10,7 @@ from pathlib import Path
 from nicegui import app, ui
 from nicegui.slot import Slot
 
-LANGUAGES = {"zh-CN": "简体中文", "zh-Hant": "繁體中文", "en": "English", "ja": "日本語"}
+LANGUAGES = {"zh-CN": "简体中文", "zh-Hant": "繁體中文", "en": "English", "ja": "日本語", "ru": "Русский"}
 DEFAULT_LANGUAGE = "zh-CN"
 
 
@@ -46,7 +46,7 @@ def detect_language(accept_language: str) -> str:
             if "hans" in base:
                 return "zh-CN"
             return "zh-Hant" if any(region in base for region in ("tw", "hk", "mo")) else "zh-CN"
-        language = {"en": "en", "ja": "ja"}.get(subtags[0])
+        language = {"en": "en", "ja": "ja", "ru": "ru"}.get(subtags[0])
         if language:
             return language
     return DEFAULT_LANGUAGE
@@ -143,7 +143,7 @@ def initialize_language() -> None:
     ui.add_head_html(f'<meta name="x-operator-language" content="{language}">')
     # Page definitions are shared; copy before setting the per-client Quasar/HTML locale.
     page = copy(ui.context.client.page)
-    page.language = {"zh-CN": "zh-CN", "zh-Hant": "zh-TW", "en": "en-US", "ja": "ja"}[language]
+    page.language = {"zh-CN": "zh-CN", "zh-Hant": "zh-TW", "en": "en-US", "ja": "ja", "ru": "ru"}[language]
     ui.context.client.page = page
 
 
