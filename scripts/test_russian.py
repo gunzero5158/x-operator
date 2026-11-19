@@ -16,7 +16,15 @@ def test_russian_content_pipeline():
     assert '俄语' in lang_for_llm('ru')
     rule = {'keyword_query': 'технологии', 'lang': 'ru'}
     assert 'lang:ru' in effective_query(rule, access_type='official')
-    assert 'lang:ru' not in effective_query(rule, access_type='unofficial')
+    rule = {'keyword_query': 'Claude, Клод', 'lang': 'ru'}
+    assert effective_query(rule, access_type='unofficial') == '(Claude OR Клод) lang:ru -is:retweet'
     assert '俄语' in prompts.write_user('Привет', 'ru', '', [])
     assert '俄语' in prompts.post_write_user('Новости', 'ru', [], [])
     assert '俄语' in prompts.material_gen_user('reply', 'ru', 'Новости', '', '', [], 1)
+
+
+def test_cookie_search_only_adds_one_x_language_and_preserves_explicit_queries():
+    assert effective_query({'keyword_query': 'Claude', 'lang': 'ru,ja'}, access_type='unofficial') == 'Claude -is:retweet'
+    assert effective_query({'keyword_query': 'Claude', 'lang': 'zh-Hans,zh-Hant'}, access_type='unofficial') == 'Claude lang:zh -is:retweet'
+    assert effective_query({'keyword_query': 'Claude lang:ru', 'lang': 'ru'}, access_type='unofficial') == 'Claude lang:ru -is:retweet'
+    assert effective_query({'keyword_query': 'Claude', 'lang': ''}, access_type='unofficial') == 'Claude -is:retweet'

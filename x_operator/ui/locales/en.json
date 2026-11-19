@@ -594,7 +594,7 @@
   " 的时间线，不用关键词": "'s timeline; no keywords used",
   "关键词：": "Keywords: ",
   "实际查询（Cookie）：": "Actual query (Cookie): ",
-  "Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。": "Cookie searches collect by keyword first, then filter languages locally, distinguishing simplified and traditional Chinese.",
+  "Cookie 搜索选一种语言时直接在 X 上按语言搜。选多种语言时在本地筛选。简体和繁体在 X 上都按中文搜索，抓取后再区分。": "Cookie search applies a single language filter on X. Multiple languages are filtered locally. X searches for both Chinese variants together, and the app distinguishes them after fetching.",
   "实际查询（官方 API）：": "Actual query (official API): ",
   "创作要求：": "Writing brief: ",
   "（未填！AI 无法创作）": "(missing; AI cannot write)",

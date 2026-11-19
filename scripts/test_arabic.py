@@ -15,5 +15,5 @@ def test_arabic_detection_and_selection():
 def test_arabic_search_and_prompt():
     rule = {'keyword_query':'خدمة','lang':'ar'}
     assert 'lang:ar' in effective_query(rule, access_type='official')
-    assert 'lang:ar' not in effective_query(rule, access_type='unofficial')
+    assert effective_query(rule, access_type='unofficial') == 'خدمة lang:ar -is:retweet'
     assert '阿拉伯语' in lang_for_llm('ar')

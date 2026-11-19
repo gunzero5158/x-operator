@@ -183,7 +183,7 @@ def register(jobs) -> None:
                                 else:
                                     ui.label(_tr('关键词：') + r["keyword_query"]).classes("text-xs text-gray-600")
                                     ui.label(_tr('实际查询（Cookie）：') + effective_query(r, access_type="unofficial")).classes("xo-query text-xs font-mono")
-                                    ui.label(_tr('Cookie 搜索先按关键词抓取，再按所选语言在本地过滤；简体和繁体中文分别判断。')).classes("text-xs text-gray-400")
+                                    ui.label(_tr('Cookie 搜索选一种语言时直接在 X 上按语言搜。选多种语言时在本地筛选。简体和繁体在 X 上都按中文搜索，抓取后再区分。')).classes("text-xs text-gray-400")
                                     if config.get_bool("read_official_enabled", False):
                                         ui.label(_tr('实际查询（官方 API）：') + effective_query(r, access_type="official")).classes("xo-query text-xs font-mono")
                                 if r["reply_mode"] == "ai_write":

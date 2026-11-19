@@ -97,17 +97,20 @@ def is_feed_rule(rule) -> bool:
 
 
 def effective_query(rule: sqlite3.Row | dict, *, access_type: str = "official") -> str:
-    """按抓取通道拼查询。官方 API 自动补语言条件；Cookie 通道靠抓取后的本地语言过滤，
-    避免网页搜索对附加语言 OR 分组返回空结果。用户手写的条件保留。默认排除转推。"""
+    """按抓取通道拼查询。官方 API 支持多语言组合；Cookie 搜索只推送单个语言条件，
+    因为网页搜索不能可靠处理语言 OR 分组。保留手写条件，默认排除转推。"""
     if is_feed_rule(rule):
         return f"（{SOURCE_KIND_LABEL[rule_source_kind(rule)]}：不用关键词，读时间线后按语义条件和观看量筛）"
     q = normalize_keywords(rule["keyword_query"])
     langs = rule_langs(rule)
     if " OR " in q and not q.startswith("("):
         q = f"({q})"
-    if access_type == "official" and langs and "lang:" not in q:
+    if langs and "lang:" not in q.lower():
         codes = list(dict.fromkeys(x_search_code(x) for x in langs))   # 简繁都选时只写一个 lang:zh
-        q += " (" + " OR ".join(f"lang:{x}" for x in codes) + ")"
+        if access_type == "official":
+            q += " (" + " OR ".join(f"lang:{x}" for x in codes) + ")"
+        elif len(codes) == 1:
+            q += f" lang:{codes[0]}"
     if "is:retweet" not in q:
         q += " -is:retweet"
     return q
